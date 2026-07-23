@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.pyc
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Web3Guard state
+.web3guard/
+reports/
+exploit_sandboxes/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Scanned targets (per-run clones)
+targets/
+*.tar
+*.tar.gz
+*.zip

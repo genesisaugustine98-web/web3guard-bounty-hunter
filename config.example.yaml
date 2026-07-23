@@ -1,0 +1,141 @@
+# Web3Guard configuration example.
+#
+# Copy to config.yaml and customize. The scanner accepts JSON too.
+#
+# Schema version: 3.0.0
+# All fields are optional; missing fields fall back to defaults in
+# web3guard.scanner.DEFAULT_CONFIG.
+
+# ----- AI providers (in priority order; the scanner falls through) -----
+ai_providers:
+  - type: nim
+    name: nim-deepseek
+    base_url: https://integrate.api.nvidia.com/v1
+    api_key_env: NIM_API_KEY
+    rpm: 35
+    model: deepseek-ai/deepseek-v4-flash
+  - type: openrouter
+    name: openrouter-deepseek
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    rpm: 60
+    model: deepseek/deepseek-chat
+  - type: groq
+    name: groq-llama
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+    rpm: 30
+    model: llama-3.3-70b-versatile
+
+# ----- Model + cost ceiling -----
+model: deepseek-ai/deepseek-v4-flash
+max_cost_usd: 50.0          # hard ceiling per scan; 0 disables
+default_seed: 0             # 0 = deterministic analysis; null = varied
+
+# ----- Chunking -----
+max_chunk_chars: 6000       # tune up for very large contracts
+max_context_chars: 6000     # cross-file context size
+
+# ----- Discovery -----
+discovery_time_budget_seconds: 900
+# Engine selection is per-adapter; see `languages:` below.
+
+# ----- Exploitation -----
+enable_exploit: true
+max_exploit_attempts: 3
+fork_url:                   # optional: mainnet RPC URL for fork-based PoCs
+
+# ----- Self-awareness passes -----
+enable_self_critique: true
+use_ai_planning: true
+enable_attack_sequence_brainstorm: true
+enable_role_map: true
+enable_secret_scan: true
+enable_economic_analyzer: true
+enable_deployment_verification: false   # opt-in: needs chain RPC
+
+# ----- Incremental scanning -----
+enable_incremental_scan: false          # remember findings across runs
+
+# ----- Reports -----
+report_formats: [txt, json, sarif, md]
+
+# ----- Storage paths -----
+findings_db_path: .web3guard/findings.db
+cache_path:      .web3guard/llm_cache.db
+cost_db_path:    .web3guard/cost.db
+
+# ----- Per-language enable/disable -----
+languages:
+  solidity:    { enabled: true }
+  vyper:       { enabled: true }
+  move:        { enabled: true }
+  cairo:       { enabled: true }
+  clarity:     { enabled: true }
+  func:        { enabled: true }
+  rust-solana: { enabled: true }
+  ts-sdk:      { enabled: true }
+
+# ----- Sandbox hardening (defense in depth) -----
+sandbox:
+  max_cpu_seconds: 60
+  max_address_space_bytes: 4294967296   # 4 GiB
+  max_file_size_bytes: 104857600        # 100 MiB
+  max_open_files: 256
+  max_processes: 1                      # no fork-bombs
+  max_revert_reason_bytes: 512
+  drop_privileges_to_uid: 65534
+  force_tempdir: true
+
+# ----- Security (prompt-injection defense) -----
+security:
+  prompt_injection:
+    enabled: true
+    reject_threshold: 10
+    response_injection_check: true
+  sandbox:
+    env_allowlist:
+      - PATH
+      - HOME
+      - USER
+      - TMPDIR
+      - LANG
+      - LC_ALL
+      - WEB3GUARD_FORK_URL
+      - WEB3GUARD_LANGUAGE
+      - WEB3GUARD_PROJECT
+    env_blocked_prefixes:
+      - AWS_
+      - AZURE_
+      - GCP_
+      - GOOGLE_
+      - GITHUB_
+      - GH_
+      - GITLAB_
+      - NIM_
+      - OPENAI_
+      - ANTHROPIC_
+      - GROQ_
+      - OPENROUTER_
+      - DEEPSEEK_
+      - ALCHEMY_
+      - INFURA_
+      - QUICKNODE_
+      - ETH_
+      - BSC_
+      - POLYGON_
+      - RPC_
+      - WALLET_
+      - MNEMONIC
+      - PRIVATE_KEY
+      - SECRET_KEY
+      - API_KEY
+      - APIKEY
+      - TOKEN
+      - PASSWORD
+      - SSH_
+
+# ----- Pricing tier (program-side subscriptions) -----
+# Set the active tier; the scanner enforces the tier's limits
+# (max_targets, daily_chunk_limit, etc.) at scan time.
+tier: scale

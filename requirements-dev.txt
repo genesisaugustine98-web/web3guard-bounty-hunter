@@ -1,0 +1,12 @@
+-r requirements.txt
+
+# Web3Guard development dependencies.
+pytest>=7.4
+pytest-asyncio>=0.23
+pytest-cov>=4.1
+ruff>=0.4
+mypy>=1.10
+types-PyYAML>=6.0
+
+# Optional: discovery engines used in tests and dev.
+slither-analyzer>=0.10

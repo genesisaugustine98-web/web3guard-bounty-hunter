@@ -1,0 +1,44 @@
+;; FunC / TON test contract — INTENTIONAL VULNERABILITIES for scanner testing.
+;; Cell overflow, missing accept(), no bounce handling, missing seqno.
+
+#include "stdlib.fc";
+
+int min_tons() asm "1000000 PUSHINT";
+
+() recv_internal(int msg_value, cell in_msg, slice in_msg_body) impure {
+    ;; VULN: missing accept() — message processing will fail with
+    ;; "no gas to process" because the contract never reserves gas.
+    ;; (accept() should be called early in any state-changing function.)
+
+    slice cs = in_msg.begin_parse();
+    int flags = cs~load_uint(4);
+    if (flags & 1) {
+        ;; bounce flag set, but we never handle it
+        return ();
+    }
+
+    int op = in_msg_body~load_uint(32);
+    int query_id = in_msg_body~load_uint(64);
+
+    if (op == 0x100) {
+        ;; VULN: slice overflow — no bounds check on the slice before
+        ;; load_uint, so an attacker can craft a malformed message
+        ;; that aborts the contract (DoS).
+        int amount = in_msg_body~load_uint(120);
+        ;; ... withdrawal logic, no state update before this
+    }
+    if (op == 0x200) {
+        ;; VULN: no seqno increment — same withdrawal request can
+        ;; be replayed indefinitely.
+        ;; ... process withdrawal
+    }
+}
+
+() recv_external(slice in_msg) impure {
+    ;; VULN: external messages accepted for state-changing operations
+    ;; that should only be reachable via internal messages.
+    int op = in_msg~load_uint(32);
+    if (op == 0x100) {
+        ;; ... same withdrawal logic
+    }
+}

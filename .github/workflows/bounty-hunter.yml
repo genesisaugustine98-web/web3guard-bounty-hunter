@@ -1,0 +1,129 @@
+name: Web3Guard Bounty Hunter
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets_config:
+        description: "Targets, one per line: <git-url>|<budget> (max or number)"
+        required: true
+        type: string
+        default: |
+          https://github.com/your-target/repo-A|max
+      min_severity:
+        description: "Minimum severity to report (INFO | LOW | MEDIUM | HIGH | CRITICAL)"
+        required: false
+        type: choice
+        default: LOW
+      enable_exploit:
+        description: "Generate Foundry / Anchor / Move / Scarb / Clarinet / Blueprint PoCs"
+        required: false
+        type: boolean
+        default: true
+      enable_self_critique:
+        description: "Adversarial self-critique pass on every finding"
+        required: false
+        type: boolean
+        default: true
+      fork_url:
+        description: "Optional mainnet RPC URL for fork-based PoCs"
+        required: false
+        type: string
+        default: ""
+  schedule:
+    - cron: "0 6 * * 0"  # weekly on Sunday at 06:00 UTC
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout scanner
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Cache Foundry
+        id: cache-foundry
+        uses: actions/cache@v4
+        with:
+          path: ~/.foundry
+          key: ${{ runner.os }}-foundry-nightly
+          restore-keys: |
+            ${{ runner.os }}-foundry-
+
+      - name: Install Foundry
+        if: steps.cache-foundry.outputs.cache-hit != 'true'
+        run: |
+          curl -L https://foundry.paradigm.xyz | bash
+          ~/.foundry/bin/foundryup --install nightly
+          echo "$HOME/.foundry/bin" >> $GITHUB_PATH
+
+      - name: Verify toolchain
+        run: |
+          python --version
+          forge --version || true
+          slither --version || true
+          aderyn --version || true
+          myth --version || true
+          echidna --version || true
+          gitleaks version || true
+          semgrep --version || true
+
+      - name: Run Web3Guard
+        env:
+          NIM_API_KEY: ${{ secrets.NIM_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          set -e
+          mkdir -p .web3guard
+          printf '%s\n' "${{ github.event.inputs.targets_config }}" > .web3guard/targets.txt
+          EXTRAS=""
+          if [ -n "${{ github.event.inputs.fork_url }}" ]; then
+            EXTRAS="$EXTRAS --fork-url ${{ github.event.inputs.fork_url }}"
+          fi
+          if [ "${{ github.event.inputs.enable_exploit }}" != "true" ]; then
+            EXTRAS="$EXTRAS --no-exploit"
+          fi
+          if [ "${{ github.event.inputs.enable_self_critique }}" != "true" ]; then
+            EXTRAS="$EXTRAS --no-self-critique"
+          fi
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            echo "::group::Scanning $line"
+            python -m web3guard.cli scan "$line" \
+              --min-severity "${{ github.event.inputs.min_severity }}" \
+              $EXTRAS || echo "scan failed (continuing)"
+            echo "::endgroup::"
+          done < .web3guard/targets.txt
+
+      - name: Render dashboard
+        if: always()
+        run: |
+          python -m web3guard.cli dashboard | tee web3guard-dashboard.txt || true
+
+      - name: Upload report artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web3guard-report-${{ github.run_id }}
+          path: |
+            reports/
+            web3guard-dashboard.txt
+            .web3guard/findings.db
+            .web3guard/cost.db
+          if-no-files-found: warn

@@ -1,0 +1,32 @@
+# Web3Guard core dependencies. Tested with Python 3.11+.
+
+# OpenAI-compatible client used by every AI provider.
+openai>=1.30.0
+
+# YAML config support (optional — JSON is also accepted).
+PyYAML>=6.0
+
+# Optional: better HTTP performance. Falls back to urllib if missing.
+# httpx>=0.27
+
+# ---- Discovery engines (each is optional; the scanner auto-skips
+#      anything that is not installed.) ----
+# Install these with their own installers; the Python package is
+# not required to be present for the scanner to work, only the CLI.
+# slither   -> pip install slither-analyzer
+# aderyn    -> cargo install aderyn
+# mythril   -> pip install mythril
+# echidna   -> cargo install echidna
+# gitleaks  -> https://github.com/gitleaks/gitleaks (binary)
+# semgrep   -> pip install semgrep
+# cargo-audit -> cargo install cargo-audit
+
+# ---- Reporting ----
+# SARIF output uses the standard JSON schema; no extra dependency.
+# Markdown / HTML output uses no extra dependency.
+
+# ---- Development ----
+# pytest>=7.4
+# pytest-asyncio>=0.23
+# ruff>=0.4
+# mypy>=1.10
