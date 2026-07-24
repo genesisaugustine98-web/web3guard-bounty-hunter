@@ -1,6 +1,6 @@
 name: Web3Guard Bounty Hunter
 
-on:
+"on":
   workflow_dispatch:
     inputs:
       targets_config:
