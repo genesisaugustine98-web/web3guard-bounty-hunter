@@ -79,8 +79,9 @@ class ClarityAdapter(LanguageAdapter):
     def discover_files(self, target_path: Path) -> list[Path]:
         out: list[Path] = []
         for f in target_path.rglob("*.clar"):
-            if self.is_user_code(f):
-                out.append(f)
+            if not self.is_user_code(f.relative_to(target_path)):
+                continue
+            out.append(f)
         return sorted(out)
 
     def chunk(self, file_path: Path, max_chars: int) -> list[Chunk]:
@@ -95,7 +96,7 @@ class ClarityAdapter(LanguageAdapter):
         cur_start = 0
         cur_end = boundaries[0]
         cid = 0
-        for i, start in enumerate(boundaries):
+        for i, _start in enumerate(boundaries):
             end = boundaries[i + 1] if i + 1 < len(boundaries) else len(text)
             if end - cur_start > max_chars and cur_end > cur_start:
                 chunks.append(Chunk(file=str(file_path), chunk_id=cid,
@@ -119,7 +120,6 @@ class ClarityAdapter(LanguageAdapter):
             return ""
         snippets: list[str] = []
         used = 0
-        max_ctx = 6000
         for m in re.finditer(r"\(use-trait\s+([\w\-]+)\s+\.([\w\-]+)\.([\w\-]+)\)", content):
             snippets.append(f";; ---- Clarity trait: {m.group(1)} -> {m.group(2)}.{m.group(3)}.{m.group(4)} ----")
             used += 100

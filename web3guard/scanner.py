@@ -29,21 +29,20 @@ A CLI lives in ``web3guard.cli``.
 
 from __future__ import annotations
 
-import dataclasses
 import datetime
+import hashlib
 import json
 import logging
-import os
 import re
 import time
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 from web3guard.ai import AIClient, AIProvider, CostTracker, OpenAICompatibleProvider
-from web3guard.ai.client import AIClient as _AIClient
-from web3guard.findings_db import FindingsDB, FindingRecord
+from web3guard.findings_db import FindingRecord, FindingsDB
 from web3guard.languages import (
     LanguageAdapter,
     LanguageRegistry,
@@ -51,7 +50,7 @@ from web3guard.languages import (
     default_registry,
     detect_target_language,
 )
-from web3guard.reports import ReportBuilder, ReportFormat
+from web3guard.reports import ReportBuilder
 from web3guard.security import (
     PromptInjectionGuard,
     SandboxGuard,
@@ -66,7 +65,7 @@ LOGGER = logging.getLogger("web3guard.scanner")
 # ---------------------------------------------------------------------------
 
 
-class Severity(str, Enum):
+class Severity(StrEnum):
     CRITICAL = "CRITICAL"
     HIGH = "HIGH"
     MEDIUM = "MEDIUM"
@@ -180,6 +179,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "max_chunk_chars": 6000,
     "max_context_chars": 6000,
     "discovery_time_budget_seconds": 900,
+    "enable_discovery": True,
     "enable_exploit": True,
     "max_exploit_attempts": 3,
     "use_ai_planning": True,
@@ -270,8 +270,11 @@ class Scanner:
         self.registry = registry or default_registry
         self.workdir = workdir or Path.cwd()
         self.workdir.mkdir(parents=True, exist_ok=True)
+        findings_path = Path(self.config.get("findings_db_path", ".web3guard/findings.db"))
+        if not findings_path.is_absolute():
+            findings_path = self.workdir / findings_path
         self.findings_db = findings_db or FindingsDB(
-            Path(self.config.get("findings_db_path", ".web3guard/findings.db"))
+            findings_path
         )
         self.sandbox_guard = sandbox_guard or SandboxGuard(SandboxPolicy())
         self.injection_guard = injection_guard or PromptInjectionGuard()
@@ -288,7 +291,7 @@ class Scanner:
         path: str | Path | None = None,
         *,
         workdir: Path | None = None,
-    ) -> "Scanner":
+    ) -> Scanner:
         cfg = load_config(Path(path)) if path is not None else load_config(None)
         return cls(config=cfg, workdir=workdir)
 
@@ -341,7 +344,7 @@ class Scanner:
         matching the original scanner's CLI grammar. ``<budget>`` is
         a number (token budget per chunk) or ``"max"`` for unlimited.
         """
-        self._start_ts = datetime.datetime.utcnow().isoformat() + "Z"
+        self._start_ts = datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z")
         parsed = self._parse_targets(targets)
         result = ScanResult(
             started_at=self._start_ts,
@@ -357,7 +360,7 @@ class Scanner:
             for f in tr.findings:
                 self.findings_db.upsert(FindingRecord.from_finding(f))
             result.targets.append(tr)
-        self._end_ts = datetime.datetime.utcnow().isoformat() + "Z"
+        self._end_ts = datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z")
         result.finished_at = self._end_ts
         result.cost_summary = self.ai_client.cost_tracker().summary()
         return result
@@ -410,14 +413,17 @@ class Scanner:
         detection = detect_target_language(target_path)
         adapters = self.registry.detect_for(target_path)
         LOGGER.info("detected languages: %s; adapters: %s",
-                    [l.value for l in detection.detected],
+                    [language.value for language in detection.detected],
                     [a.language.value for a in adapters])
         # Build the result
         tr = TargetResult(
             target=target,
             language=detection.primary,
         )
-        tr.framework = detection.confidence_notes
+        tr.framework = {
+            "build_tools": detection.build_tools,
+            "confidence_notes": detection.confidence_notes,
+        }
         if not adapters:
             tr.error = "no language adapter matched the target"
             return tr
@@ -425,6 +431,12 @@ class Scanner:
         # and merge findings. In practice, multi-language repos are
         # rare; if they exist, the most relevant adapter goes first.
         primary = adapters[0]
+        if self.config.get("enable_discovery", True):
+            tr.findings.extend(
+                finding
+                for finding in self._run_discovery(target_path, target, primary.language)
+                if self._severity_at_least(finding.severity, min_severity)
+            )
         # Discover files
         files = primary.discover_files(target_path)
         tr.files_analyzed = len(files)
@@ -432,7 +444,7 @@ class Scanner:
                     primary.language.value, len(files))
         # Per-chunk analysis
         analysis_budget = max(1, budget // 1500) if budget else 0
-        chunks_to_analyze: list[tuple[Any, dict]] = []  # (chunk, ctx)
+        chunks_to_analyze: list[Any] = []
         for fp in files:
             try:
                 chunks = primary.chunk(fp, self.config.get("max_chunk_chars", 6000))
@@ -444,14 +456,14 @@ class Scanner:
                     ch.context = primary.resolve_context(fp, target_path)
                 except Exception as e:  # noqa: BLE001
                     LOGGER.warning("context resolver failed on %s: %s", fp, e)
-                chunks_to_analyze.append((ch, {"file_path": fp}))
+                chunks_to_analyze.append(ch)
                 if analysis_budget and len(chunks_to_analyze) >= analysis_budget:
                     break
             if analysis_budget and len(chunks_to_analyze) >= analysis_budget:
                 break
         tr.chunks_analyzed = len(chunks_to_analyze)
         # Run analysis per chunk
-        for ch, ctx in chunks_to_analyze:
+        for ch in chunks_to_analyze:
             finding = self._analyze_chunk(primary, ch, target_path, target)
             if finding is not None:
                 if self._severity_at_least(finding.severity, min_severity):
@@ -469,20 +481,17 @@ class Scanner:
         if target.startswith(("http://", "https://", "git@", "git://")):
             import subprocess
             import tempfile
-            tmp = Path(tempfile.mkdtemp(prefix="web3guard-target-"))
+            tmp_root = Path(tempfile.mkdtemp(prefix="web3guard-target-"))
+            clone_path = tmp_root / "repo"
             try:
                 subprocess.run(
-                    ["git", "clone", "--depth", "1", target, str(tmp)],
+                    ["git", "clone", "--depth", "1", target, str(clone_path)],
                     check=True, capture_output=True, timeout=120,
                 )
             except Exception as e:  # noqa: BLE001
                 LOGGER.error("clone failed: %s", e)
                 return None
-            # Git clones into a subdir of the target path; return that.
-            subdirs = [d for d in tmp.iterdir() if d.is_dir()]
-            if len(subdirs) == 1:
-                return subdirs[0]
-            return tmp
+            return clone_path
         # Local path
         p = Path(target).resolve()
         return p if p.is_dir() else None
@@ -546,6 +555,7 @@ class Scanner:
             reasoning=parsed.get("reasoning", ""),
             line_hint=parsed.get("line_hint", ""),
         )
+        finding.fingerprint = self._fingerprint(finding)
         # 5. Generate a PoC if enabled
         if self.config.get("enable_exploit", True):
             self._generate_poc(adapter, finding, chunk, target_path)
@@ -574,7 +584,7 @@ class Scanner:
         template = adapter.exploit_user_template()
         system = adapter.analysis_system_prompt()
         last_err = ""
-        for attempt in range(1, max_attempts + 1):
+        for _attempt in range(1, max_attempts + 1):
             try:
                 resp = self.ai_client.chat(
                     system,
@@ -675,7 +685,8 @@ class Scanner:
         for fp in target_path.rglob("*"):
             if fp.is_dir():
                 continue
-            if any(p in str(fp).lower() for p in ("/.git/", "/node_modules/", "/target/", "/build/")):
+            normalized = "/" + fp.relative_to(target_path).as_posix().lower().strip("/") + "/"
+            if any(p in normalized for p in ("/.git/", "/node_modules/", "/target/", "/build/")):
                 continue
             try:
                 content = fp.read_text(errors="ignore")
@@ -693,6 +704,66 @@ class Scanner:
         return findings
 
     # ---- helpers ---------------------------------------------------------
+
+    def _run_discovery(
+        self,
+        target_path: Path,
+        target: str,
+        language: TargetLanguage,
+    ) -> list[Finding]:
+        """Run installed discovery engines compatible with the target language."""
+        from web3guard.discovery import ALL_ENGINES
+
+        findings: list[Finding] = []
+        deadline = time.monotonic() + int(self.config.get("discovery_time_budget_seconds", 900))
+        for engine_type in ALL_ENGINES:
+            engine = engine_type()
+            if language not in engine.supported_languages or not engine.enabled_by_default:
+                continue
+            remaining = int(deadline - time.monotonic())
+            if remaining <= 0:
+                LOGGER.warning("discovery time budget exhausted")
+                break
+            if not engine.is_installed():
+                continue
+            try:
+                discovered = engine.run(target_path, timeout=min(engine.default_timeout, remaining))
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("discovery engine %s failed: %s", engine.name, exc)
+                continue
+            for item in discovered:
+                finding = Finding(
+                    target=target,
+                    language=language.value,
+                    file=item.file,
+                    function=item.function,
+                    category=item.category or item.title,
+                    severity=item.severity,
+                    confidence=item.confidence,
+                    swc_id=item.swc_id,
+                    description=item.description or item.title,
+                    reasoning=f"Reported by {item.engine}",
+                    line_hint=(
+                        f"{item.line}-{item.end_line}"
+                        if item.line and item.end_line and item.end_line != item.line
+                        else str(item.line or "")
+                    ),
+                    tool_consensus=[item.engine],
+                    metadata={"discovery": item.raw},
+                )
+                finding.fingerprint = self._fingerprint(finding)
+                findings.append(finding)
+        return findings
+
+    @staticmethod
+    def _fingerprint(finding: Finding) -> str:
+        material = "\0".join((
+            finding.target,
+            finding.file,
+            finding.function,
+            finding.category,
+        ))
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
 
     @staticmethod
     def _extract_json(text: str) -> dict[str, Any] | None:

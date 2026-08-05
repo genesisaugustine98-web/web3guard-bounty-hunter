@@ -7,6 +7,10 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 *.pyc
+.coverage
+/build/
+/dist/
+ruff-full.txt
 
 # Virtualenvs
 .venv/
@@ -15,7 +19,7 @@ env/
 
 # Web3Guard state
 .web3guard/
-reports/
+/reports/
 exploit_sandboxes/
 
 # Editor

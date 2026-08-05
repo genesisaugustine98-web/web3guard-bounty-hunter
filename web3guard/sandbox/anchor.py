@@ -10,12 +10,12 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 from web3guard.languages.base import LanguageAdapter
 from web3guard.sandbox.base import SandboxResult
-from web3guard.sandbox.foundry import FoundrySandbox
 from web3guard.security import SandboxGuard, SandboxPolicy
 
 LOGGER = logging.getLogger("web3guard.sandbox.anchor")
@@ -87,15 +87,15 @@ class AnchorSandbox:
         if not ok:
             return SandboxResult(ok=False, output=out, error=err, returncode=1)
         # Test
-        rc, out, err = self._run(
+        ok, out, err = self._run(
             ["anchor", "test", "--skip-deploy"],
             cwd=sandbox_path, timeout=timeout,
         )
         return SandboxResult(
-            ok=rc == 0,
+            ok=ok,
             output=out + "\n" + err,
-            error=err if rc != 0 else "",
-            returncode=rc,
+            error=err if not ok else "",
+            returncode=0 if ok else 1,
         )
 
     def write_and_run(self, code: str, fingerprint: str, timeout: int = 120) -> tuple[bool, str]:
@@ -119,7 +119,7 @@ class AnchorSandbox:
             proc = subprocess.run(
                 cmd, cwd=report.cwd, env=env,
                 capture_output=True, text=True, timeout=timeout,
-                preexec_fn=self.guard.apply_resource_limits,
+                preexec_fn=self.guard.apply_resource_limits if sys.platform != "win32" else None,
             )
             return (
                 proc.returncode == 0,

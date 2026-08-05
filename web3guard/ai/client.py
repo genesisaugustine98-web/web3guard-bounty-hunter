@@ -22,13 +22,13 @@ provider switching and error recovery are transparent.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import sqlite3
 import time
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Mapping
 
 from web3guard.ai.cost import CostTracker
 from web3guard.ai.provider import (
@@ -111,7 +111,7 @@ class AIClient:
 
     def _init_cache(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(str(path)) as conn:
+        with closing(sqlite3.connect(str(path))) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS cache (
                     key TEXT PRIMARY KEY,
@@ -137,7 +137,7 @@ class AIClient:
     def _cache_get(self, key: str) -> ChatResponse | None:
         if self._cache_path is None:
             return None
-        with sqlite3.connect(str(self._cache_path)) as conn:
+        with closing(sqlite3.connect(str(self._cache_path))) as conn:
             row = conn.execute(
                 "SELECT content, tokens_in, tokens_out, cost_usd FROM cache WHERE key=?",
                 (key,),
@@ -160,7 +160,7 @@ class AIClient:
     def _cache_put(self, key: str, response: ChatResponse) -> None:
         if self._cache_path is None:
             return
-        with sqlite3.connect(str(self._cache_path)) as conn:
+        with closing(sqlite3.connect(str(self._cache_path))) as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO cache (key, content, tokens_in, tokens_out, cost_usd, ts) "
                 "VALUES (?, ?, ?, ?, ?, ?)",

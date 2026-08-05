@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -63,14 +64,11 @@ def safe_run_subprocess(
     """
     guard = SandboxGuard(policy or SandboxPolicy())
     report = guard.prepare_subprocess(cmd, cwd=cwd, extra_env=env_extra)
-    if report.verdict != SandboxGuard.__class__ and hasattr(report, "verdict"):
-        # The dataclass verdict is on SandboxReport, not SandboxGuard.
-        pass
     try:
         proc = subprocess.run(
-            cmd, cwd=str(cwd),
+            report.command, cwd=report.cwd, env=report.env,
             capture_output=True, text=True, timeout=timeout,
-            preexec_fn=guard.apply_resource_limits,
+            preexec_fn=guard.apply_resource_limits if sys.platform != "win32" else None,
         )
         return (
             proc.returncode,

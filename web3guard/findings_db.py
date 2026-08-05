@@ -20,14 +20,14 @@ summary of your hunt history.
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import logging
 import sqlite3
 import time
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 LOGGER = logging.getLogger("web3guard.findings_db")
 
@@ -57,7 +57,7 @@ class FindingRecord:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_finding(cls, f: Any) -> "FindingRecord":
+    def from_finding(cls, f: Any) -> FindingRecord:
         """Build a record from a :class:`web3guard.scanner.Finding`."""
         fp = f.fingerprint
         if not fp:
@@ -104,7 +104,7 @@ class FindingsDB:
         self._init_db()
 
     def _init_db(self) -> None:
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with closing(sqlite3.connect(str(self.db_path))) as conn:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS findings (
                     fingerprint TEXT PRIMARY KEY,
@@ -144,14 +144,13 @@ class FindingsDB:
             conn.commit()
 
     def upsert(self, rec: FindingRecord) -> None:
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with closing(sqlite3.connect(str(self.db_path))) as conn:
             existing = conn.execute(
                 "SELECT first_seen_ts, status FROM findings WHERE fingerprint = ?",
                 (rec.fingerprint,),
             ).fetchone()
             if existing:
                 first_seen = existing[0]
-                old_status = existing[1]
                 conn.execute("""
                     UPDATE findings SET
                         last_seen_ts = ?, target = ?, language = ?, file = ?,
@@ -194,7 +193,7 @@ class FindingsDB:
         paid_amount_usd: float = 0.0,
         rejection_reason: str = "",
     ) -> None:
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with closing(sqlite3.connect(str(self.db_path))) as conn:
             old = conn.execute(
                 "SELECT status FROM findings WHERE fingerprint = ?",
                 (fingerprint,),
@@ -231,13 +230,16 @@ class FindingsDB:
     ) -> list[FindingRecord]:
         clauses, args = [], []
         if status:
-            clauses.append("status = ?"); args.append(status)
+            clauses.append("status = ?")
+            args.append(status)
         if target:
-            clauses.append("target LIKE ?"); args.append(f"%{target}%")
+            clauses.append("target LIKE ?")
+            args.append(f"%{target}%")
         if severity:
-            clauses.append("severity = ?"); args.append(severity)
+            clauses.append("severity = ?")
+            args.append(severity)
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with closing(sqlite3.connect(str(self.db_path))) as conn:
             rows = conn.execute(
                 f"SELECT * FROM findings {where} ORDER BY last_seen_ts DESC LIMIT ?",
                 (*args, limit),
@@ -245,7 +247,7 @@ class FindingsDB:
         return [_row_to_record(r) for r in rows]
 
     def summary(self) -> dict[str, Any]:
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with closing(sqlite3.connect(str(self.db_path))) as conn:
             total = conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0]
             by_status = {row[0]: row[1] for row in conn.execute(
                 "SELECT status, COUNT(*) FROM findings GROUP BY status"
@@ -272,7 +274,7 @@ def _row_to_record(row: tuple) -> FindingRecord:
         "rejection_reason", "poc_code", "exploit_log", "first_seen_ts",
         "last_seen_ts", "metadata",
     )
-    d = dict(zip(cols, row))
+    d = dict(zip(cols, row, strict=True))
     try:
         d["metadata"] = json.loads(d.get("metadata") or "{}")
     except (ValueError, TypeError):

@@ -16,16 +16,15 @@ into a class. It:
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
-from typing import Any
 
 from web3guard.languages.base import LanguageAdapter
-from web3guard.languages.solidity import SolidityAdapter, VyperAdapter
-from web3guard.sandbox.base import SandboxResult, TestSandbox
+from web3guard.languages.vyper import VyperAdapter
+from web3guard.sandbox.base import SandboxResult
 from web3guard.security import SandboxGuard, SandboxPolicy
 
 LOGGER = logging.getLogger("web3guard.sandbox.foundry")
@@ -108,7 +107,7 @@ class FoundrySandbox:
             if not fp.is_file():
                 continue
             rel = fp.relative_to(target_path)
-            rel_str = str(rel).lower()
+            rel_str = "/" + rel.as_posix().lower().strip("/") + "/"
             if any(p in rel_str for p in (
                 "/test/", "/tests/", "/script/", "/scripts/",
                 "/lib/", "/libs/", "/node_modules/", "/.git/",
@@ -154,7 +153,7 @@ class FoundrySandbox:
             )
         # Test
         test_name = "test_autonomous_exploit"
-        rc, out, err = self._run(
+        ok, out, err = self._run(
             ["forge", "test", "--match-test", test_name, "-vvv",
              "--no-match-path", "lib/**", "--via-ir"],
             cwd=sandbox_path, timeout=timeout,
@@ -170,10 +169,10 @@ class FoundrySandbox:
             except ValueError:
                 pass
         return SandboxResult(
-            ok=rc == 0,
+            ok=ok,
             output=combined,
-            error=err if rc != 0 else "",
-            returncode=rc,
+            error=err if not ok else "",
+            returncode=0 if ok else 1,
             gas_used=gas_used,
             revert_reason=self._extract_revert_reason(combined),
         )
@@ -202,14 +201,14 @@ class FoundrySandbox:
             proc = subprocess.run(
                 cmd, cwd=report.cwd, env=env,
                 capture_output=True, text=True, timeout=timeout,
-                preexec_fn=self.guard.apply_resource_limits,
+                preexec_fn=self.guard.apply_resource_limits if sys.platform != "win32" else None,
             )
             return (
                 proc.returncode == 0,
                 self.guard.truncate_revert_reason(proc.stdout),
                 self.guard.truncate_revert_reason(proc.stderr),
             )
-        except subprocess.TimeoutExpired as e:
+        except subprocess.TimeoutExpired:
             return False, "", f"timed out after {timeout}s"
         except FileNotFoundError as e:
             return False, "", f"command not found: {e}"

@@ -20,13 +20,14 @@ adding a new language a matter of writing one subclass.
 from __future__ import annotations
 
 import abc
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any
 
 
-class TargetLanguage(str, Enum):
+class TargetLanguage(StrEnum):
     """The set of supported target languages.
 
     The string value of each member is the canonical lowercase name used
@@ -195,7 +196,7 @@ class LanguageAdapter(abc.ABC):
         Subclasses can override, but the default is correct for most
         languages and respects the original scanner's exclusion list.
         """
-        s = str(file_path).lower()
+        s = "/" + str(file_path).replace("\\", "/").lower().strip("/") + "/"
         for marker in (
             "/test/", "/tests/", "/script/", "/scripts/",
             "/mock", "/mocks/", "/stub", "/stubs/",

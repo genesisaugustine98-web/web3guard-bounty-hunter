@@ -49,15 +49,19 @@ from __future__ import annotations
 
 import logging
 import os
-import resource
 import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Mapping, Sequence
+
+try:
+    import resource
+except ImportError:  # Windows has no POSIX resource module.
+    resource = None  # type: ignore[assignment]
 
 LOGGER = logging.getLogger("web3guard.security.sandbox_guard")
 
@@ -201,6 +205,8 @@ class SandboxGuard:
         the POSIX resource limits *inside* the child. We can't apply them
         from the parent because they would not affect the forked child.
         """
+        if resource is None:
+            return
         p = self._policy
         try:
             resource.setrlimit(resource.RLIMIT_CPU, (p.max_cpu_seconds, p.max_cpu_seconds))
@@ -355,8 +361,10 @@ def run_sandboxed(
             guard.truncate_revert_reason(completed.stderr),
         )
     except subprocess.TimeoutExpired as e:
+        stdout = e.stdout.decode("utf-8", errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        stderr = e.stderr.decode("utf-8", errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
         return (
             124,
-            e.stdout.decode("utf-8", errors="replace") if e.stdout else "",
-            f"timed out after {timeout}s\n{e.stderr.decode('utf-8', errors='replace') if e.stderr else ''}",
+            stdout,
+            f"timed out after {timeout}s\n{stderr}",
         )

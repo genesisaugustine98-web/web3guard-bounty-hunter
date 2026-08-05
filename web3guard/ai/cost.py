@@ -12,13 +12,13 @@ You can override per-model pricing in ``config.yaml``.
 
 from __future__ import annotations
 
-import json
 import logging
 import sqlite3
 import time
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
 
 LOGGER = logging.getLogger("web3guard.ai.cost")
 
@@ -84,7 +84,7 @@ class CostTracker:
 
     def _init_db(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(str(path)) as conn:
+        with closing(sqlite3.connect(str(path))) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS cost_records (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -140,7 +140,7 @@ class CostTracker:
         )
         self._records.append(rec)
         if self._persist_path is not None:
-            with sqlite3.connect(str(self._persist_path)) as conn:
+            with closing(sqlite3.connect(str(self._persist_path))) as conn:
                 conn.execute(
                     "INSERT INTO cost_records (timestamp, provider, model, "
                     "prompt_tokens, completion_tokens, cost_usd, role) "

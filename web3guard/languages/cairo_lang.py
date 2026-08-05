@@ -78,7 +78,7 @@ class CairoAdapter(LanguageAdapter):
     def discover_files(self, target_path: Path) -> list[Path]:
         out: list[Path] = []
         for f in target_path.rglob("*.cairo"):
-            if self.is_user_code(f):
+            if self.is_user_code(f.relative_to(target_path)):
                 out.append(f)
         return sorted(out)
 
@@ -94,7 +94,7 @@ class CairoAdapter(LanguageAdapter):
         cur_start = 0
         cur_end = boundaries[0]
         cid = 0
-        for i, start in enumerate(boundaries):
+        for i, _start in enumerate(boundaries):
             end = boundaries[i + 1] if i + 1 < len(boundaries) else len(text)
             if end - cur_start > max_chars and cur_end > cur_start:
                 chunks.append(Chunk(file=str(file_path), chunk_id=cid,
@@ -118,7 +118,6 @@ class CairoAdapter(LanguageAdapter):
             return ""
         snippets: list[str] = []
         used = 0
-        max_ctx = 6000
         for m in re.finditer(r"\buse\s+([\w:]+)\s*::\s*([\w*]+)\s*;", content):
             mod = m.group(1)
             snippets.append(f"// ---- Cairo import: {mod}::{m.group(2)} ----")

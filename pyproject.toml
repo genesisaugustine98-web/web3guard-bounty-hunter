@@ -7,7 +7,7 @@ name = "web3guard-bounty-hunter"
 version = "3.0.0"
 description = "Multi-language Web3 smart contract vulnerability scanner with AI-driven semantic reasoning."
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
 requires-python = ">=3.11"
 authors = [{ name = "Web3Guard Contributors" }]
 keywords = [
@@ -18,7 +18,6 @@ keywords = [
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Information Technology",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Security",
@@ -44,9 +43,9 @@ semgrep = ["semgrep>=1.40"]
 web3guard = "web3guard.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/web3guard-bounty-hunter"
-Documentation = "https://github.com/web3guard-bounty-hunter/blob/main/README.md"
-Issues = "https://github.com/web3guard-bounty-hunter/issues"
+Homepage = "https://github.com/genesisaugustine98-web/web3guard-bounty-hunter"
+Documentation = "https://github.com/genesisaugustine98-web/web3guard-bounty-hunter/blob/main/README.md"
+Issues = "https://github.com/genesisaugustine98-web/web3guard-bounty-hunter/issues"
 
 [tool.setuptools]
 packages = [

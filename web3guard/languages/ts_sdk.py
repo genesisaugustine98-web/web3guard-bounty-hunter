@@ -98,7 +98,7 @@ class TypeScriptSDKAdapter(LanguageAdapter):
         out: list[Path] = []
         for ext in self.extensions:
             for f in target_path.rglob(f"*{ext}"):
-                if self.is_user_code(f):
+                if self.is_user_code(f.relative_to(target_path)):
                     out.append(f)
         return sorted(out)
 
@@ -114,7 +114,7 @@ class TypeScriptSDKAdapter(LanguageAdapter):
         cur_start = 0
         cur_end = boundaries[0]
         cid = 0
-        for i, start in enumerate(boundaries):
+        for i, _start in enumerate(boundaries):
             end = boundaries[i + 1] if i + 1 < len(boundaries) else len(text)
             if end - cur_start > max_chars and cur_end > cur_start:
                 chunks.append(Chunk(file=str(file_path), chunk_id=cid,

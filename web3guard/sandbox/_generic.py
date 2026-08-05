@@ -18,9 +18,10 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+import sys
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 from web3guard.languages.base import LanguageAdapter
 from web3guard.sandbox.base import SandboxResult
@@ -77,7 +78,7 @@ class GenericSandbox:
             if not fp.is_file():
                 continue
             rel = fp.relative_to(target_path)
-            rel_str = str(rel).lower()
+            rel_str = "/" + rel.as_posix().lower().strip("/") + "/"
             if any(s in rel_str for s in self.skip_globs):
                 continue
             if fp.suffix not in self.file_globs:
@@ -115,12 +116,12 @@ class GenericSandbox:
         # Test
         test_name = poc_path.stem
         test_cmd = [c.format(test_name=test_name) for c in self.adapter.test_runner.test_command_template]
-        rc, out, err = self._run(test_cmd, cwd=sandbox_path, timeout=timeout)
+        ok, out, err = self._run(test_cmd, cwd=sandbox_path, timeout=timeout)
         return SandboxResult(
-            ok=rc == 0,
+            ok=ok,
             output=out + "\n" + err,
-            error=err if rc != 0 else "",
-            returncode=rc,
+            error=err if not ok else "",
+            returncode=0 if ok else 1,
         )
 
     def write_and_run(self, code: str, fingerprint: str, timeout: int = 90) -> tuple[bool, str]:
@@ -144,7 +145,7 @@ class GenericSandbox:
             proc = subprocess.run(
                 list(cmd), cwd=report.cwd, env=env,
                 capture_output=True, text=True, timeout=timeout,
-                preexec_fn=self.guard.apply_resource_limits,
+                preexec_fn=self.guard.apply_resource_limits if sys.platform != "win32" else None,
             )
             return (
                 proc.returncode == 0,

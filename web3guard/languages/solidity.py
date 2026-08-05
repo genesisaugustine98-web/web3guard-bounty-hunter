@@ -29,7 +29,7 @@ verbatim where possible to avoid regressing the existing test suite.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -112,7 +112,7 @@ class SolidityAdapter(LanguageAdapter):
         try:
             for f in target_path.rglob("*.sol"):
                 # Skip dotfile / vendor directories quickly.
-                s = str(f).lower()
+                s = "/" + str(f).replace("\\", "/").lower().strip("/") + "/"
                 if "/.git/" in s or "/node_modules/" in s:
                     continue
                 return True
@@ -123,7 +123,7 @@ class SolidityAdapter(LanguageAdapter):
     def discover_files(self, target_path: Path) -> list[Path]:
         files: list[Path] = []
         for f in target_path.rglob("*.sol"):
-            if not self.is_user_code(f):
+            if not self.is_user_code(f.relative_to(target_path)):
                 continue
             files.append(f)
         return sorted(files)
