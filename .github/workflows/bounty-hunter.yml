@@ -20,6 +20,12 @@ name: Web3Guard Bounty Hunter
         required: false
         type: choice
         default: LOW
+        options:
+          - INFO
+          - LOW
+          - MEDIUM
+          - HIGH
+          - CRITICAL
       enable_exploit:
         description: "Generate Foundry / Anchor / Move / Scarb / Clarinet / Blueprint PoCs"
         required: false
