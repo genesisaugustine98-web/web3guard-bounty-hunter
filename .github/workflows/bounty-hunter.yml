@@ -1,6 +1,12 @@
 name: Web3Guard Bounty Hunter
 
 "on":
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       targets_config:
@@ -33,7 +39,37 @@ name: Web3Guard Bounty Hunter
     - cron: "0 6 * * 0"  # weekly on Sunday at 06:00 UTC
 
 jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Checkout scanner
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Validate package and run tests
+        run: |
+          python -m pip check
+          python -m compileall -q web3guard tests
+          python -m pytest -q
+
   scan:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -64,12 +100,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-foundry-
 
+      - name: Add Foundry to PATH
+        run: echo "$HOME/.foundry/bin" >> "$GITHUB_PATH"
+
       - name: Install Foundry
         if: steps.cache-foundry.outputs.cache-hit != 'true'
         run: |
           curl -L https://foundry.paradigm.xyz | bash
           ~/.foundry/bin/foundryup --install nightly
-          echo "$HOME/.foundry/bin" >> $GITHUB_PATH
 
       - name: Verify toolchain
         run: |
@@ -88,28 +126,48 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          TARGETS_CONFIG: ${{ inputs.targets_config || vars.WEB3GUARD_TARGETS_CONFIG || '' }}
+          MIN_SEVERITY: ${{ inputs.min_severity || 'LOW' }}
+          FORK_URL: ${{ inputs.fork_url || '' }}
+          ENABLE_EXPLOIT: ${{ github.event_name != 'workflow_dispatch' || inputs.enable_exploit }}
+          ENABLE_SELF_CRITIQUE: ${{ github.event_name != 'workflow_dispatch' || inputs.enable_self_critique }}
         run: |
           set -e
           mkdir -p .web3guard
-          printf '%s\n' "${{ github.event.inputs.targets_config }}" > .web3guard/targets.txt
-          EXTRAS=""
-          if [ -n "${{ github.event.inputs.fork_url }}" ]; then
-            EXTRAS="$EXTRAS --fork-url ${{ github.event.inputs.fork_url }}"
+          printf '%s\n' "$TARGETS_CONFIG" > .web3guard/targets.txt
+          if ! grep -q '[^[:space:]]' .web3guard/targets.txt; then
+            echo "::warning::No targets configured; set WEB3GUARD_TARGETS_CONFIG for scheduled runs."
+            exit 0
           fi
-          if [ "${{ github.event.inputs.enable_exploit }}" != "true" ]; then
-            EXTRAS="$EXTRAS --no-exploit"
+
+          EXTRAS=()
+          if [ -n "$FORK_URL" ]; then
+            EXTRAS+=(--fork-url "$FORK_URL")
           fi
-          if [ "${{ github.event.inputs.enable_self_critique }}" != "true" ]; then
-            EXTRAS="$EXTRAS --no-self-critique"
+          if [ "$ENABLE_EXPLOIT" != "true" ]; then
+            EXTRAS+=(--no-exploit)
           fi
+          if [ "$ENABLE_SELF_CRITIQUE" != "true" ]; then
+            EXTRAS+=(--no-self-critique)
+          fi
+
+          failures=0
           while IFS= read -r line; do
             [ -z "$line" ] && continue
             echo "::group::Scanning $line"
-            python -m web3guard.cli scan "$line" \
-              --min-severity "${{ github.event.inputs.min_severity }}" \
-              $EXTRAS || echo "scan failed (continuing)"
+            if ! python -m web3guard.cli scan "$line" \
+              --min-severity "$MIN_SEVERITY" \
+              "${EXTRAS[@]}"; then
+              echo "::error::Scan failed for $line"
+              failures=$((failures + 1))
+            fi
             echo "::endgroup::"
           done < .web3guard/targets.txt
+
+          if [ "$failures" -gt 0 ]; then
+            echo "::error::$failures scan(s) failed"
+            exit 1
+          fi
 
       - name: Render dashboard
         if: always()
