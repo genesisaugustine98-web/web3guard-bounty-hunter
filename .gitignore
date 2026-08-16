@@ -21,6 +21,7 @@ env/
 .web3guard/
 /reports/
 exploit_sandboxes/
+pressure_out/
 
 # Editor
 .idea/

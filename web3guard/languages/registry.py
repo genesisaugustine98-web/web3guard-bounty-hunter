@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from itertools import islice
 from pathlib import Path
 from typing import Iterable
 
@@ -118,7 +119,10 @@ def detect_target_language(target_path: Path) -> LanguageDetection:
         ):
             # rglob is slow on huge repos, so cap at 1000 hits.
             try:
-                hits = sum(1 for _ in target_path.rglob(f"*{ext}") if not str(_).startswith("."))
+                hits = sum(
+                    1 for _ in islice(target_path.rglob(f"*{ext}"), 1000)
+                    if not any(part.startswith(".") for part in _.relative_to(target_path).parts)
+                )
             except Exception:  # noqa: BLE001
                 continue
             if hits > 0:

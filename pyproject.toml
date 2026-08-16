@@ -51,6 +51,7 @@ Issues = "https://github.com/genesisaugustine98-web/web3guard-bounty-hunter/issu
 packages = [
     "web3guard",
     "web3guard.ai",
+    "web3guard.bench",
     "web3guard.discovery",
     "web3guard.languages",
     "web3guard.reports",

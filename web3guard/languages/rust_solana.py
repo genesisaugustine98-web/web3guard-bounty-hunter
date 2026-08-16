@@ -82,6 +82,11 @@ class RustSolanaAdapter(LanguageAdapter):
             return True
         if (target_path / "Cargo.toml").exists() and (target_path / "programs").is_dir():
             return True
+        # Extension fallback: a mixed repo with .rs user code and no
+        # Anchor/Cargo manifest at the root still gets Solana analysis.
+        for f in target_path.rglob("*.rs"):
+            if self.is_user_code(f.relative_to(target_path)):
+                return True
         return False
 
     def discover_files(self, target_path: Path) -> list[Path]:

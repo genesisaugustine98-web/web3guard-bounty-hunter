@@ -12,6 +12,7 @@ from web3guard.discovery.base import (
     DiscoveryEngineBase,
     DiscoveryResult,
     safe_run_subprocess,
+    temp_report_path,
 )
 from web3guard.languages.base import TargetLanguage
 
@@ -32,7 +33,7 @@ class MythrilEngine(DiscoveryEngineBase):
             LOGGER.info("mythril not installed; skipping")
             return []
         timeout = timeout or self.default_timeout
-        out_file = target_path / "mythril_report.json"
+        out_file = temp_report_path(target_path, "mythril")
         # Mythril analyzes one .sol file at a time, but you can pass
         # a directory if solc-select is configured. We run per top-level
         # .sol file to keep the timeout bounded.

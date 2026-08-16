@@ -92,7 +92,15 @@ class TypeScriptSDKAdapter(LanguageAdapter):
     def detect(self, target_path: Path) -> bool:
         if not target_path.is_dir():
             return False
-        return (target_path / "package.json").exists()
+        if (target_path / "package.json").exists():
+            return True
+        # Extension fallback: a mixed repo with .ts/.js user code and no
+        # package.json at the root still gets SDK analysis.
+        for ext in self.extensions:
+            for f in target_path.rglob(f"*{ext}"):
+                if self.is_user_code(f.relative_to(target_path)):
+                    return True
+        return False
 
     def discover_files(self, target_path: Path) -> list[Path]:
         out: list[Path] = []

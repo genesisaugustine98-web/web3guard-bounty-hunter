@@ -74,6 +74,39 @@ jobs:
           python -m compileall -q web3guard tests
           python -m pytest -q
 
+  bench:
+    name: Benchmark (precision/recall gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout scanner
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      - name: Run benchmark with regression floor
+        run: |
+          python -m web3guard.cli bench \
+            --fail-below 0.99,0.95 \
+            --json bench-report.json
+
+      - name: Upload benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web3guard-benchmark-${{ github.run_id }}
+          path: bench-report.json
+          if-no-files-found: warn
+
   scan:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest

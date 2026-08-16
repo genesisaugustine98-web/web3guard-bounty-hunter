@@ -15,6 +15,7 @@ import logging
 import os
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,20 @@ from web3guard.languages.base import TargetLanguage
 from web3guard.security import SandboxGuard, SandboxPolicy
 
 LOGGER = logging.getLogger("web3guard.discovery.base")
+
+
+def temp_report_path(target_path: Path, name: str) -> Path:
+    """Return a report-output path that lives *outside* the scanned repo.
+
+    Several CLI tools (aderyn, gitleaks, semgrep, mythril, echidna)
+    write their findings to a JSON report file. The original engines
+    wrote those into ``target_path / "<name>_report.json"``, silently
+    polluting the repository being scanned (and sometimes being re-
+    scanned on the next run). This helper puts the report in a fresh
+    OS temp directory instead.
+    """
+    d = Path(tempfile.mkdtemp(prefix=f"web3guard-{name}-"))
+    return d / f"{name}_report.json"
 
 
 @dataclass

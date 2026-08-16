@@ -56,6 +56,8 @@ from web3guard.security import (
     SandboxGuard,
     SandboxPolicy,
 )
+from web3guard.utils.secrets import scan_path
+from web3guard.utils.vuln_catalog import get_catalog
 
 LOGGER = logging.getLogger("web3guard.scanner")
 
@@ -137,6 +139,23 @@ class ScanResult:
     @property
     def confirmed_findings(self) -> list[Finding]:
         return [f for f in self.all_findings if f.status == "CONFIRMED EXPLOIT"]
+
+
+_FN_DEF_RE = re.compile(
+    r"(?:function\s+([A-Za-z0-9_]+)\s*\(|"
+    r"def\s+([a-z_][a-z0-9_]*)\s*\(|"
+    r"pub\s+(?:entry\s+)?fun\s+([a-z_][a-z0-9_]*)\s*\(|"
+    r"fn\s+([a-z_][a-z0-9_]*)\s*\()"
+)
+
+
+def _function_name_at(lines: list[str], line_idx: int) -> str:
+    """Return the name of the function that owns ``line_idx``."""
+    for i in range(line_idx, -1, -1):
+        m = _FN_DEF_RE.search(lines[i])
+        if m:
+            return next(g for g in m.groups() if g)
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -349,7 +368,7 @@ class Scanner:
         result = ScanResult(
             started_at=self._start_ts,
             finished_at="",
-            config={k: v for k, v in self.config.items() if k != "ai_providers"},
+            config=self._sanitize_config(),
         )
         for url, budget in parsed:
             LOGGER.info("scanning target: %s (budget=%s)", url, budget)
@@ -427,53 +446,87 @@ class Scanner:
         if not adapters:
             tr.error = "no language adapter matched the target"
             return tr
-        # If multiple adapters match, run them all (in priority order)
-        # and merge findings. In practice, multi-language repos are
-        # rare; if they exist, the most relevant adapter goes first.
-        primary = adapters[0]
-        if self.config.get("enable_discovery", True):
-            tr.findings.extend(
-                finding
-                for finding in self._run_discovery(target_path, target, primary.language)
-                if self._severity_at_least(finding.severity, min_severity)
-            )
-        # Discover files
-        files = primary.discover_files(target_path)
-        tr.files_analyzed = len(files)
-        LOGGER.info("primary adapter %s found %d files",
-                    primary.language.value, len(files))
-        # Per-chunk analysis
+
+        # Optional research planning: deterministically score files by
+        # structural risk so the analysis budget is spent on the
+        # highest-risk files first.
+        plan: dict[str, Any] = {}
+        if self.config.get("use_ai_planning", True):
+            plan = self._plan_target(adapters, target_path)
+            tr.research_plan = plan
+
+        # Run every matching adapter (not just the primary one) so
+        # mixed-language repos get full coverage. Findings are merged
+        # and de-duplicated by fingerprint across adapters.
         analysis_budget = max(1, budget // 1500) if budget else 0
-        chunks_to_analyze: list[Any] = []
-        for fp in files:
+        seen_fps: set[str] = set()
+        tr.role_map = {}
+        tr.attack_sequences = {}
+        for adapter in adapters:
+            lang = adapter.language.value
+            LOGGER.info("adapter %s analyzing target", lang)
+            # Discovery for this language.
+            if self.config.get("enable_discovery", True):
+                for finding in self._run_discovery(target_path, target, adapter.language):
+                    if finding.fingerprint in seen_fps:
+                        continue
+                    if not self._severity_at_least(finding.severity, min_severity):
+                        continue
+                    seen_fps.add(finding.fingerprint)
+                    tr.findings.append(finding)
+            # Discover files, ordered by research-plan risk.
             try:
-                chunks = primary.chunk(fp, self.config.get("max_chunk_chars", 6000))
+                files = adapter.discover_files(target_path)
             except Exception as e:  # noqa: BLE001
-                LOGGER.warning("chunker failed on %s: %s", fp, e)
-                continue
-            for ch in chunks:
-                try:
-                    ch.context = primary.resolve_context(fp, target_path)
-                except Exception as e:  # noqa: BLE001
-                    LOGGER.warning("context resolver failed on %s: %s", fp, e)
-                chunks_to_analyze.append(ch)
+                LOGGER.warning("adapter %s discover_files failed: %s", lang, e)
+                files = []
+            files = self._ordered_files(files, target_path, plan)
+            tr.files_analyzed += len(files)
+            LOGGER.info("adapter %s found %d files", lang, len(files))
+            # Per-chunk analysis.
+            chunks_to_analyze: list[Any] = []
+            for fp in files:
                 if analysis_budget and len(chunks_to_analyze) >= analysis_budget:
                     break
-            if analysis_budget and len(chunks_to_analyze) >= analysis_budget:
-                break
-        tr.chunks_analyzed = len(chunks_to_analyze)
-        # Run analysis per chunk
-        for ch in chunks_to_analyze:
-            finding = self._analyze_chunk(primary, ch, target_path, target)
-            if finding is not None:
+                try:
+                    chunks = adapter.chunk(fp, self.config.get("max_chunk_chars", 6000))
+                except Exception as e:  # noqa: BLE001
+                    LOGGER.warning("chunker failed on %s: %s", fp, e)
+                    continue
+                for ch in chunks:
+                    try:
+                        ch.context = adapter.resolve_context(fp, target_path)
+                    except Exception as e:  # noqa: BLE001
+                        LOGGER.warning("context resolver failed on %s: %s", fp, e)
+                    chunks_to_analyze.append(ch)
+                    if analysis_budget and len(chunks_to_analyze) >= analysis_budget:
+                        break
+            tr.chunks_analyzed += len(chunks_to_analyze)
+            for ch in chunks_to_analyze:
+                finding = self._analyze_chunk(adapter, ch, target_path, target)
+                if finding is None:
+                    continue
+                if finding.fingerprint in seen_fps:
+                    continue
+                seen_fps.add(finding.fingerprint)
                 if self._severity_at_least(finding.severity, min_severity):
                     tr.findings.append(finding)
-        # Optional: post-scan tasks
+            # Optional post-scan passes (deterministic, offline).
+            if self.config.get("enable_attack_sequence_brainstorm", True):
+                tr.attack_sequences[lang] = self._attack_sequences(adapter, target_path)
+            if self.config.get("enable_role_map", True):
+                tr.role_map[lang] = self._role_map(adapter, target_path)
+        # Optional: secret scan (whole target once).
         if self.config.get("enable_secret_scan", True):
-            tr.secrets_findings = self._run_secret_scan(target_path)
-        # Sort findings by severity then confidence
-        tr.findings.sort(key=lambda f: (-f.confidence, f.severity != "CRITICAL",
-                                         f.severity != "HIGH"))
+            tr.secrets_findings = scan_path(target_path)
+        # Sort findings by severity then confidence.
+        severity_order = {"INFO": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+        tr.findings.sort(
+            key=lambda f: (
+                -severity_order.get(str(f.severity).upper(), 0),
+                -f.confidence,
+            )
+        )
         return tr
 
     def _clone_target(self, target: str) -> Path | None:
@@ -496,6 +549,20 @@ class Scanner:
         p = Path(target).resolve()
         return p if p.is_dir() else None
 
+    def _build_system_prompt(self, adapter: LanguageAdapter) -> str:
+        """Compose the analysis system prompt (generic + language-specific)."""
+        system = adapter.analysis_system_prompt()
+        catalog = get_catalog(adapter.language)
+        if catalog:
+            system += (
+                "\n\nLanguage-specific vulnerability catalog to check against:\n"
+                + catalog.strip()
+            )
+        adapter_catalog = adapter.vulnerability_catalog()
+        if adapter_catalog and adapter_catalog.strip() not in system:
+            system += "\n\n" + adapter_catalog.strip()
+        return system
+
     def _analyze_chunk(
         self,
         adapter: LanguageAdapter,
@@ -504,8 +571,8 @@ class Scanner:
         target_url: str,
     ) -> Finding | None:
         """Run analysis + exploit generation + self-critique for one chunk."""
-        # 1. Build the system prompt
-        system = adapter.analysis_system_prompt()
+        # 1. Build the system prompt (generic + language-specific catalog)
+        system = self._build_system_prompt(adapter)
         # 2. Build the user prompt (with cross-file context if available)
         user = (
             f"Target: {target_url}\n"
@@ -542,6 +609,12 @@ class Scanner:
         if parsed.get("status", "").lower() != "vulnerable":
             return None
         # 4. Build the finding
+        raw_confidence = parsed.get("confidence")
+        try:
+            confidence = float(raw_confidence) if raw_confidence is not None else 0.5
+        except (TypeError, ValueError):
+            confidence = 0.5
+        confidence = max(0.0, min(1.0, confidence))
         finding = Finding(
             target=target_url,
             language=adapter.language.value,
@@ -549,7 +622,7 @@ class Scanner:
             function=parsed.get("function", ""),
             category=parsed.get("category", ""),
             severity=str(parsed.get("severity", "MEDIUM")).upper(),
-            confidence=float(parsed.get("confidence", 0.5) or 0.5),
+            confidence=confidence,
             swc_id=parsed.get("swc_id", ""),
             description=parsed.get("description", ""),
             reasoning=parsed.get("reasoning", ""),
@@ -582,7 +655,7 @@ class Scanner:
             return
         max_attempts = int(self.config.get("max_exploit_attempts", 3))
         template = adapter.exploit_user_template()
-        system = adapter.analysis_system_prompt()
+        system = self._build_system_prompt(adapter)
         last_err = ""
         for _attempt in range(1, max_attempts + 1):
             try:
@@ -673,35 +746,310 @@ class Scanner:
         }
 
     def _run_secret_scan(self, target_path: Path) -> list[dict[str, Any]]:
-        """Cheap regex-only secret scan. Replace with gitleaks if installed."""
-        findings: list[dict[str, Any]] = []
-        patterns: dict[str, re.Pattern[str]] = {
-            "private_key": re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"),
-            "aws_access_key": re.compile(r"AKIA[0-9A-Z]{16}"),
-            "alchemy_rpc": re.compile(r"https://[a-z0-9-]+\.alchemy\.com/v2/[A-Za-z0-9_-]{20,}"),
-            "infura_rpc": re.compile(r"https://[a-z0-9-]+\.infura\.io/v3/[A-Za-z0-9_-]{20,}"),
-            "mnemonic": re.compile(r"\b(?:[a-z]{3,8}\s+){11,23}[a-z]{3,8}\b"),
-        }
-        for fp in target_path.rglob("*"):
-            if fp.is_dir():
+        """Cheap regex-only secret scan (shared hardened patterns)."""
+        return scan_path(target_path)
+
+    # ---- deterministic offline passes (planning / role map / attacks) ----
+
+    def _sanitize_config(self) -> dict[str, Any]:
+        """Return a copy of the config safe to serialize into reports.
+
+        Strips AI providers and redacts credential-bearing values such
+        as RPC URLs with embedded keys so they never leak into JSON /
+        SARIF / Markdown artifacts.
+        """
+        sensitive_keys = ("key", "token", "secret", "password")
+        redacted_value_keys = ("fork_url", "rpc_url", "rpc", "web3_url", "api_url")
+        out: dict[str, Any] = {}
+        for k, v in self.config.items():
+            if k == "ai_providers":
                 continue
-            normalized = "/" + fp.relative_to(target_path).as_posix().lower().strip("/") + "/"
-            if any(p in normalized for p in ("/.git/", "/node_modules/", "/target/", "/build/")):
+            if any(s in k.lower() for s in sensitive_keys):
+                out[k] = "<redacted>"
                 continue
+            if isinstance(v, str) and k.lower() in redacted_value_keys:
+                out[k] = re.sub(r"(https?://)[^?#\s]+", r"\1<redacted>", v)
+                continue
+            out[k] = v
+        return out
+
+    def _plan_target(
+        self,
+        adapters: Sequence[LanguageAdapter],
+        target_path: Path,
+    ) -> dict[str, Any]:
+        """Score files by structural risk and record the analysis order.
+
+        Files that move value, read an oracle, sit behind a proxy, or
+        use assembly get the highest priority so the token budget is
+        spent on the highest-value targets first. Fully deterministic
+        (no LLM round-trip), so it doubles as a cheap triage report.
+        """
+        plan: dict[str, Any] = {"files": {}, "priority": []}
+        for adapter in adapters:
+            lang = adapter.language.value
+            try:
+                files = adapter.discover_files(target_path)
+            except Exception:  # noqa: BLE001
+                continue
+            scored: list[tuple[float, str, Path]] = []
+            for fp in files:
+                try:
+                    s = adapter.summarize(fp, target_path)
+                except Exception:  # noqa: BLE001
+                    continue
+                risk = 0.0
+                risk += min(s.external_calls, 8) * 1.5
+                risk += 3.0 if s.moves_value else 0.0
+                risk += 4.0 if s.reads_oracle else 0.0
+                risk += 2.0 if s.behind_proxy else 0.0
+                risk += 3.0 if s.has_assembly else 0.0
+                risk += 2.0 if s.functions >= 8 else 0.0
+                risk += 1.0 if s.state_vars >= 6 else 0.0
+                try:
+                    rel = str(fp.relative_to(target_path))
+                except ValueError:  # noqa: PERF203
+                    rel = str(fp)
+                scored.append((risk, rel, fp))
+            scored.sort(key=lambda t: -t[0])
+            plan["files"][lang] = [
+                {"file": rel, "risk": round(risk, 2)} for risk, rel, _ in scored
+            ]
+            plan["priority"].extend(rel for _, rel, _ in scored)
+        plan["note"] = (
+            "deterministic structural risk scores (external calls, value "
+            "movement, oracle reads, proxies, assembly); high-risk files "
+            "analyzed first"
+        )
+        return plan
+
+    def _ordered_files(
+        self,
+        files: Sequence[Path],
+        target_path: Path,
+        plan: dict[str, Any],
+    ) -> list[Path]:
+        """Order files by research-plan risk (highest risk first)."""
+        risk_map: dict[str, float] = {}
+        for entries in plan.get("files", {}).values():
+            for entry in entries:
+                risk_map[entry["file"]] = float(entry["risk"])
+
+        def key(fp: Path) -> tuple[float, str]:
+            try:
+                rel = str(fp.relative_to(target_path))
+            except ValueError:  # noqa: PERF203
+                rel = str(fp)
+            return (-risk_map.get(rel, 0.0), rel)
+
+        return sorted(files, key=key)
+
+    # Privileged role names and the state vars they typically govern.
+    _ROLE_VARS = ("owner", "admin", "controller", "guardian", "governor",
+                  "manager", "operator", "fee", "paused", "whitelist")
+    _PRIVILEGED_FN_RE = re.compile(
+        r"^(set|update|change|upgrade|authorize|transfer_?owner|"
+        r"add_?to_?whitelist|remove_?from_?whitelist|pause|unpause|kill|"
+        r"steal|rescue|sweep|withdraw_?all|renounce|grant|revoke|mint|burn)"
+    )
+    _AUTH_GUARD_RES = (
+        re.compile(r"onlyOwner|onlyAdmin|onlyGovernor|onlyRole|onlyOperator"),
+        re.compile(r"require\s*\([^;]{0,120}\bmsg\.sender\b"),
+        re.compile(r"require\s*\([^;]{0,120}\bowner\b[^;]{0,120}\)"),
+        re.compile(r"assert\s+msg\.sender\s*==\s*self\.(owner|admin)"),
+        re.compile(r"asserts!\s*\(is-eq\s+(tx-sender|contract-caller)"),
+        re.compile(r"has_one\s*=\s*owner|constraint\s*=\s*\w+\s*\("),
+    )
+
+    def _role_map(
+        self,
+        adapter: LanguageAdapter,
+        target_path: Path,
+    ) -> dict[str, Any]:
+        """Map privileged roles and which functions mutate their state.
+
+        Detects "privileged-looking" functions that write to role state
+        without an obvious auth guard. Deterministic and offline.
+        """
+        roles: list[dict[str, Any]] = []
+        notes: list[str] = []
+        for fp in self._iter_user_files(adapter, target_path):
             try:
                 content = fp.read_text(errors="ignore")
             except Exception:  # noqa: BLE001
                 continue
-            for kind, pattern in patterns.items():
-                for m in pattern.finditer(content):
-                    line_no = content[: m.start()].count("\n") + 1
-                    findings.append({
-                        "kind": kind,
-                        "file": str(fp.relative_to(target_path)),
-                        "line": line_no,
-                        "snippet": m.group(0)[:120],
+            rel = str(fp.relative_to(target_path))
+            lower = content.lower()
+            present = [v for v in self._ROLE_VARS if re.search(rf"\b{v}\b", lower)]
+            if not present:
+                continue
+            for fn_match in _FN_DEF_RE.finditer(content):
+                fn_name = next(g for g in fn_match.groups() if g)
+                body_start = fn_match.end()
+                body_end = content.find("\n\n", body_start)
+                body_end = body_end if body_end > body_start else len(content)
+                body = content[body_start:body_end]
+                guarded = any(rg.search(body) for rg in self._AUTH_GUARD_RES)
+                privileged = bool(self._PRIVILEGED_FN_RE.match(fn_name))
+                if privileged and not guarded:
+                    roles.append({
+                        "role": present,
+                        "file": rel,
+                        "function": fn_name,
+                        "guarded": False,
+                        "reason": "privileged function name without an auth guard",
                     })
-        return findings
+                elif privileged and guarded:
+                    roles.append({
+                        "role": present,
+                        "file": rel,
+                        "function": fn_name,
+                        "guarded": True,
+                        "reason": "privileged function name with an auth guard",
+                    })
+        if roles:
+            notes.append(
+                "un-guarded privileged functions are the highest-value "
+                "access-control targets"
+            )
+        return {"roles": roles, "notes": notes}
+
+    def _attack_sequences(
+        self,
+        adapter: LanguageAdapter,
+        target_path: Path,
+    ) -> dict[str, Any]:
+        """Heuristically enumerate likely attack chains (offline).
+
+        A chain is: [value-moving or external-call function] ->
+        [re-entrant target / external contract] -> [state write after
+        the call]. Produced deterministically from source structure.
+        """
+        sequences: list[dict[str, Any]] = []
+        notes: list[str] = []
+        ext_call_re = re.compile(
+            r"\.(?:call|delegatecall|transfer|send)\b|"
+            r"raw_call|contract-call\?|invoke\b|invoke_signed|"
+            r"send_message_to_l1|stx-transfer\?|coin::transfer"
+        )
+        state_write_re = re.compile(
+            r"(?:balances|shares|balanceOf|deposits|collateral|borrowed|"
+            r"totalShares|totalAssets|owner|feeBps|fee)\s*\[?[^\]]*\]?\s*"
+            r"(\+|-)?="
+        )
+        for fp in self._iter_user_files(adapter, target_path):
+            try:
+                content = fp.read_text(errors="ignore")
+            except Exception:  # noqa: BLE001
+                continue
+            rel = str(fp.relative_to(target_path))
+            lines = content.splitlines()
+            for i, line in enumerate(lines):
+                if not ext_call_re.search(line):
+                    continue
+                # Look for a state write later in the same function body.
+                tail = "\n".join(lines[i:i + 30])
+                if state_write_re.search(tail):
+                    fn_name = _function_name_at(lines, i)
+                    sequences.append({
+                        "file": rel,
+                        "function": fn_name or "(unknown)",
+                        "line": i + 1,
+                        "pattern": "external call followed by a state write "
+                                   "within the same function (reentrancy / "
+                                   "CEI-violation candidate)",
+                        "confidence": 0.6,
+                    })
+        if sequences:
+            notes.append(
+                "reentrancy chains were inferred statically; confirm each "
+                "with a PoC before reporting"
+            )
+        return {"sequences": sequences, "notes": notes}
+
+    def _iter_user_files(
+        self,
+        adapter: LanguageAdapter,
+        target_path: Path,
+    ) -> list[Path]:
+        """Return the adapter's user-code files (with error tolerance)."""
+        try:
+            return list(adapter.discover_files(target_path))
+        except Exception as e:  # noqa: BLE001
+            LOGGER.warning("discover_files failed for %s: %s",
+                           adapter.language.value, e)
+            return []
+
+    # ---- economic analyzer -------------------------------------------------
+
+    # Order-of-magnitude offline models per category. `scope` explains
+    # what drives the real number; these are placeholder magnitudes that
+    # get refined when a --fork-url RPC is provided.
+    _ECONOMIC_MODELS: dict[str, dict[str, Any]] = {
+        "reentrancy": {
+            "cost": 0.5,
+            "profit": 100_000,
+            "scope": "drains contract balance; profit capped by TVL",
+        },
+        "oracle": {
+            "cost": 25.0,
+            "profit": 1_000_000,
+            "scope": "flash-loan fee (~0.09% of pool) vs drained loans",
+        },
+        "oracle-manipulation": {
+            "cost": 25.0,
+            "profit": 1_000_000,
+            "scope": "flash-loan fee (~0.09% of pool) vs drained loans",
+        },
+        "access-control": {
+            "cost": 2.0,
+            "profit": 250_000,
+            "scope": "gas + one tx; profit = funds governed by the role",
+        },
+        "arithmetic": {
+            "cost": 5.0,
+            "profit": 50_000,
+            "scope": "rounding / inflation; profit = precision loss per op",
+        },
+        "randomness": {
+            "cost": 2.0,
+            "profit": 25_000,
+            "scope": "predictable jackpot / winner index",
+        },
+        "signature": {
+            "cost": 2.0,
+            "profit": 25_000,
+            "scope": "replayed tx value across chains / wallets",
+        },
+        "unchecked-external-call": {
+            "cost": 1.0,
+            "profit": 10_000,
+            "scope": "silent failure of token/ETH transfer",
+        },
+    }
+
+    def _economic_analyzer(self, finding: Finding) -> None:
+        """Estimate the attacker's required capital and expected profit.
+
+        Uses a per-category offline model (order-of-magnitude). Real
+        on-chain TVL refinement is gated on ``--fork-url``.
+        """
+        model = self._ECONOMIC_MODELS.get(finding.category.lower())
+        if model:
+            finding.cost_basis_usd = float(model["cost"])
+            finding.expected_profit_usd = float(model["profit"])
+            finding.metadata["economic"] = {
+                "note": "offline order-of-magnitude estimate; pass "
+                        "--fork-url for on-chain TVL data",
+                "scope": model["scope"],
+            }
+            return
+        finding.cost_basis_usd = 0.0
+        finding.expected_profit_usd = 0.0
+        finding.metadata["economic"] = {
+            "note": "offline estimate; pass --fork-url for on-chain TVL data",
+            "scope": "unknown category; see description",
+        }
 
     # ---- helpers ---------------------------------------------------------
 
@@ -732,9 +1080,17 @@ class Scanner:
                 LOGGER.warning("discovery engine %s failed: %s", engine.name, exc)
                 continue
             for item in discovered:
+                # The multi-language static engine reports every language
+                # it finds, regardless of which adapter requested it.
+                # Resolve the file's *actual* language so findings are
+                # tagged correctly and each adapter only keeps its own.
+                from web3guard.discovery.static_analyzer import language_for_file
+                item_lang = language_for_file(Path(target_path) / item.file) or language
+                if item_lang != language:
+                    continue
                 finding = Finding(
                     target=target,
-                    language=language.value,
+                    language=item_lang.value,
                     file=item.file,
                     function=item.function,
                     category=item.category or item.title,
@@ -757,11 +1113,18 @@ class Scanner:
 
     @staticmethod
     def _fingerprint(finding: Finding) -> str:
+        # Description + line hint seed the fingerprint so two distinct
+        # vulnerabilities in the same function do not collapse into
+        # one identity (and vice-versa: identical reports dedupe).
+        desc = re.sub(r"\s+", " ", (finding.description or "")).strip().lower()
+        desc_seed = hashlib.sha256(desc.encode("utf-8")).hexdigest()[:12]
         material = "\0".join((
             finding.target,
             finding.file,
             finding.function,
             finding.category,
+            str(finding.line_hint or ""),
+            desc_seed,
         ))
         return hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
 
@@ -794,11 +1157,27 @@ class Scanner:
 
     @staticmethod
     def _extract_code_block(text: str, language: str = "solidity") -> str:
-        """Extract the first code block of a given language from a response."""
-        m = re.search(rf"```{language}\s*\n(.*?)```", text, re.DOTALL | re.IGNORECASE)
-        if m:
-            return m.group(1)
-        m = re.search(r"```\s*\n(.*?)```", text, re.DOTALL)
+        """Extract the first code block of a given language from a response.
+
+        Falls back to any fenced block (with or without a language
+        tag), then to the raw text. ``language`` matches the adapter's
+        canonical value (e.g. ``rust-solana``), so we also accept the
+        natural fence tags (``rust``/``typescript``) for those adapters.
+        """
+        aliases: dict[str, tuple[str, ...]] = {
+            "rust-solana": ("rust", "typescript", "ts", "solana", "anchor"),
+            "ts-sdk": ("typescript", "ts", "javascript", "js"),
+            "move": ("move", "rust"),
+            "func": ("func", "ton", "tl-b"),
+        }
+        labels = (language, *aliases.get(language, ()))
+        for label in labels:
+            m = re.search(rf"```{re.escape(label)}\s*\n(.*?)```",
+                          text, re.DOTALL | re.IGNORECASE)
+            if m:
+                return m.group(1)
+        # Bare or any-tag fence: ``` ... ```
+        m = re.search(r"```[a-zA-Z0-9_+-]*\s*\n(.*?)```", text, re.DOTALL)
         if m:
             return m.group(1)
         return text

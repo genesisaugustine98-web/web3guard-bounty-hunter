@@ -8,31 +8,18 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from pathlib import Path
-from typing import Any
 
 from web3guard.discovery.base import (
     DiscoveryEngineBase,
     DiscoveryResult,
     safe_run_subprocess,
+    temp_report_path,
 )
 from web3guard.languages.base import TargetLanguage
+from web3guard.utils.secrets import iter_secret_matches
 
 LOGGER = logging.getLogger("web3guard.discovery.gitleaks")
-
-
-_BUILTIN_PATTERNS: dict[str, re.Pattern[str]] = {
-    "private_key":       re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"),
-    "aws_access_key":    re.compile(r"AKIA[0-9A-Z]{16}"),
-    "alchemy_rpc":       re.compile(r"https://[a-zA-Z0-9._-]*alchemy[a-zA-Z0-9._-]*/v2/[A-Za-z0-9_-]{20,}"),
-    "infura_rpc":        re.compile(r"https://[a-zA-Z0-9._-]*infura[a-zA-Z0-9._-]*/v3/[A-Za-z0-9_-]{20,}"),
-    "mnemonic":          re.compile(r"\b(?:[a-z]{3,8}\s+){11,23}[a-z]{3,8}\b"),
-    "github_token":      re.compile(r"gh[pousr]_[A-Za-z0-9_]{36,}"),
-    "openai_key":        re.compile(r"sk-[A-Za-z0-9]{20,}"),
-    "google_api_key":    re.compile(r"AIza[0-9A-Za-z_-]{35}"),
-    "private_key_hex":   re.compile(r"\b[0-9a-fA-F]{64}\b"),
-}
 
 
 class GitleaksEngine(DiscoveryEngineBase):
@@ -54,7 +41,7 @@ class GitleaksEngine(DiscoveryEngineBase):
             LOGGER.info("gitleaks not installed; running built-in regex scan")
             return self._builtin_scan(target_path)
         timeout = timeout or self.default_timeout
-        out_file = target_path / "gitleaks_report.json"
+        out_file = temp_report_path(target_path, "gitleaks")
         cmd = [
             "gitleaks", "detect",
             "--source", str(target_path),
@@ -94,26 +81,24 @@ class GitleaksEngine(DiscoveryEngineBase):
         for fp in target_path.rglob("*"):
             if not fp.is_file():
                 continue
-            s = str(fp).lower()
+            s = "/" + fp.relative_to(target_path).as_posix().lower().strip("/") + "/"
             if any(p in s for p in ("/.git/", "/node_modules/", "/target/", "/build/", "/out/")):
                 continue
             try:
                 content = fp.read_text(errors="ignore")
             except Exception:  # noqa: BLE001
                 continue
-            for kind, pattern in _BUILTIN_PATTERNS.items():
-                for m in pattern.finditer(content):
-                    line = content[: m.start()].count("\n") + 1
-                    results.append(DiscoveryResult(
-                        engine="gitleaks",
-                        target=str(target_path),
-                        file=str(fp.relative_to(target_path)),
-                        line=line,
-                        category="secret-leak",
-                        severity="CRITICAL",
-                        title=f"Secret: {kind}",
-                        description=m.group(0)[:120],
-                        confidence=0.85,
-                        raw={"kind": kind, "file": str(fp.relative_to(target_path))},
-                    ))
+            for match in iter_secret_matches(content):
+                results.append(DiscoveryResult(
+                    engine="gitleaks",
+                    target=str(target_path),
+                    file=str(fp.relative_to(target_path)),
+                    line=match.line,
+                    category="secret-leak",
+                    severity="CRITICAL",
+                    title=f"Secret: {match.kind}",
+                    description=match.value[:120],
+                    confidence=0.85,
+                    raw={"kind": match.kind, "file": str(fp.relative_to(target_path))},
+                ))
         return results

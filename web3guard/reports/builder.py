@@ -15,6 +15,7 @@ class ReportFormat(StrEnum):
     JSON = "json"
     SARIF = "sarif"
     MARKDOWN = "md"
+    HTML = "html"
 
 
 _FILENAMES = {
@@ -22,6 +23,7 @@ _FILENAMES = {
     "json": "WEB3GUARD_FINDINGS.json",
     "sarif": "web3guard.sarif",
     "md": "WEB3GUARD_EXPLOIT_REPORT.md",
+    "html": "WEB3GUARD_EXPLOIT_REPORT.html",
 }
 
 
@@ -52,6 +54,8 @@ class ReportBuilder:
             return json.dumps(self._sarif(), indent=2) + "\n"
         if fmt == "md":
             return self._markdown()
+        if fmt == "html":
+            return self._html()
         return self._text()
 
     def _text(self) -> str:
@@ -84,6 +88,59 @@ class ReportBuilder:
                 "",
             ])
         return "\n".join(lines).rstrip() + "\n"
+
+    def _html(self) -> str:
+        """Self-contained HTML report (inline CSS, no external assets)."""
+        findings = list(self.result.all_findings)
+        severity_color = {
+            "CRITICAL": "#c62828", "HIGH": "#e65100", "MEDIUM": "#f9a825",
+            "LOW": "#2e7d32", "INFO": "#37474f",
+        }
+        rows: list[str] = []
+        for f in findings:
+            sev = str(f.severity).upper()
+            color = severity_color.get(sev, "#37474f")
+            rows.append(
+                "<tr>"
+                f"<td><span class=\"sev\" style=\"background:{color}\">{sev}</span></td>"
+                f"<td>{_html_escape(f.category or 'uncategorized')}</td>"
+                f"<td><code>{_html_escape(f.file)}</code>"
+                + (f":<code>{_html_escape(f.line_hint)}</code>" if f.line_hint else "")
+                + "</td>"
+                f"<td>{_html_escape(f.function or '')}</td>"
+                f"<td>{_html_escape(f.description or '')}</td>"
+                f"<td>{_html_escape(f.status)}</td>"
+                f"<td>{f.confidence:.2f}</td>"
+                "</tr>"
+            )
+        return (
+            "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n"
+            "<meta charset=\"utf-8\">\n"
+            "<title>Web3Guard Exploit Report</title>\n"
+            "<style>\n"
+            "body{font-family:-apple-system,'Segoe UI',Roboto,sans-serif;"
+            "margin:2rem auto;max-width:1100px;padding:0 1rem;color:#222}\n"
+            "h1{border-bottom:2px solid #1a237e;padding-bottom:.5rem}\n"
+            "table{border-collapse:collapse;width:100%;margin-top:1rem}\n"
+            "th,td{border:1px solid #ddd;padding:.5rem .75rem;text-align:left;"
+            "font-size:.9rem;vertical-align:top}\n"
+            "th{background:#f5f5f5}\n"
+            "code{background:#f5f5f5;padding:.1rem .35rem;border-radius:3px;"
+            "font-size:.85rem}\n"
+            ".sev{color:#fff;padding:.15rem .5rem;border-radius:3px;"
+            "font-size:.8rem;font-weight:600;white-space:nowrap}\n"
+            "</style>\n</head>\n<body>\n"
+            f"<h1>Web3Guard Exploit Report</h1>\n"
+            f"<p><strong>Findings:</strong> {len(findings)} "
+            f"&nbsp;|&nbsp; <strong>Confirmed:</strong> {len(self.result.confirmed_findings)} "
+            f"&nbsp;|&nbsp; <strong>Targets:</strong> {len(self.result.targets)}</p>\n"
+            "<table>\n<thead><tr>"
+            "<th>Severity</th><th>Category</th><th>Location</th><th>Function</th>"
+            "<th>Description</th><th>Status</th><th>Confidence</th>"
+            "</tr></thead>\n<tbody>\n"
+            + "\n".join(rows)
+            + "\n</tbody>\n</table>\n</body>\n</html>\n"
+        )
 
     def _sarif(self) -> dict[str, Any]:
         results = []
@@ -120,6 +177,13 @@ def _json_default(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value
     return str(value)
+
+
+def _html_escape(value: Any) -> str:
+    return (str(value)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;"))
 
 
 def _start_line(line_hint: str) -> int | None:

@@ -11,6 +11,7 @@ from web3guard.discovery.base import (
     DiscoveryEngineBase,
     DiscoveryResult,
     safe_run_subprocess,
+    temp_report_path,
 )
 from web3guard.languages.base import TargetLanguage
 
@@ -40,7 +41,7 @@ class AderynEngine(DiscoveryEngineBase):
             return []
         timeout = timeout or self.default_timeout
         # Aderyn writes its report to a file; use --output.
-        out_file = target_path / "aderyn_report.json"
+        out_file = temp_report_path(target_path, "aderyn")
         cmd = ["aderyn", str(target_path), "--output", str(out_file), "--no-fail"]
         if extra_args:
             cmd.extend(extra_args)

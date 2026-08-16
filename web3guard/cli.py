@@ -30,6 +30,17 @@ from web3guard.scanner import Scanner, load_config
 LOGGER = logging.getLogger("web3guard.cli")
 
 
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Recursively merge ``override`` over ``base`` (dicts merged, others replaced)."""
+    out = dict(base)
+    for k, v in (override or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="web3guard",
@@ -93,6 +104,24 @@ def build_parser() -> argparse.ArgumentParser:
     # ---- price ----------------------------------------------------------
     sub.add_parser("price", help="Show the cost-pricing model")
 
+    # ---- bench ----------------------------------------------------------
+    bench = sub.add_parser(
+        "bench",
+        help=(
+            "Run the precision/recall benchmark over a labeled corpus "
+            "(default: the in-repo test_contracts fixtures)"
+        ),
+    )
+    bench.add_argument("--corpus", type=Path, default=None,
+                       help="Path to a corpus manifest JSON (default: built-in)")
+    bench.add_argument("--min-severity", default="LOW",
+                       choices=["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"])
+    bench.add_argument("--json", type=Path, default=None, dest="json_out",
+                       help="Write the full machine-readable report here")
+    bench.add_argument("--fail-below", default=None,
+                       help="Comma-separated floors 'precision,recall' that "
+                            "exit non-zero when breached (CI gate), e.g. 0.9,0.85")
+
     # ---- version --------------------------------------------------------
     sub.add_parser("version", help="Print version and exit")
 
@@ -115,6 +144,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_mark(args)
     if args.command == "serve":
         return _cmd_serve(args)
+    if args.command == "bench":
+        return _cmd_bench(args)
     if args.command == "scan":
         return _cmd_scan(args)
     parser.print_help()
@@ -160,6 +191,63 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     print("Reports written:")
     for fmt, path in written.items():
         print(f"  - {fmt}: {path}")
+    return 0
+
+
+def _cmd_bench(args: argparse.Namespace) -> int:
+    from web3guard.bench import default_corpus, load_corpus, run_benchmark
+
+    corpus = load_corpus(args.corpus) if args.corpus else default_corpus()
+    report = run_benchmark(corpus, min_severity=args.min_severity)
+
+    o = report.overall
+    print("=" * 66)
+    print(f"  Web3Guard Benchmark — {report.corpus_name}")
+    print(f"  units={report.total_units} clean={report.clean_units} "
+          f"findings={report.findings}")
+    print("=" * 66)
+    print(f"  OVERALL   precision={o.precision:.3f}  recall={o.recall:.3f}  "
+          f"F1={o.f1:.3f}  (tp={o.tp} fp={o.fp} fn={o.fn})")
+    print()
+    print("  Per language:")
+    for lang, s in sorted(report.per_language.items()):
+        print(f"    {lang:<12s} precision={s.precision:.3f}  "
+              f"recall={s.recall:.3f}  F1={s.f1:.3f}  "
+              f"(tp={s.tp} fp={s.fp} fn={s.fn})")
+    print()
+    print("  Per category:")
+    for cat, s in sorted(report.per_category.items()):
+        print(f"    {cat:<22s} precision={s.precision:.3f}  "
+              f"recall={s.recall:.3f}  F1={s.f1:.3f}  "
+              f"(tp={s.tp} fp={s.fp} fn={s.fn})")
+    if report.missed:
+        print()
+        print("  Missed categories (false negatives):")
+        for file, cat in report.missed:
+            print(f"    {cat:<22s} {file}")
+    if report.false_positives:
+        print()
+        print("  False positives (category not in ground truth):")
+        for f in report.false_positives:
+            print(f"    {f.file}:{f.line} [{f.category}]")
+    if report.clean_hits:
+        print()
+        print("  Clean fixtures that triggered findings:")
+        for f in report.clean_hits:
+            print(f"    {f.file}:{f.line} [{f.category}]")
+
+    if args.json_out:
+        args.json_out.parent.mkdir(parents=True, exist_ok=True)
+        import json as _json
+        args.json_out.write_text(_json.dumps(report.to_dict(), indent=2), encoding="utf-8")
+        print(f"\nFull report written to {args.json_out}")
+
+    if args.fail_below:
+        p_floor, r_floor = (float(x) for x in args.fail_below.split(","))
+        breached = (o.precision < p_floor) or (o.recall < r_floor)
+        print(f"\nGate: precision>={p_floor:.3f} recall>={r_floor:.3f} "
+              f"-> {'PASS' if not breached else 'FAIL'}")
+        return 1 if breached else 0
     return 0
 
 
@@ -257,16 +345,24 @@ def _cmd_serve(args: argparse.Namespace) -> int:
                 )
                 self._json({"ok": True})
             elif parsed.path == "/scan":
-                cfg = payload.get("config") or load_config(args.workdir / "config.yaml")
-                scanner = Scanner(config=cfg, workdir=args.workdir)
-                result = scanner.scan(payload.get("targets", []))
-                written = scanner.build_report(result, out_dir=args.workdir / "reports")
-                self._json({
-                    "findings": len(result.all_findings),
-                    "confirmed": len(result.confirmed_findings),
-                    "cost_usd": result.cost_summary.get("total_cost_usd", 0),
-                    "reports": {k: str(v) for k, v in written.items()},
-                })
+                # Deep-merge the payload config over the file config so a
+                # partial payload can never leave the Scanner with a
+                # missing ai_providers / invalid schema.
+                base_cfg = load_config(args.workdir / "config.yaml")
+                cfg = _deep_merge(base_cfg, payload.get("config") or {})
+                try:
+                    scanner = Scanner(config=cfg, workdir=args.workdir)
+                    result = scanner.scan(payload.get("targets", []))
+                    written = scanner.build_report(result, out_dir=args.workdir / "reports")
+                    self._json({
+                        "findings": len(result.all_findings),
+                        "confirmed": len(result.confirmed_findings),
+                        "cost_usd": result.cost_summary.get("total_cost_usd", 0),
+                        "reports": {k: str(v) for k, v in written.items()},
+                    })
+                except Exception as e:  # noqa: BLE001
+                    LOGGER.exception("scan request failed")
+                    self._json({"error": f"scan failed: {e}"}, status=500)
             else:
                 self._json({"error": "not found"}, status=404)
 

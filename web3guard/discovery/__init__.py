@@ -24,6 +24,7 @@ from web3guard.discovery.base import (
     DiscoveryResult,
     safe_run_subprocess,
 )
+from web3guard.discovery.static_analyzer import StaticAnalyzerEngine
 from web3guard.discovery.slither_engine import SlitherEngine
 from web3guard.discovery.aderyn_engine import AderynEngine
 from web3guard.discovery.mythril_engine import MythrilEngine
@@ -42,6 +43,7 @@ from web3guard.discovery.legacy import (
 )
 
 ALL_ENGINES = (
+    StaticAnalyzerEngine,
     SlitherEngine,
     AderynEngine,
     MythrilEngine,
@@ -57,6 +59,7 @@ __all__ = [
     "DiscoveryEngineBase",
     "DiscoveryResult",
     "safe_run_subprocess",
+    "StaticAnalyzerEngine",
     "SlitherEngine",
     "AderynEngine",
     "MythrilEngine",

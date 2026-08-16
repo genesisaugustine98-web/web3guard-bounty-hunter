@@ -11,6 +11,7 @@ from web3guard.discovery.base import (
     DiscoveryEngineBase,
     DiscoveryResult,
     safe_run_subprocess,
+    temp_report_path,
 )
 from web3guard.languages.base import TargetLanguage
 
@@ -31,7 +32,7 @@ class SemgrepEngine(DiscoveryEngineBase):
             LOGGER.info("semgrep not installed; skipping")
             return []
         timeout = timeout or self.default_timeout
-        out_file = target_path / "semgrep_report.json"
+        out_file = temp_report_path(target_path, "semgrep")
         cmd = [
             "semgrep", "scan",
             "--config", "p/security-audit",

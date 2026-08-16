@@ -12,6 +12,7 @@ from web3guard.discovery.base import (
     DiscoveryEngineBase,
     DiscoveryResult,
     safe_run_subprocess,
+    temp_report_path,
 )
 from web3guard.languages.base import TargetLanguage
 
@@ -39,7 +40,7 @@ class EchidnaEngine(DiscoveryEngineBase):
             LOGGER.info("echidna: no foundry/hardhat project; skipping")
             return []
         timeout = timeout or self.default_timeout
-        out_file = target_path / "echidna_report.json"
+        out_file = temp_report_path(target_path, "echidna")
         # Pick a single top-level contract to fuzz
         contracts = self._pick_contracts(target_path)
         if not contracts:
