@@ -128,6 +128,145 @@ def test_scan_runs_all_adapters_not_just_primary(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Cross-repo dependency scanning
+# ---------------------------------------------------------------------------
+
+
+def test_dependency_discovery_from_gitmodules(tmp_path: Path) -> None:
+    from web3guard.utils.dependencies import discover_dependencies
+
+    repo = tmp_path / "repo"
+    (repo / "lib" / "oz").mkdir(parents=True)
+    (repo / ".gitmodules").write_text(
+        "[submodule \"lib/oz\"]\n"
+        "\tpath = lib/oz\n"
+        "\turl = https://github.com/OpenZeppelin/openzeppelin-contracts.git\n",
+        encoding="utf-8",
+    )
+    assert discover_dependencies(repo) == [
+        "https://github.com/OpenZeppelin/openzeppelin-contracts.git",
+    ]
+
+
+def test_dependency_discovery_from_package_json(tmp_path: Path) -> None:
+    from web3guard.utils.dependencies import discover_dependencies
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "package.json").write_text(json.dumps({
+        "dependencies": {
+            "sdk": "git+https://github.com/acme/web3-sdk.git",
+        },
+    }), encoding="utf-8")
+    assert discover_dependencies(repo) == [
+        "https://github.com/acme/web3-sdk.git",
+    ]
+
+
+def test_dependency_discovery_from_cargo_and_scarb(tmp_path: Path) -> None:
+    from web3guard.utils.dependencies import discover_dependencies
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "Cargo.toml").write_text(
+        "[dependencies]\n"
+        "solana-sdk = { git = \"https://github.com/solana-labs/solana\", rev = \"x\" }\n",
+        encoding="utf-8",
+    )
+    (repo / "Scarb.toml").write_text(
+        "[dependencies]\n"
+        "openzeppelin = { github = \"OpenZeppelin/cairo-contracts\" }\n",
+        encoding="utf-8",
+    )
+    assert discover_dependencies(repo) == [
+        "https://github.com/OpenZeppelin/cairo-contracts",
+        "https://github.com/solana-labs/solana",
+    ]
+
+
+def test_dependency_discovery_dedupes_and_skips_none(tmp_path: Path) -> None:
+    from web3guard.utils.dependencies import discover_dependencies
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "package.json").write_text(json.dumps({
+        "dependencies": {
+            "a": "git+https://github.com/x/y.git",
+            "b": "git+https://github.com/x/y.git",
+            "c": "^1.2.3",
+        },
+    }), encoding="utf-8")
+    assert discover_dependencies(repo) == ["https://github.com/x/y.git"]
+
+
+def test_scanner_scans_declared_dependencies(tmp_path: Path, monkeypatch) -> None:
+    from web3guard.scanner import Scanner, TargetResult
+    from web3guard.languages import TargetLanguage
+
+    scanner = Scanner(config={"enable_dependency_scan": True},
+                      ai_client=CleanAIStub(), workdir=tmp_path / "work")
+
+    scanned: list[str] = []
+
+    def fake_clone(target: str):
+        repo = tmp_path / "cloned-target"
+        repo.mkdir(exist_ok=True)
+        (repo / ".gitmodules").write_text(
+            "[submodule \"lib/oz\"]\n"
+            "\tpath = lib/oz\n"
+            "\turl = https://github.com/OpenZeppelin/openzeppelin-contracts.git\n",
+            encoding="utf-8",
+        )
+        return repo
+
+    def fake_scan_one(target: str, budget: int, *, min_severity: str) -> TargetResult:
+        scanned.append(target)
+        return TargetResult(target=target, language=TargetLanguage.SOLIDITY)
+
+    monkeypatch.setattr(scanner, "_clone_target", fake_clone)
+    monkeypatch.setattr(scanner, "_scan_one", fake_scan_one)
+
+    deps = scanner._scan_dependencies("https://github.com/acme/target.git", 1000,
+                                      min_severity="LOW")
+    assert len(deps) == 1
+    assert scanned == ["https://github.com/OpenZeppelin/openzeppelin-contracts.git"]
+    assert deps[0].dependency_of == "https://github.com/acme/target.git"
+
+
+def test_scanner_does_not_scan_itself_as_dependency(tmp_path: Path, monkeypatch) -> None:
+    from web3guard.scanner import Scanner, TargetResult
+    from web3guard.languages import TargetLanguage
+
+    scanner = Scanner(config={"enable_dependency_scan": True},
+                      ai_client=CleanAIStub(), workdir=tmp_path / "work")
+    scanned: list[str] = []
+
+    def fake_clone(target: str):
+        repo = tmp_path / "self-dep"
+        repo.mkdir(exist_ok=True)
+        (repo / ".gitmodules").write_text(
+            "[submodule \"self\"]\n"
+            "\tpath = self\n"
+            "\turl = https://github.com/acme/target.git\n",
+            encoding="utf-8",
+        )
+        return repo
+
+    def fake_scan_one(target: str, budget: int, *, min_severity: str) -> TargetResult:
+        scanned.append(target)
+        return TargetResult(target=target, language=TargetLanguage.SOLIDITY)
+
+    monkeypatch.setattr(scanner, "_clone_target", fake_clone)
+    monkeypatch.setattr(scanner, "_scan_one", fake_scan_one)
+
+    deps = scanner._scan_dependencies("https://github.com/acme/target.git", 1000,
+                                      min_severity="LOW")
+    assert deps == []
+    assert scanned == []
+
+
+
+# ---------------------------------------------------------------------------
 # Secret scanner hardening
 # ---------------------------------------------------------------------------
 

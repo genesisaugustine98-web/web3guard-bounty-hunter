@@ -149,7 +149,11 @@ integration with custom dashboards and CI pipelines.
 - **Cross-repo scanning** — the scanner analyzes one target at a time.
   If a target depends on another repo (e.g. an OZ fork), the
   dependency is *not* automatically scanned. Use the multi-target
-  `targets_config` to scan them together.
+  `targets_config` to scan them together, or pass `--scan-dependencies`
+  (config: `enable_dependency_scan: true`) to auto-discover the
+  target's declared git dependencies (`.gitmodules`, npm `git+` /
+  `github:` deps, Cargo `git = ...`, Scarb `github = ...`, and
+  GitHub remappings) and scan each one through the same pipeline.
 - **Prompt-injection defense is best-effort.** No static defense can
   guarantee immunity against a sufficiently motivated attacker with a
   sufficiently capable model. Always manually verify findings before

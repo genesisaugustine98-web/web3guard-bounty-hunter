@@ -117,6 +117,7 @@ class TargetResult:
     secrets_findings: list[dict[str, Any]] = field(default_factory=list)
     error: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    dependency_of: str = ""  # set when this target was scanned as a dependency
 
 
 @dataclass
@@ -208,6 +209,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "enable_secret_scan": True,
     "enable_incremental_scan": False,
     "enable_deployment_verification": False,
+    "enable_dependency_scan": False,
     "enable_economic_analyzer": True,
     "report_formats": ["txt", "json", "sarif", "md"],
     "findings_db_path": ".web3guard/findings.db",
@@ -379,6 +381,13 @@ class Scanner:
             for f in tr.findings:
                 self.findings_db.upsert(FindingRecord.from_finding(f))
             result.targets.append(tr)
+            if self.config.get("enable_dependency_scan", False):
+                dep_trs = self._scan_dependencies(
+                    url, budget, min_severity=min_severity)
+                for dep_tr in dep_trs:
+                    for f in dep_tr.findings:
+                        self.findings_db.upsert(FindingRecord.from_finding(f))
+                result.targets.extend(dep_trs)
         self._end_ts = datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z")
         result.finished_at = self._end_ts
         result.cost_summary = self.ai_client.cost_tracker().summary()
@@ -548,6 +557,41 @@ class Scanner:
         # Local path
         p = Path(target).resolve()
         return p if p.is_dir() else None
+
+    def _scan_dependencies(
+        self,
+        target: str,
+        budget: int,
+        *,
+        min_severity: str,
+    ) -> list[TargetResult]:
+        """Scan the git dependencies declared by ``target``.
+
+        The target is cloned (or resolved as a local path), its declared
+        dependencies are discovered offline, and each dependency that is
+        not the target itself is scanned with the same per-target
+        pipeline. This closes the "dependency is never scanned" gap for
+        repos that vendor an OpenZeppelin fork, Solana SDK, Cairo
+        library, etc. Guarded by ``enable_dependency_scan``.
+        """
+        from web3guard.utils.dependencies import discover_dependencies
+
+        path = self._clone_target(target)
+        if path is None:
+            return []
+        deps = discover_dependencies(path)
+        LOGGER.info("target %s declares %d dependency repo(s)", target, len(deps))
+        results: list[TargetResult] = []
+        for dep in deps:
+            if dep.rstrip("/") == str(target).rstrip("/"):
+                continue  # a target must not scan itself
+            LOGGER.info("scanning dependency: %s (budget=%s)", dep, budget)
+            t0 = time.monotonic()
+            tr = self._scan_one(dep, budget, min_severity=min_severity)
+            tr.elapsed_seconds = time.monotonic() - t0
+            tr.dependency_of = target
+            results.append(tr)
+        return results
 
     def _build_system_prompt(self, adapter: LanguageAdapter) -> str:
         """Compose the analysis system prompt (generic + language-specific)."""

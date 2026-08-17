@@ -291,6 +291,7 @@ enable_attack_sequence_brainstorm: true
 enable_role_map: true
 enable_secret_scan: true
 enable_economic_analyzer: true
+enable_dependency_scan: false   # scan declared git dependencies (submodules, npm/Cargo/Scarb git deps)
 
 report_formats: [txt, json, sarif, md]
 findings_db_path: .web3guard/findings.db

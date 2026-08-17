@@ -78,6 +78,10 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--no-self-critique", action="store_true")
     scan.add_argument("--seed", type=int, default=0,
                       help="Random seed for deterministic replays")
+    scan.add_argument("--scan-dependencies", action="store_true",
+                      help="Discover and scan the target's declared git "
+                           "dependencies (submodules, npm git deps, Cargo / "
+                           "Scarb git deps)")
 
     # ---- dashboard ------------------------------------------------------
     dash = sub.add_parser("dashboard", help="Show submission-history dashboard")
@@ -178,6 +182,8 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         cfg["fork_url"] = args.fork_url
     if args.seed is not None:
         cfg["default_seed"] = args.seed
+    if args.scan_dependencies:
+        cfg["enable_dependency_scan"] = True
     scanner = Scanner(config=cfg, workdir=args.workdir)
     result = scanner.scan(args.targets, min_severity=args.min_severity)
     out_dir = args.out or (args.workdir / "reports")
