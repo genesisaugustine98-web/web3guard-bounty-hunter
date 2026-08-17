@@ -233,6 +233,29 @@ def _detect_solidity(content: str, rel: str) -> list[StaticIssue]:
                         "malicious receiver can re-enter before accounting "
                         "is settled.", function=name, confidence=0.8))
                 break
+        # 1b. Unchecked low-level call return value (SWC-104). A call
+        # whose result is not captured into a `(bool ...)` tuple and not
+        # wrapped in require(...) silently ignores failure. Note that
+        # capturing into `(bool x,) = ...` is the *safe* form, so it must
+        # not be flagged (this keeps SimpleDAO / SafeVault clean).
+        for i, ln in enumerate(lines):
+            if re.search(r"\.(?:call|delegatecall)\b\s*(\{|\()", ln):
+                lo = max(0, i - 2)
+                hi = min(len(lines), i + 2)
+                window = "\n".join(lines[lo:hi])
+                if not re.search(r"\(bool\s+\w+\s*,?\s*\)?\s*=|"
+                                 r"bool\s+\w+\s*=\s*\w+\.call|"
+                                 r"require\s*\(\s*\w+\.call|"
+                                 r"assert\s*\(\s*\w+\.call", window):
+                    issues.append(_issue(
+                        rel, start_line + i, "unchecked-external-call",
+                        "MEDIUM",
+                        "Unchecked low-level call return value",
+                        f"{name}() ignores the (bool, bytes) result of a "
+                        "low-level .call/.delegatecall; a failed call is "
+                        "silently treated as success.",
+                        function=name, confidence=0.7))
+                break
         # 2. Access control.
         guarded = bool(_GUARD_RE.search(sig + body))
         if _PRIVILEGED_FN.match(name) and not guarded and has_owner:
@@ -242,6 +265,21 @@ def _detect_solidity(content: str, rel: str) -> list[StaticIssue]:
                 f"{name}() mutates role state but contains no authorization "
                 "guard (onlyOwner / require(msg.sender == owner)).",
                 function=name, confidence=0.85))
+        # 2b. Anyone-can-become-owner: a callable function that sets the
+        # ownership variable from msg.sender with no guard. Constructors,
+        # initializers, and ownership-transfer claim functions (which use
+        # require(msg.sender == pending) / onlyOwner) are excluded.
+        if not guarded and name not in (
+                "constructor", "init", "initialize", "fallback", "receive") \
+                and re.search(
+                    r"\b(?:owner|creator|admin|governor|controller|guardian)\b"
+                    r"\s*=\s*(?:payable\s*\(\s*)?msg\.sender\b", body):
+            issues.append(_issue(
+                rel, start_line, "access-control", "HIGH",
+                "Anyone can become owner (unprotected ownership assignment)",
+                f"{name}() assigns the ownership variable from msg.sender "
+                "without authorization; any caller can take over the "
+                "contract.", function=name, confidence=0.85))
         # 3. Oracle manipulation: single-pool spot price.
         if re.search(r"getReserves\s*\(|latestRoundData\s*\(", body):
             issues.append(_issue(
@@ -266,10 +304,16 @@ def _detect_solidity(content: str, rel: str) -> list[StaticIssue]:
                 f"{name}() multiplies then divides, rounding in the "
                 "attacker's favor; check the rounding direction.",
                 function=name, confidence=0.6))
-        # 5. Randomness.
-        if re.search(r"blockhash\s*\(|block\.timestamp|block\.difficulty|"
-                     r"prevrandao", body) and re.search(
-                         r"%(?:[\w\[\]])|winner|rand|pick|lucky", body):
+        # 5. Randomness.  `blockhash` is essentially only ever used to
+        # derive an on-chain outcome, so it alone is sufficient. The
+        # block.timestamp / difficulty / prevrandao family is also used
+        # for deadlines and time-locks, so those still need an outcome
+        # conjunct (`%`, winner, rand, pick, lucky) to avoid false hits.
+        if re.search(r"blockhash\s*\(", body) or (
+                re.search(r"block\.timestamp|block\.difficulty|prevrandao",
+                          body) and re.search(
+                              r"%(?:[\w\[\]])|winner|rand|pick|lucky",
+                              body)):
             issues.append(_issue(
                 rel, start_line, "randomness", "HIGH",
                 "Predictable randomness (blockhash / block.timestamp)",
