@@ -166,7 +166,7 @@ _STATE_WRITE_RE = re.compile(
     r")\s*[^=;]*(\+|-)?="
 )
 _GUARD_RE = re.compile(
-    r"only[A-Z][A-Za-z0-9_]*\b|"
+    r"only[A-Za-z][A-Za-z0-9_]*\b|"
     r"require\s*\([^;]{0,120}\bmsg\.sender\b|require\s*\([^;]{0,80}owner|"
     r"assert\s+msg\.sender\s*==\s*self\.(?:owner|admin)|"
     r"asserts!\s*\(is-eq\s+(?:tx-sender|contract-caller)|"
@@ -195,6 +195,8 @@ _SWC = {
     "delegatecall": "SWC-112",
     "unlimited-approval": "SWC-114",
     "slippage": "SWC-108",
+    "denial-of-service": "SWC-113",
+    "front-running": "SWC-114",
 }
 
 
@@ -256,8 +258,33 @@ def _detect_solidity(content: str, rel: str) -> list[StaticIssue]:
                         "silently treated as success.",
                         function=name, confidence=0.7))
                 break
-        # 2. Access control.
+        # 1c. Unchecked .send -> denial of service (SWC-113). `.send`
+        # forwards 2300 gas and returns false instead of reverting, so a
+        # discarded result silently drops the payment and can leave the
+        # contract in an inconsistent (stuck) state. Owner-guarded fee
+        # collectors are trusted paths: a silently failing transfer there
+        # is the owner's own loss, not an attack surface, so they are
+        # skipped.
         guarded = bool(_GUARD_RE.search(sig + body))
+        for i, ln in enumerate(lines):
+            if re.search(r"\.send\s*\(", ln):
+                if guarded:
+                    break
+                lo = max(0, i - 2)
+                hi = min(len(lines), i + 2)
+                window = "\n".join(lines[lo:hi])
+                if not re.search(r"\(bool\s+\w+\s*,?\s*\)?\s*=|"
+                                 r"require\s*\([^)]*\.send|"
+                                 r"assert\s*\([^)]*\.send", window):
+                    issues.append(_issue(
+                        rel, start_line + i, "denial-of-service", "MEDIUM",
+                        "Unchecked .send (silent payment failure)",
+                        f"{name}() ignores the bool returned by .send(); "
+                        "a failed 2300-gas transfer is silently swallowed, "
+                        "which can brick payouts or corrupt accounting.",
+                        function=name, confidence=0.65))
+                break
+        # 2. Access control.
         if _PRIVILEGED_FN.match(name) and not guarded and has_owner:
             issues.append(_issue(
                 rel, start_line, "access-control", "HIGH",
@@ -384,6 +411,34 @@ def _detect_solidity(content: str, rel: str) -> list[StaticIssue]:
             "delegatecalls the stored implementation, so any attacker can "
             "point the proxy at a malicious implementation.",
             confidence=0.85))
+
+    # approve/transferFrom race (transaction-order dependence, SWC-114):
+    # approve() overwrites an allowance in the old token convention, so a
+    # spender can front-run a newer approve with a transferFrom of the
+    # previous allowance.
+    has_transfer_from = bool(re.search(r"transferFrom\s*\(", content))
+    for name, body, start_line, _, _ in _iter_braced_functions(content, "solidity"):
+        if name == "approve" and has_transfer_from and re.search(
+                r"(?:_allowed|allowed|allowance)\s*\[[^\]]*\]\s*\[[^\]]*\]\s*=",
+                body):
+            # EIP-20 recommends guarding approve against a non-zero
+            # previous allowance (e.g. `assert(!((_value != 0) &&
+            # (allowed[msg.sender][_spender] != 0)))`); such a guard closes
+            # the race, so the function is no longer front-runnable
+            # (SmartBillions).
+            if re.search(
+                    r"assert\s*\([^;]*![^;]*(?:allowed|allowance)\s*\[",
+                    body) or re.search(
+                        r"(?:allowed|allowance)\s*\[[^\]]*\]\s*\[[^\]]*\]"
+                        r"\s*==\s*0", body):
+                continue
+            issues.append(_issue(
+                rel, start_line, "front-running", "MEDIUM",
+                "approve()/transferFrom() race (front-runnable)",
+                "approve() overwrites the allowance directly; a spender can "
+                "front-run a new approval and spend both the old and the "
+                "new allowance (use increaseAllowance/decreaseAllowance).",
+                function=name, confidence=0.7))
     return issues
 
 

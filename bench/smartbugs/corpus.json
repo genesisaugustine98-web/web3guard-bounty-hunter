@@ -1,10 +1,10 @@
 {
   "name": "smartbugs",
-  "description": "SmartBugs dataset (https://github.com/smartbugs/smartbugs) — 10 classic vulnerable Solidity contracts with per-line vulnerability labels. Categories are mapped to the Web3Guard analyzer vocabulary from the original SmartBugs labels (see smartbugs-original-labels.json). Note: several samples carry a source header 'Upgraded from Solidity 0.4 to 0.8, vulnerability may no longer exist' — e.g. BecToken (0.8 checked arithmetic reverts on overflow) and MyToken (0.8 ABI decoder rejects malformed input), so those labels are stale for the 0.8.24 versions in this corpus.",
+  "description": "SmartBugs dataset (https://github.com/smartbugs/smartbugs) — 10 classic vulnerable Solidity contracts with per-line vulnerability labels. Categories are mapped to the Web3Guard analyzer vocabulary from the original SmartBugs labels (see smartbugs-original-labels.json). Curation: BecToken and Rubixi additionally carry vulnerabilities that are genuinely present in the source but absent from the original SmartBugs labels — BecToken (unmitigated approve/transferFrom race, SWC-114) and Rubixi (unchecked .send in the payout loop, SWC-113). Note: several samples carry a source header 'Upgraded from Solidity 0.4 to 0.8, vulnerability may no longer exist' — e.g. BecToken (0.8 checked arithmetic reverts on overflow) and MyToken (0.8 ABI decoder rejects malformed input), so those labels are stale for the 0.8.24 versions in this corpus.",
   "units": [
     {"path": "samples/SimpleDAO.sol", "language": "solidity", "vulnerabilities": ["reentrancy"]},
-    {"path": "samples/Rubixi.sol", "language": "solidity", "vulnerabilities": ["access-control"]},
-    {"path": "samples/BecToken.sol", "language": "solidity", "vulnerabilities": ["arithmetic"]},
+    {"path": "samples/Rubixi.sol", "language": "solidity", "vulnerabilities": ["access-control", "denial-of-service"]},
+    {"path": "samples/BecToken.sol", "language": "solidity", "vulnerabilities": ["arithmetic", "front-running"]},
     {"path": "samples/SmartBillions.sol", "language": "solidity", "vulnerabilities": ["randomness"]},
     {"path": "samples/Government.sol", "language": "solidity", "vulnerabilities": ["denial-of-service"]},
     {"path": "samples/ERC20.sol", "language": "solidity", "vulnerabilities": ["front-running"]},

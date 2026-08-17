@@ -48,6 +48,34 @@ def test_wrong_constructor_name_init_is_detected() -> None:
     )
 
 
+def test_unchecked_send_dos_is_detected() -> None:
+    findings = _run("Government.sol")
+    assert any(r.category == "denial-of-service" for r in findings)
+
+
+def test_approve_transferfrom_race_is_detected() -> None:
+    findings = _run("ERC20.sol")
+    assert any(
+        r.category == "front-running" and r.function == "approve"
+        for r in findings
+    )
+
+
+def test_mitigated_approve_is_not_flagged() -> None:
+    findings = _run("SmartBillions.sol")
+    assert not any(r.category == "front-running" for r in findings)
+
+
+def test_owner_guarded_send_is_not_dos() -> None:
+    findings = _run("Rubixi.sol")
+    assert not any(
+        r.category == "denial-of-service"
+        and r.function in ("collectAllFees", "collectFeesInEther",
+                           "collectPercentOfFees")
+        for r in findings
+    )
+
+
 def test_clean_fixtures_stay_false_positive_free() -> None:
     engine = StaticAnalyzerEngine()
     assert engine.run(REPO / "test_contracts" / "clean") == []
