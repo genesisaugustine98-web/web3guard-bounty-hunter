@@ -17,6 +17,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from web3guard.discovery.base import temp_report_path
 from web3guard.discovery.static_analyzer import StaticAnalyzerEngine
 from web3guard.languages.registry import default_registry, detect_target_language
@@ -297,6 +299,92 @@ def test_bench_reports_false_positives() -> None:
     assert len(report.false_positives) == 1
 
 
+def test_bench_confidence_weighted_precision() -> None:
+    from web3guard.bench import BenchmarkCorpus, CorpusUnit, evaluate
+    from web3guard.bench.metrics import BenchFinding
+
+    corpus = BenchmarkCorpus(
+        name="t", description="", root=REPO,
+        units=(CorpusUnit(path="A.sol", language="solidity", vulnerabilities=("reentrancy",)),),
+    )
+    report = evaluate(corpus, [
+        BenchFinding(file="A.sol", category="reentrancy", line=1, confidence=0.9),
+        BenchFinding(file="A.sol", category="access-control", line=2, confidence=0.1),
+    ])
+    o = report.overall
+    # Count-based precision is 0.5 (one TP, one FP), but the weighted
+    # variant down-weights the low-confidence FP.
+    assert o.precision == 0.5
+    assert o.weighted_precision == pytest.approx(0.9)
+    assert o.weighted_tp == pytest.approx(0.9)
+    assert o.weighted_fp == pytest.approx(0.1)
+
+
+def test_bench_confidence_weighted_recall() -> None:
+    from web3guard.bench import BenchmarkCorpus, CorpusUnit, evaluate
+    from web3guard.bench.metrics import BenchFinding
+
+    corpus = BenchmarkCorpus(
+        name="t", description="", root=REPO,
+        units=(CorpusUnit(path="A.sol", language="solidity",
+                          vulnerabilities=("reentrancy", "arithmetic")),),
+    )
+    report = evaluate(corpus, [
+        BenchFinding(file="A.sol", category="reentrancy", line=1, confidence=0.6),
+    ])
+    o = report.overall
+    # Count recall says 1 of 2 labels detected; weighted recall credits
+    # only the detection strength actually achieved per label.
+    assert o.recall == 0.5
+    assert o.weighted_recall == pytest.approx(0.3)
+    assert o.weighted_fn == pytest.approx(1.4)
+
+
+def test_bench_report_diff_detects_regression() -> None:
+    from web3guard.bench.metrics import diff_reports
+
+    good = {
+        "corpus": "t", "units": 1, "clean_units": 0, "findings": 2,
+        "overall": {"precision": 1.0, "recall": 1.0, "f1": 1.0,
+                    "weighted_precision": 1.0, "weighted_recall": 1.0,
+                    "weighted_f1": 1.0, "tp": 1, "fp": 0, "fn": 0},
+        "per_language": {}, "per_category": {}, "missed_categories": [],
+        "false_positives": [], "clean_hits": [],
+    }
+    bad = dict(good)
+    bad["overall"] = dict(good["overall"], precision=0.5, f1=0.667,
+                          fp=1)
+    bad["false_positives"] = [{"file": "A.sol", "category": "x", "line": 1}]
+
+    d = diff_reports(good, bad)
+    assert d["regressed"]
+    assert d["precision_delta"] == pytest.approx(-0.5)
+    assert d["recall_delta"] == pytest.approx(0.0)
+    assert d["new_false_positives"] == [{"file": "A.sol", "category": "x", "line": 1}]
+    assert d["resolved_false_positives"] == []
+
+
+def test_bench_report_diff_improvement_is_not_regression() -> None:
+    from web3guard.bench.metrics import diff_reports
+
+    base = {
+        "corpus": "t", "units": 1, "clean_units": 0, "findings": 1,
+        "overall": {"precision": 0.5, "recall": 0.5, "f1": 0.5,
+                    "weighted_precision": 0.5, "weighted_recall": 0.5,
+                    "weighted_f1": 0.5, "tp": 0, "fp": 1, "fn": 1},
+        "per_language": {}, "per_category": {}, "missed_categories": [],
+        "false_positives": [], "clean_hits": [],
+    }
+    better = dict(base)
+    better["overall"] = dict(base["overall"], precision=1.0, recall=1.0,
+                             f1=1.0, tp=1, fp=0, fn=0)
+    better["missed_categories"] = []
+
+    d = diff_reports(base, better)
+    assert not d["regressed"]
+    assert d["precision_delta"] == pytest.approx(0.5)
+
+
 def test_bench_clean_fixture_hits_are_surfaceable() -> None:
     from web3guard.bench import BenchmarkCorpus, CorpusUnit, evaluate
     from web3guard.bench.metrics import BenchFinding
@@ -321,6 +409,7 @@ def test_bench_cli_writes_json_and_gates(tmp_path: Path) -> None:
         min_severity = "LOW"
         json_out = json_path
         fail_below = None
+        diff_path = None
 
     assert _cmd_bench(Args()) == 0
     data = json.loads(json_path.read_text(encoding="utf-8"))
@@ -331,5 +420,31 @@ def test_bench_cli_writes_json_and_gates(tmp_path: Path) -> None:
         min_severity = "LOW"
         json_out = None
         fail_below = "1.5,1.5"  # impossible floor -> must fail the gate
+        diff_path = None
 
     assert _cmd_bench(FailingArgs()) == 1
+
+
+def test_bench_cli_diff_passes_when_identical(tmp_path: Path) -> None:
+    from web3guard.cli import _cmd_bench
+
+    report_path = tmp_path / "bench-report.json"
+
+    class FirstArgs:  # noqa: D106
+        corpus = None
+        min_severity = "LOW"
+        json_out = report_path
+        fail_below = None
+        diff_path = None
+
+    assert _cmd_bench(FirstArgs()) == 0
+
+    class DiffArgs:  # noqa: D106
+        corpus = None
+        min_severity = "LOW"
+        json_out = None
+        fail_below = None
+        diff_path = report_path
+
+    assert _cmd_bench(DiffArgs()) == 0
+

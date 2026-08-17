@@ -20,6 +20,8 @@ env/
 # Web3Guard state
 .web3guard/
 /reports/
+bench/reports/current.json
+bench/smartbugs/reports/current.json
 exploit_sandboxes/
 pressure_out/
 

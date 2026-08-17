@@ -121,6 +121,10 @@ def build_parser() -> argparse.ArgumentParser:
     bench.add_argument("--fail-below", default=None,
                        help="Comma-separated floors 'precision,recall' that "
                             "exit non-zero when breached (CI gate), e.g. 0.9,0.85")
+    bench.add_argument("--diff", type=Path, default=None, dest="diff_path",
+                       help="Path to a previously-saved --json report; print a "
+                            "regression diff against the current run and exit "
+                            "non-zero if the run regressed")
 
     # ---- version --------------------------------------------------------
     sub.add_parser("version", help="Print version and exit")
@@ -208,6 +212,8 @@ def _cmd_bench(args: argparse.Namespace) -> int:
     print("=" * 66)
     print(f"  OVERALL   precision={o.precision:.3f}  recall={o.recall:.3f}  "
           f"F1={o.f1:.3f}  (tp={o.tp} fp={o.fp} fn={o.fn})")
+    print(f"            weighted precision={o.weighted_precision:.3f}  "
+          f"recall={o.weighted_recall:.3f}  F1={o.weighted_f1:.3f}")
     print()
     print("  Per language:")
     for lang, s in sorted(report.per_language.items()):
@@ -238,16 +244,43 @@ def _cmd_bench(args: argparse.Namespace) -> int:
 
     if args.json_out:
         args.json_out.parent.mkdir(parents=True, exist_ok=True)
-        import json as _json
-        args.json_out.write_text(_json.dumps(report.to_dict(), indent=2), encoding="utf-8")
+        args.json_out.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
         print(f"\nFull report written to {args.json_out}")
+
+    if args.diff_path:
+        from web3guard.bench import diff_reports
+        baseline = json.loads(
+            args.diff_path.read_text(encoding="utf-8"))
+        d = diff_reports(baseline, report.to_dict())
+        status = "REGRESSION" if d["regressed"] else "OK"
+        print(f"\nDiff vs {args.diff_path}: [{status}]")
+        print(f"  precision delta={d['precision_delta']:+.4f}  "
+              f"recall delta={d['recall_delta']:+.4f}  "
+              f"F1 delta={d['f1_delta']:+.4f}")
+        print(f"  weighted F1 delta={d['weighted_f1_delta']:+.4f}")
+        if d["new_false_positives"]:
+            print("  NEW false positives:")
+            for fp in d["new_false_positives"]:
+                print(f"    {fp['file']}:{fp['line']} [{fp['category']}]")
+        if d["resolved_false_positives"]:
+            print("  resolved false positives:")
+            for fp in d["resolved_false_positives"]:
+                print(f"    {fp['file']}:{fp['line']} [{fp['category']}]")
+        if d["new_missed_categories"]:
+            print("  NEW missed categories:")
+            for file, cat in d["new_missed_categories"]:
+                print(f"    {cat:<22s} {file}")
 
     if args.fail_below:
         p_floor, r_floor = (float(x) for x in args.fail_below.split(","))
         breached = (o.precision < p_floor) or (o.recall < r_floor)
         print(f"\nGate: precision>={p_floor:.3f} recall>={r_floor:.3f} "
               f"-> {'PASS' if not breached else 'FAIL'}")
-        return 1 if breached else 0
+        if breached:
+            return 1
+
+    if args.diff_path and d["regressed"]:
+        return 1
     return 0
 
 

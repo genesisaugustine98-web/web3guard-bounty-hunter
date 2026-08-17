@@ -93,18 +93,38 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e .
 
-      - name: Run benchmark with regression floor
+      - name: Run benchmark with regression floor (in-repo corpus)
         run: |
           python -m web3guard.cli bench \
             --fail-below 0.99,0.95 \
-            --json bench-report.json
+            --json bench/reports/current.json
+
+      - name: Diff in-repo benchmark vs committed baseline
+        run: |
+          python -m web3guard.cli bench \
+            --diff bench/reports/test-contracts-baseline.json
+
+      - name: Run benchmark with regression floor (SmartBugs corpus)
+        run: |
+          python -m web3guard.cli bench \
+            --corpus bench/smartbugs/corpus.json \
+            --fail-below 1.0,0.8 \
+            --json bench/smartbugs/reports/current.json
+
+      - name: Diff SmartBugs benchmark vs committed baseline
+        run: |
+          python -m web3guard.cli bench \
+            --corpus bench/smartbugs/corpus.json \
+            --diff bench/smartbugs/reports/baseline.json
 
       - name: Upload benchmark report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: web3guard-benchmark-${{ github.run_id }}
-          path: bench-report.json
+          path: |
+            bench/reports/current.json
+            bench/smartbugs/reports/current.json
           if-no-files-found: warn
 
   scan:

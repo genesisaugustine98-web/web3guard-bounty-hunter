@@ -21,6 +21,7 @@ from web3guard.bench.metrics import (
     BenchFinding,
     BenchmarkReport,
     Score,
+    diff_reports,
     evaluate,
 )
 from web3guard.bench.runner import run_benchmark
@@ -35,5 +36,6 @@ __all__ = [
     "default_corpus",
     "load_corpus",
     "evaluate",
+    "diff_reports",
     "run_benchmark",
 ]

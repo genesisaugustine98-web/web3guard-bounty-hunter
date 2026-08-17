@@ -45,5 +45,6 @@ def run_benchmark(
             category=getattr(r, "category", "") or getattr(r, "title", ""),
             line=int(getattr(r, "line", 0) or 0),
             severity=sev,
+            confidence=float(getattr(r, "confidence", 0.5) or 0.5),
         ))
     return evaluate(corpus, findings)

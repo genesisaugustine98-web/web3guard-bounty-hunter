@@ -1,0 +1,267 @@
+{
+  "corpus": "test-contracts",
+  "units": 16,
+  "clean_units": 2,
+  "findings": 53,
+  "overall": {
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0,
+    "weighted_precision": 1.0,
+    "weighted_recall": 0.7321,
+    "weighted_f1": 0.8454,
+    "tp": 40,
+    "fp": 0,
+    "fn": 0,
+    "tp_categories": 28
+  },
+  "per_language": {
+    "cairo": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "weighted_precision": 1.0,
+      "weighted_recall": 0.675,
+      "weighted_f1": 0.806,
+      "tp": 2,
+      "fp": 0,
+      "fn": 0
+    },
+    "clarity": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "weighted_precision": 1.0,
+      "weighted_recall": 0.55,
+      "weighted_f1": 0.7097,
+      "tp": 3,
+      "fp": 0,
+      "fn": 0
+    },
+    "func": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "weighted_precision": 1.0,
+      "weighted_recall": 0.65,
+      "weighted_f1": 0.7879,
+      "tp": 3,
+      "fp": 0,
+      "fn": 0
+    },
+    "move": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "weighted_precision": 1.0,
+      "weighted_recall": 0.75,
+      "weighted_f1": 0.8571,
+      "tp": 3,
+      "fp": 0,
+      "fn": 0
+    },
+    "rust-solana": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "weighted_precision": 1.0,
+      "weighted_recall": 0.7167,
+      "weighted_f1": 0.835,
+      "tp": 7,
+      "fp": 0,
+      "fn": 0
+    },
+    "solidity": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "weighted_precision": 1.0,
+      "weighted_recall": 0.8045,
+      "weighted_f1": 0.8917,
+      "tp": 14,
+      "fp": 0,
+      "fn": 0
+    },
+    "ts-sdk": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "weighted_precision": 1.0,
+      "weighted_recall": 0.6833,
+      "weighted_f1": 0.8119,
+      "tp": 3,
+      "fp": 0,
+      "fn": 0
+    },
+    "vyper": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "weighted_precision": 1.0,
+      "weighted_recall": 0.7333,
+      "weighted_f1": 0.8462,
+      "tp": 5,
+      "fp": 0,
+      "fn": 0
+    }
+  },
+  "per_category": {
+    "access-control": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "weighted_precision": 1.0,
+      "weighted_recall": 0.7438,
+      "weighted_f1": 0.853,
+      "tp": 21,
+      "fp": 0,
+      "fn": 0
+    },
+    "arithmetic": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "weighted_precision": 1.0,
+      "weighted_recall": 0.7333,
+      "weighted_f1": 0.8462,
+      "tp": 13,
+      "fp": 0,
+      "fn": 0
+    },
+    "delegatecall": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "weighted_precision": 1.0,
+      "weighted_recall": 0.7,
+      "weighted_f1": 0.8235,
+      "tp": 2,
+      "fp": 0,
+      "fn": 0
+    },
+    "missing-acquires": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "weighted_precision": 1.0,
+      "weighted_recall": 0.8,
+      "weighted_f1": 0.8889,
+      "tp": 2,
+      "fp": 0,
+      "fn": 0
+    },
+    "oracle-manipulation": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "weighted_precision": 1.0,
+      "weighted_recall": 0.8,
+      "weighted_f1": 0.8889,
+      "tp": 2,
+      "fp": 0,
+      "fn": 0
+    },
+    "proxy-upgrade": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "weighted_precision": 1.0,
+      "weighted_recall": 0.85,
+      "weighted_f1": 0.9189,
+      "tp": 2,
+      "fp": 0,
+      "fn": 0
+    },
+    "randomness": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "weighted_precision": 1.0,
+      "weighted_recall": 0.85,
+      "weighted_f1": 0.9189,
+      "tp": 2,
+      "fp": 0,
+      "fn": 0
+    },
+    "reentrancy": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "weighted_precision": 1.0,
+      "weighted_recall": 0.8,
+      "weighted_f1": 0.8889,
+      "tp": 4,
+      "fp": 0,
+      "fn": 0
+    },
+    "selfdestruct": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "weighted_precision": 1.0,
+      "weighted_recall": 0.8,
+      "weighted_f1": 0.8889,
+      "tp": 2,
+      "fp": 0,
+      "fn": 0
+    },
+    "signature-replay": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "weighted_precision": 1.0,
+      "weighted_recall": 0.5833,
+      "weighted_f1": 0.7368,
+      "tp": 6,
+      "fp": 0,
+      "fn": 0
+    },
+    "slippage": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "weighted_precision": 1.0,
+      "weighted_recall": 0.8,
+      "weighted_f1": 0.8889,
+      "tp": 2,
+      "fp": 0,
+      "fn": 0
+    },
+    "unchecked-external-call": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "weighted_precision": 1.0,
+      "weighted_recall": 0.475,
+      "weighted_f1": 0.6441,
+      "tp": 4,
+      "fp": 0,
+      "fn": 0
+    },
+    "unlimited-approval": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "weighted_precision": 1.0,
+      "weighted_recall": 0.85,
+      "weighted_f1": 0.9189,
+      "tp": 2,
+      "fp": 0,
+      "fn": 0
+    },
+    "unprotected-init": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "weighted_precision": 1.0,
+      "weighted_recall": 0.8,
+      "weighted_f1": 0.8889,
+      "tp": 4,
+      "fp": 0,
+      "fn": 0
+    }
+  },
+  "missed_categories": [],
+  "false_positives": [],
+  "clean_hits": []
+}
