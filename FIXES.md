@@ -154,6 +154,14 @@ integration with custom dashboards and CI pipelines.
   target's declared git dependencies (`.gitmodules`, npm `git+` /
   `github:` deps, Cargo `git = ...`, Scarb `github = ...`, and
   GitHub remappings) and scan each one through the same pipeline.
+- **External corpora (e.g. ARC) are not vendored in this repo.** The
+  harness supports any labeled corpus — `web3guard bench --corpus
+  <manifest.json>` — and `web3guard bench --validate` checks a manifest
+  (every unit path exists, every label is in the analyzer vocabulary)
+  before it is benchmarked, so an externally-vendored dataset such as
+  the Trail of Bits ARC corpus can be dropped in with a hand-written
+  `corpus.json` manifest and measured on the same precision/recall/F1
+  scale as the in-repo fixtures.
 - **Prompt-injection defense is best-effort.** No static defense can
   guarantee immunity against a sufficiently motivated attacker with a
   sufficiently capable model. Always manually verify findings before

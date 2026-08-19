@@ -265,6 +265,51 @@ def test_scanner_does_not_scan_itself_as_dependency(tmp_path: Path, monkeypatch)
     assert scanned == []
 
 
+# ---------------------------------------------------------------------------
+# External-corpus validation (label correctness gate)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_corpus_accepts_wellformed(tmp_path: Path) -> None:
+    from web3guard.bench.corpus import validate_corpus
+    from web3guard.bench.metrics import VALID_CATEGORIES
+
+    (tmp_path / "a.sol").write_text("contract A {}", encoding="utf-8")
+    manifest = tmp_path / "corpus.json"
+    manifest.write_text(json.dumps({
+        "name": "ext",
+        "description": "",
+        "units": [
+            {"path": "a.sol", "language": "solidity",
+             "vulnerabilities": ["reentrancy"]},
+        ],
+    }), encoding="utf-8")
+
+    errors = validate_corpus(manifest)
+    assert errors == []
+    assert "reentrancy" in VALID_CATEGORIES
+
+
+def test_validate_corpus_flags_missing_files_and_unknown_labels(tmp_path: Path) -> None:
+    from web3guard.bench.corpus import validate_corpus
+
+    manifest = tmp_path / "corpus.json"
+    manifest.write_text(json.dumps({
+        "name": "ext",
+        "description": "",
+        "units": [
+            {"path": "does-not-exist.sol", "language": "solidity",
+             "vulnerabilities": ["reentrancy"]},
+            {"path": "a.sol", "language": "solidity",
+             "vulnerabilities": ["not-a-real-category"]},
+        ],
+    }), encoding="utf-8")
+
+    errors = validate_corpus(manifest)
+    assert any("does-not-exist.sol" in e for e in errors)
+    assert any("not-a-real-category" in e for e in errors)
+
+
 
 # ---------------------------------------------------------------------------
 # Secret scanner hardening
@@ -549,6 +594,7 @@ def test_bench_cli_writes_json_and_gates(tmp_path: Path) -> None:
         json_out = json_path
         fail_below = None
         diff_path = None
+        validate = False
 
     assert _cmd_bench(Args()) == 0
     data = json.loads(json_path.read_text(encoding="utf-8"))
@@ -560,6 +606,7 @@ def test_bench_cli_writes_json_and_gates(tmp_path: Path) -> None:
         json_out = None
         fail_below = "1.5,1.5"  # impossible floor -> must fail the gate
         diff_path = None
+        validate = False
 
     assert _cmd_bench(FailingArgs()) == 1
 
@@ -575,6 +622,7 @@ def test_bench_cli_diff_passes_when_identical(tmp_path: Path) -> None:
         json_out = report_path
         fail_below = None
         diff_path = None
+        validate = False
 
     assert _cmd_bench(FirstArgs()) == 0
 
@@ -584,6 +632,48 @@ def test_bench_cli_diff_passes_when_identical(tmp_path: Path) -> None:
         json_out = None
         fail_below = None
         diff_path = report_path
+        validate = False
 
     assert _cmd_bench(DiffArgs()) == 0
+
+
+def test_bench_cli_validate_corpus(tmp_path: Path) -> None:
+    from web3guard.cli import _cmd_bench
+
+    good = tmp_path / "good.json"
+    good.write_text(json.dumps({
+        "name": "g",
+        "description": "",
+        "units": [],
+    }), encoding="utf-8")
+    (tmp_path / "a.sol").write_text("contract A {}", encoding="utf-8")
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({
+        "name": "b",
+        "description": "",
+        "units": [
+            {"path": "nope.sol", "language": "solidity",
+             "vulnerabilities": ["bogus"]},
+        ],
+    }), encoding="utf-8")
+
+    class GoodArgs:  # noqa: D106
+        corpus = good
+        min_severity = "LOW"
+        json_out = None
+        fail_below = None
+        diff_path = None
+        validate = True
+
+    assert _cmd_bench(GoodArgs()) == 0
+
+    class BadArgs:  # noqa: D106
+        corpus = bad
+        min_severity = "LOW"
+        json_out = None
+        fail_below = None
+        diff_path = None
+        validate = True
+
+    assert _cmd_bench(BadArgs()) == 1
 

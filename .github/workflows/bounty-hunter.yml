@@ -93,6 +93,11 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e .
 
+      - name: Validate corpus manifests
+        run: |
+          python -m web3guard.cli bench --validate
+          python -m web3guard.cli bench --corpus bench/smartbugs/corpus.json --validate
+
       - name: Run benchmark with regression floor (in-repo corpus)
         run: |
           python -m web3guard.cli bench \

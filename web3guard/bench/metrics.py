@@ -22,6 +22,31 @@ from pathlib import Path
 
 from web3guard.bench.corpus import BenchmarkCorpus, CorpusUnit
 
+# The analyzer's vulnerability vocabulary. Corpus manifests must only
+# label units with these categories so the benchmark measures the
+# analyzer against its own taxonomy (and so a typo in a manifest does not
+# silently inflate recall by never being detected).
+VALID_CATEGORIES = frozenset({
+    "access-control",
+    "arithmetic",
+    "delegatecall",
+    "denial-of-service",
+    "front-running",
+    "missing-acquires",
+    "oracle-manipulation",
+    "proxy-upgrade",
+    "randomness",
+    "reentrancy",
+    "selfdestruct",
+    "short-address",
+    "signature-replay",
+    "slippage",
+    "tx-origin",
+    "unchecked-external-call",
+    "unlimited-approval",
+    "unprotected-init",
+})
+
 
 @dataclass(frozen=True)
 class BenchFinding:

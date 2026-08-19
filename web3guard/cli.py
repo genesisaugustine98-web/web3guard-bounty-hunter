@@ -129,6 +129,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Path to a previously-saved --json report; print a "
                             "regression diff against the current run and exit "
                             "non-zero if the run regressed")
+    bench.add_argument("--validate", action="store_true",
+                       help="Validate the corpus manifest (paths exist, labels "
+                            "are known) and exit non-zero on errors")
 
     # ---- version --------------------------------------------------------
     sub.add_parser("version", help="Print version and exit")
@@ -206,8 +209,22 @@ def _cmd_scan(args: argparse.Namespace) -> int:
 
 def _cmd_bench(args: argparse.Namespace) -> int:
     from web3guard.bench import default_corpus, load_corpus, run_benchmark
+    from web3guard.bench.corpus import validate_corpus
 
     corpus = load_corpus(args.corpus) if args.corpus else default_corpus()
+
+    if args.validate:
+        manifest = args.corpus or "web3guard/bench/corpus.json"
+        errors = validate_corpus(manifest)
+        if errors:
+            print(f"Corpus validation FAILED ({len(errors)} error(s)):")
+            for err in errors:
+                print(f"  - {err}")
+            return 1
+        print(f"Corpus {corpus.name}: validation OK "
+              f"({len(corpus.units)} units)")
+        return 0
+
     report = run_benchmark(corpus, min_severity=args.min_severity)
 
     o = report.overall

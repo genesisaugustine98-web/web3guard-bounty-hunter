@@ -16,6 +16,7 @@ from web3guard.bench.corpus import (
     CorpusUnit,
     default_corpus,
     load_corpus,
+    validate_corpus,
 )
 from web3guard.bench.metrics import (
     BenchFinding,
@@ -35,6 +36,7 @@ __all__ = [
     "Score",
     "default_corpus",
     "load_corpus",
+    "validate_corpus",
     "evaluate",
     "diff_reports",
     "run_benchmark",

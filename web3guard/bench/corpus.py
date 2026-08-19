@@ -81,3 +81,49 @@ def load_corpus(manifest: Path | str | None = None) -> BenchmarkCorpus:
 def default_corpus() -> BenchmarkCorpus:
     """Load the in-repo test-contracts corpus."""
     return load_corpus(DEFAULT_CORPUS)
+
+
+def validate_corpus(manifest: Path | str) -> list[str]:
+    """Validate a corpus manifest and return a list of human-readable errors.
+
+    Checks that keep ground truth honest and the benchmark measurable:
+
+    - every ``units[].path`` resolves to a real file under the corpus root,
+    - every ``units[].language`` is non-empty,
+    - every vulnerability label is in :data:`VALID_CATEGORIES`,
+    - no path is listed twice.
+
+    An empty list means the manifest is well-formed. This is the gate an
+    externally-vendored corpus (e.g. the Trail of Bits ARC dataset) must
+    pass before it is benchmarked.
+    """
+    errors: list[str] = []
+    manifest_path = Path(manifest)
+    if not manifest_path.is_absolute():
+        manifest_path = REPO_ROOT / manifest_path
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    root = REPO_ROOT if manifest_path == DEFAULT_CORPUS else manifest_path.parent
+
+    from web3guard.bench.metrics import VALID_CATEGORIES
+
+    seen: set[str] = set()
+    for i, unit in enumerate(data.get("units", [])):
+        path = str(unit.get("path", ""))
+        if not path:
+            errors.append(f"unit[{i}]: missing 'path'")
+            continue
+        if path in seen:
+            errors.append(f"unit[{i}]: duplicate path {path!r}")
+        seen.add(path)
+        if not (root / path).is_file():
+            errors.append(f"unit[{i}]: file not found: {path!r}")
+        lang = str(unit.get("language", ""))
+        if not lang:
+            errors.append(f"unit[{i}]: missing 'language' for {path!r}")
+        for label in unit.get("vulnerabilities", []):
+            if label not in VALID_CATEGORIES:
+                errors.append(
+                    f"unit[{i}]: unknown vulnerability label {label!r} "
+                    f"in {path!r} (valid: "
+                    f"{', '.join(sorted(VALID_CATEGORIES))})")
+    return errors
