@@ -349,6 +349,10 @@ See [SECURITY.md](SECURITY.md). The short version:
   Solidity panic data-exfiltration, but no scanner is bulletproof.
 - Never deploy exploits to mainnet without explicit authorization.
 
+## Contact
+
+Developer: agkoodanga@bugcrowsninja.com · WhatsApp +2349124352286
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

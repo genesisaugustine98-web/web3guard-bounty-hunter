@@ -9,7 +9,9 @@ description = "Multi-language Web3 smart contract vulnerability scanner with AI-
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
-authors = [{ name = "Web3Guard Contributors" }]
+authors = [
+    { name = "Web3Guard Contributors", email = "agkoodanga@bugcrowsninja.com" },
+]
 keywords = [
     "web3", "smart-contract", "security", "audit", "vulnerability-scanner",
     "ethereum", "solidity", "vyper", "move", "cairo", "clarity", "func",

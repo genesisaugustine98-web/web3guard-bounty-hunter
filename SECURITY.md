@@ -4,8 +4,8 @@
 
 If you find a security issue in **this scanner** (e.g., command injection
 via the `targets_config` input, prompt injection, sandbox escape), please
-email **security@web3guard.example.com** (replace with your real address)
-with:
+email **agkoodanga@bugcrowsninja.com** (or contact on WhatsApp
+**+2349124352286**) with:
 
 - Description of the issue
 - Reproduction steps
