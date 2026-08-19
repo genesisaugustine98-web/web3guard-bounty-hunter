@@ -132,6 +132,29 @@ jobs:
             bench/smartbugs/reports/current.json
           if-no-files-found: warn
 
+  devcontainer:
+    name: Devcontainer smoke check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout scanner
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Validate devcontainer config
+        run: |
+          python -m json.tool .devcontainer/devcontainer.json > /dev/null
+          bash -n .devcontainer/post-create.sh
+          echo "devcontainer config OK"
+
+      - name: Run devcontainer provisioning script
+        run: bash .devcontainer/post-create.sh
+
   scan:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
