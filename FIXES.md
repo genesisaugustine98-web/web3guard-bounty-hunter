@@ -135,6 +135,21 @@ LLM rates. Run `web3guard price` to see the full model.
 `/healthz`, `/summary`, `/findings`, `/scan`, `/mark`. Suitable for
 integration with custom dashboards and CI pipelines.
 
+### F14. Dashboard fingerprints could not be used with `mark`
+
+**Before:** the dashboard displayed 16-character truncated fingerprints
+(`cli.py`), but `mark` looked up the full 32-character fingerprint —
+so a user who copied a fingerprint from the dashboard got
+`KeyError: fingerprint ... not found`. This broke the finding
+lifecycle (new → submitted → accepted → paid) for anyone relying on
+the dashboard output.
+
+**Now:** `FindingsDB.update_status` resolves a full fingerprint or a
+unique prefix (`_resolve_fingerprint`), so the dashboard's short
+fingerprint works directly with `mark`. Ambiguous prefixes raise a
+clear `KeyError` asking for the full fingerprint. Covered by
+`tests/test_findings_db.py`.
+
 ## Known limitations in v3.0.0
 
 - **Vyper / Move / Cairo / Clarity / FunC / Rust / TS sandboxes** are

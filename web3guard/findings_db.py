@@ -182,6 +182,23 @@ class FindingsDB:
                 ))
             conn.commit()
 
+    def _resolve_fingerprint(self, fingerprint: str) -> str:
+        """Resolve a full fingerprint or a unique prefix to a stored one."""
+        with closing(sqlite3.connect(str(self.db_path))) as conn:
+            rows = conn.execute(
+                "SELECT fingerprint FROM findings WHERE fingerprint LIKE ?",
+                (f"{fingerprint}%",),
+            ).fetchall()
+        matches = [r[0] for r in rows]
+        if not matches:
+            raise KeyError(f"fingerprint {fingerprint!r} not found")
+        if len(matches) > 1:
+            raise KeyError(
+                f"fingerprint {fingerprint!r} is ambiguous "
+                f"({len(matches)} matches); use the full fingerprint"
+            )
+        return matches[0]
+
     def update_status(
         self,
         fingerprint: str,
@@ -193,6 +210,7 @@ class FindingsDB:
         paid_amount_usd: float = 0.0,
         rejection_reason: str = "",
     ) -> None:
+        fingerprint = self._resolve_fingerprint(fingerprint)
         with closing(sqlite3.connect(str(self.db_path))) as conn:
             old = conn.execute(
                 "SELECT status FROM findings WHERE fingerprint = ?",
