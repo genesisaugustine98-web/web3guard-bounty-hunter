@@ -200,15 +200,19 @@ jobs:
           echo "report=$(python -m web3guard.cli dashboard | head -12 | tr '\n' '\\n')" >> "$GITHUB_OUTPUT"
 
       - name: Reply to Telegram
-        if: always() && env.CHAT_ID != '' && secrets.TELEGRAM_BOT_TOKEN != ''
+        if: always()
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ github.event.client_payload.chat_id }}
           REPORT: ${{ steps.scan.outputs.report }}
         run: |
-          curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=${CHAT_ID}" \
-            --data-urlencode "text=${REPORT:-Scan completed. See GitHub Actions for the report.}" || true
+          if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${CHAT_ID:-}" ]; then
+            curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${CHAT_ID}" \
+              --data-urlencode "text=${REPORT:-Scan completed. See GitHub Actions for the report.}" || true
+          else
+            echo "Telegram reply skipped (token or chat_id not set)"
+          fi
 
       - name: Upload report artifacts
         if: always()
