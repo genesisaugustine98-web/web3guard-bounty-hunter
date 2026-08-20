@@ -14,6 +14,7 @@
  * Secrets (set as Worker encrypted env vars in the CF dashboard):
  *   GITHUB_TOKEN      fine-grained PAT, only this repo, Actions:write + Contents:read
  *   ALLOWED_CHAT_IDS  comma-separated Telegram chat ids that may trigger scans
+ *   TELEGRAM_BOT_TOKEN bot token from @BotFather (for instant replies)
  *   GITHUB_REPO       "owner/repo" e.g. genesisaugustine98-web/web3guard-bounty-hunter
  *
  * Bindings (no secret, public):
@@ -21,49 +22,48 @@
  *   DEFAULT_MIN_SEV   optional, default LOW
  */
 
-const MAX_BUDGET = parseInt(env("MAX_BUDGET", "200000"), 10);
-const DEFAULT_MIN_SEV = env("DEFAULT_MIN_SEV", "LOW");
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
 
-const ALLOWED = (env("ALLOWED_CHAT_IDS", ""))
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
+    // Liveness for the CF dashboard / uptime checks.
+    if (url.pathname === "/healthz" || request.method === "GET") {
+      return json({ ok: true, service: "web3guard-trigger" });
+    }
 
-async function handleRequest(request) {
-  const url = new URL(request.url);
+    if (request.method !== "POST" || url.pathname !== "/webhook") {
+      return json({ ok: false, error: "not found" }, 404);
+    }
 
-  // Liveness for the CF dashboard / uptime checks.
-  if (url.pathname === "/healthz" || request.method === "GET") {
-    return json({ ok: true, service: "web3guard-trigger" });
-  }
+    let update;
+    try {
+      update = await request.json();
+    } catch {
+      return json({ ok: false, error: "invalid JSON" }, 400);
+    }
 
-  if (request.method !== "POST" || url.pathname !== "/webhook") {
-    return json({ ok: false, error: "not found" }, 404);
-  }
+    const msg = update?.message;
+    const chatId = msg?.chat?.id;
+    const text = msg?.text ?? "";
 
-  let update;
-  try {
-    update = await request.json();
-  } catch {
-    return json({ ok: false, error: "invalid JSON" }, 400);
-  }
+    const allowed = (env.ALLOWED_CHAT_IDS || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
 
-  const msg = update?.message;
-  const chatId = msg?.chat?.id;
-  const text = msg?.text ?? "";
+    // Security gate #1: only allowlisted chats can trigger anything.
+    if (chatId === undefined || !allowed.includes(String(chatId))) {
+      return json({ ok: false, error: "unauthorized" }, 403);
+    }
 
-  // Security gate #1: only allowlisted chats can trigger anything.
-  if (chatId === undefined || !ALLOWED.includes(String(chatId))) {
-    return json({ ok: false, error: "unauthorized" }, 403);
-  }
+    const replyText = await handleCommand(env, String(chatId), text);
+    await sendTelegram(env, chatId, replyText);
 
-  const replyText = await handleCommand(String(chatId), text);
-  await sendTelegram(chatId, replyText);
+    return json({ ok: true });
+  },
+};
 
-  return json({ ok: true });
-}
-
-async function handleCommand(chatId, text) {
+async function handleCommand(env, chatId, text) {
   const line = text.trim();
   const match = line.match(/^\/(scan|status|help)\b(?:\s+(.+))?$/i);
   if (!match) {
@@ -80,15 +80,14 @@ async function handleCommand(chatId, text) {
     );
   }
 
-  const GITHUB_TOKEN = env("GITHUB_TOKEN", "");
-  const GITHUB_REPO = env("GITHUB_REPO", "");
+  const GITHUB_TOKEN = env.GITHUB_TOKEN || "";
+  const GITHUB_REPO = env.GITHUB_REPO || "";
   if (!GITHUB_TOKEN || !GITHUB_REPO) {
     return "Bot misconfigured (missing GITHUB_TOKEN or GITHUB_REPO).";
   }
 
   if (cmd === "status") {
-    const s = await githubStatus(GITHUB_TOKEN, GITHUB_REPO);
-    return s;
+    return await githubStatus(GITHUB_TOKEN, GITHUB_REPO);
   }
 
   // cmd === "scan"
@@ -100,21 +99,22 @@ async function handleCommand(chatId, text) {
 
   // Security gate #2: clamp the budget so a single command can't burn
   // unlimited Actions minutes or LLM tokens.
+  const maxBudget = parseInt(env.MAX_BUDGET || "200000", 10);
   if (budget === "max") {
-    budget = String(MAX_BUDGET);
+    budget = String(maxBudget);
   } else {
     const n = parseInt(budget, 10);
     if (!Number.isFinite(n) || n <= 0) {
       return `Invalid budget '${budgetRaw}'. Use a positive number or 'max'.`;
     }
-    budget = String(Math.min(n, MAX_BUDGET));
+    budget = String(Math.min(n, maxBudget));
   }
 
   const ok = await dispatchScan(GITHUB_TOKEN, GITHUB_REPO, {
     target,
     budget,
     chat_id: chatId,
-    min_severity: DEFAULT_MIN_SEV,
+    min_severity: env.DEFAULT_MIN_SEV || "LOW",
   });
   return ok
     ? `Scan dispatched: ${target}|${budget}\nResults will arrive here shortly.`
@@ -147,8 +147,8 @@ async function githubStatus(token, repo) {
   return `Latest run #${run.run_number}: ${run.status}${run.conclusion ? " / " + run.conclusion : ""} (${run.event})`;
 }
 
-async function sendTelegram(chatId, text) {
-  const token = env("TELEGRAM_BOT_TOKEN", "");
+async function sendTelegram(env, chatId, text) {
+  const token = env.TELEGRAM_BOT_TOKEN || "";
   if (!token) return;
   try {
     await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
@@ -161,18 +161,9 @@ async function sendTelegram(chatId, text) {
   }
 }
 
-function env(name, fallback) {
-  const v = globalThis[name];
-  return v === undefined || v === null ? fallback : String(v);
-}
-
 function json(obj, status = 200) {
   return new Response(JSON.stringify(obj), {
     status,
     headers: { "Content-Type": "application/json" },
   });
 }
-
-export default {
-  fetch: handleRequest,
-};
