@@ -28,7 +28,7 @@ LOGGER = logging.getLogger("web3guard.ai.cost")
 # ---------------------------------------------------------------------------
 
 DEFAULT_PRICING: dict[str, dict[str, float]] = {
-    "deepseek-ai/deepseek-v4-flash": {"input": 0.0, "output": 0.0},  # free on NIM
+    "deepseek-ai/deepseek-v4-flash-0731": {"input": 0.0, "output": 0.0},  # free on NIM
     "deepseek/deepseek-chat":         {"input": 0.14, "output": 0.28},
     "deepseek/deepseek-coder":        {"input": 0.14, "output": 0.28},
     "meta/llama-3.3-70b-instruct":    {"input": 0.59, "output": 0.79},
@@ -104,8 +104,8 @@ class CostTracker:
         # Try exact model match first
         rates = self._pricing.get(model)
         if rates is None:
-            # Try prefix match (e.g. "deepseek-ai/deepseek-v4-flash@2026-01-15"
-            # matches "deepseek-ai/deepseek-v4-flash")
+            # Try prefix match (e.g. "deepseek-ai/deepseek-v4-flash-0731@2026-01-15"
+            # matches "deepseek-ai/deepseek-v4-flash-0731")
             for key, r in self._pricing.items():
                 if model.startswith(key):
                     rates = r

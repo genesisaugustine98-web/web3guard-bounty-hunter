@@ -74,7 +74,7 @@ class AIClient:
         self,
         *,
         providers: list[AIProvider],
-        model: str = "deepseek-ai/deepseek-v4-flash",
+        model: str = "deepseek-ai/deepseek-v4-flash-0731",
         cost_tracker: CostTracker | None = None,
         cache_path: Path | None = None,
         injection_guard: PromptInjectionGuard | None = None,

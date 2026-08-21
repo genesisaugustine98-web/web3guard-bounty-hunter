@@ -467,7 +467,7 @@ def _cmd_price() -> int:
         print(f"  {model:<40s} in=${rate.get('input', 0):.3f}  out=${rate.get('output', 0):.3f}")
     print()
     print("Example: scanning a 50-file Solidity repo end-to-end")
-    e = compute_estimate(num_chunks=200, model="deepseek-ai/deepseek-v4-flash")
+    e = compute_estimate(num_chunks=200, model="deepseek-ai/deepseek-v4-flash-0731")
     print(f"  estimated cost: ${e.estimated_cost_usd:.4f}")
     print(f"  estimated time: {e.estimated_seconds:.0f}s")
     return 0

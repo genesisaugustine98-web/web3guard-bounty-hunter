@@ -152,6 +152,17 @@ clear `KeyError` asking for the full fingerprint. Covered by
 
 ## Known limitations in v3.0.0
 
+- **NIM model names are time-bombed.** NVIDIA retires model IDs without
+  notice — `deepseek-ai/deepseek-v4-flash` returned HTTP 410 "Gone"
+  from 2026-08-07 (the model reached end-of-life). This scanner now
+  pins `deepseek-ai/deepseek-v4-flash-0731`, but *any* hard-coded NIM
+  model will eventually 410. If scans show `all AI providers failed`
+  with `410 Gone`, check the live catalog at
+  `https://integrate.api.nvidia.com/v1/models` and update the model in
+  `web3guard/scanner.py` (`_DEFAULT_CONFIG`), `client.py`,
+  `config.example.yaml`, and `README.md`. Consider moving the model to
+  config (`model:`) so it can change without a code release.
+
 - **Vyper / Move / Cairo / Clarity / FunC / Rust / TS sandboxes** are
   implemented and tested at the *interface* level (their `GenericSandbox`
   parent), but they require the corresponding toolchains installed

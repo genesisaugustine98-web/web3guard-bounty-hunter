@@ -174,7 +174,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "base_url": "https://integrate.api.nvidia.com/v1",
             "api_key_env": "NIM_API_KEY",
             "rpm": 35,
-            "model": "deepseek-ai/deepseek-v4-flash",
+            "model": "deepseek-ai/deepseek-v4-flash-0731",
         },
         {
             "type": "openrouter",
@@ -193,7 +193,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "model": "llama-3.3-70b-versatile",
         },
     ],
-    "model": "deepseek-ai/deepseek-v4-flash",
+    "model": "deepseek-ai/deepseek-v4-flash-0731",
     "max_cost_usd": 50.0,
     "default_seed": 0,
     "max_chunk_chars": 6000,
@@ -344,7 +344,7 @@ class Scanner:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         return AIClient(
             providers=providers,
-            model=str(self.config.get("model", "deepseek-ai/deepseek-v4-flash")),
+            model=str(self.config.get("model", "deepseek-ai/deepseek-v4-flash-0731")),
             cost_tracker=cost,
             cache_path=cache_path,
             injection_guard=self.injection_guard,

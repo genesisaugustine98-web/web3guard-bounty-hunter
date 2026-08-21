@@ -272,14 +272,14 @@ ai_providers:
     base_url: https://integrate.api.nvidia.com/v1
     api_key_env: NIM_API_KEY
     rpm: 35
-    model: deepseek-ai/deepseek-v4-flash
+    model: deepseek-ai/deepseek-v4-flash-0731
   - type: openrouter
     base_url: https://openrouter.ai/api/v1
     api_key_env: OPENROUTER_API_KEY
     rpm: 60
     model: deepseek/deepseek-chat
 
-model: deepseek-ai/deepseek-v4-flash
+model: deepseek-ai/deepseek-v4-flash-0731
 max_cost_usd: 50.0
 max_chunk_chars: 6000
 discovery_time_budget_seconds: 900
@@ -329,7 +329,7 @@ LLM cost (USD per 1M tokens, June 2026 rates):
 
 | Model                        | Input  | Output |
 |------------------------------|--------|--------|
-| `deepseek-ai/deepseek-v4-flash` (NIM) | $0.00  | $0.00  |
+| `deepseek-ai/deepseek-v4-flash-0731` (NIM) | $0.00  | $0.00  |
 | `deepseek/deepseek-chat` (OpenRouter)  | $0.14  | $0.28  |
 | `llama-3.3-70b-versatile` (Groq)      | $0.59  | $0.79  |
 | `gpt-4o` (OpenAI)                     | $5.00  | $15.00 |

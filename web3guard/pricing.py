@@ -98,7 +98,7 @@ PROGRAM_TIERS: dict[str, dict[str, object]] = {
 
 # Per 1M tokens. Mirror this in the CostTracker.
 DEFAULT_RATES: dict[str, dict[str, float]] = {
-    "deepseek-ai/deepseek-v4-flash": {"input": 0.0, "output": 0.0},  # free on NIM
+    "deepseek-ai/deepseek-v4-flash-0731": {"input": 0.0, "output": 0.0},  # free on NIM
     "deepseek/deepseek-chat":         {"input": 0.14, "output": 0.28},
     "llama-3.3-70b-versatile":        {"input": 0.59, "output": 0.79},
     "gpt-4o":                         {"input": 5.00, "output": 15.00},
@@ -128,7 +128,7 @@ class ScanEstimate:
 def compute_estimate(
     *,
     num_chunks: int,
-    model: str = "deepseek-ai/deepseek-v4-flash",
+    model: str = "deepseek-ai/deepseek-v4-flash-0731",
     include_exploit: bool = True,
     include_self_critique: bool = True,
 ) -> ScanEstimate:

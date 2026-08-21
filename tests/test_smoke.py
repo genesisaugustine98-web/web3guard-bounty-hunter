@@ -359,7 +359,7 @@ def test_program_tiers_have_free_entry():
 
 def test_load_config_default():
     cfg = load_config(None)
-    assert cfg["model"] == "deepseek-ai/deepseek-v4-flash"
+    assert cfg["model"] == "deepseek-ai/deepseek-v4-flash-0731"
     assert cfg["max_cost_usd"] == 50.0
     assert "solidity" in cfg["languages"]
 
