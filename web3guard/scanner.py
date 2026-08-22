@@ -328,6 +328,7 @@ class Scanner:
                     base_url=p["base_url"],
                     api_key_env=p["api_key_env"],
                     rpm=int(p.get("rpm", 35)),
+                    timeout=float(p.get("timeout", 120.0)),
                     name=p.get("name", p["type"]),
                 ))
             except Exception as e:  # noqa: BLE001

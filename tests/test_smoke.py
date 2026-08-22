@@ -364,6 +364,30 @@ def test_load_config_default():
     assert "solidity" in cfg["languages"]
 
 
+def test_provider_timeout_wired_from_config(tmp_path):
+    import yaml
+    from web3guard.ai import OpenAICompatibleProvider
+    from web3guard.scanner import Scanner
+
+    cfg = load_config(None)
+    cfg["ai_providers"] = [
+        {
+            "type": "nim",
+            "name": "nim-test",
+            "base_url": "https://integrate.api.nvidia.com/v1",
+            "api_key_env": "NIM_API_KEY",
+            "rpm": 35,
+            "timeout": 240.0,
+        }
+    ]
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    scanner = Scanner.from_config(cfg_path, workdir=tmp_path)
+    providers = scanner._build_ai_client()._providers
+    assert any(isinstance(p, OpenAICompatibleProvider) and p.timeout == 240.0
+               for p in providers)
+
+
 def test_load_config_json(tmp_path: Path):
     cfg_path = tmp_path / "config.json"
     cfg_path.write_text(json.dumps({"max_cost_usd": 99.0, "model": "x/y"}))

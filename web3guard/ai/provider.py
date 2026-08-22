@@ -127,7 +127,7 @@ class OpenAICompatibleProvider(AIProvider):
         base_url: str,
         api_key_env: str,
         rpm: int = 35,
-        timeout: float = 60.0,
+        timeout: float = 120.0,
         name: str = "openai-compatible",
     ) -> None:
         self.base_url = base_url.rstrip("/")
