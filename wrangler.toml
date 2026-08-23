@@ -1,3 +1,11 @@
 name = "web3guard-trigger"
 main = "bot/worker.js"
 compatibility_date = "2024-01-01"
+
+# Non-secret vars. Secrets (GITHUB_TOKEN, TELEGRAM_BOT_TOKEN) must be set in
+# the Cloudflare dashboard under Settings -> Variables and Secrets.
+[vars]
+GITHUB_REPO = "genesisaugustine98-web/web3guard-bounty-hunter"
+ALLOWED_CHAT_IDS = "6983105537"
+MAX_BUDGET = "200000"
+DEFAULT_MIN_SEV = "LOW"
