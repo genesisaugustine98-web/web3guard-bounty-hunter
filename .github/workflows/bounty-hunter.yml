@@ -197,7 +197,11 @@ jobs:
             --no-exploit \
             --out reports
           echo "::endgroup::"
-          echo "report=$(python -m web3guard.cli dashboard | head -12 | tr '\n' '\\n')" >> "$GITHUB_OUTPUT"
+          {
+            echo "report<<EOF"
+            python -m web3guard.cli dashboard | head -12
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Reply to Telegram
         if: always()
