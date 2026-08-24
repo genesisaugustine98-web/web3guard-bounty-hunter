@@ -200,6 +200,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "max_context_chars": 6000,
     "discovery_time_budget_seconds": 900,
     "enable_discovery": True,
+    "enable_ai_analysis": True,
     "enable_exploit": True,
     "max_exploit_attempts": 3,
     "use_ai_planning": True,
@@ -512,15 +513,16 @@ class Scanner:
                     if analysis_budget and len(chunks_to_analyze) >= analysis_budget:
                         break
             tr.chunks_analyzed += len(chunks_to_analyze)
-            for ch in chunks_to_analyze:
-                finding = self._analyze_chunk(adapter, ch, target_path, target)
-                if finding is None:
-                    continue
-                if finding.fingerprint in seen_fps:
-                    continue
-                seen_fps.add(finding.fingerprint)
-                if self._severity_at_least(finding.severity, min_severity):
-                    tr.findings.append(finding)
+            if self.config.get("enable_ai_analysis", True):
+                for ch in chunks_to_analyze:
+                    finding = self._analyze_chunk(adapter, ch, target_path, target)
+                    if finding is None:
+                        continue
+                    if finding.fingerprint in seen_fps:
+                        continue
+                    seen_fps.add(finding.fingerprint)
+                    if self._severity_at_least(finding.severity, min_severity):
+                        tr.findings.append(finding)
             # Optional post-scan passes (deterministic, offline).
             if self.config.get("enable_attack_sequence_brainstorm", True):
                 tr.attack_sequences[lang] = self._attack_sequences(adapter, target_path)

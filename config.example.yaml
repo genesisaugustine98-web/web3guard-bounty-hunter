@@ -39,7 +39,12 @@ max_context_chars: 6000     # cross-file context size
 
 # ----- Discovery -----
 discovery_time_budget_seconds: 900
+enable_discovery: true
+enable_ai_analysis: true
 # Engine selection is per-adapter; see `languages:` below.
+# Set enable_ai_analysis: false (CLI: --discovery-only) to emit raw
+# offline findings without AI. Set enable_discovery: false (CLI: --ai-only)
+# to run AI chunk analysis without the discovery pass.
 
 # ----- Exploitation -----
 enable_exploit: true

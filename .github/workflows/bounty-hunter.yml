@@ -179,22 +179,59 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Web3Guard on dispatched target
-        id: scan
+      - name: Run Web3Guard discovery (raw findings)
+        id: scan-raw
+        env:
+          TARGET: ${{ github.event.client_payload.target }}
+          BUDGET: ${{ github.event.client_payload.budget }}
+          MIN_SEVERITY: ${{ github.event.client_payload.min_severity || 'LOW' }}
+        run: |
+          set -e
+          echo "::group::Discovery on $TARGET"
+          python -m web3guard.cli scan "$TARGET|$BUDGET" \
+            --min-severity "$MIN_SEVERITY" \
+            --no-exploit \
+            --discovery-only \
+            --out reports_raw
+          echo "::endgroup::"
+          {
+            echo "report<<EOF"
+            python -m web3guard.cli dashboard | head -12
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Reply to Telegram (raw findings)
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+          REPORT: ${{ steps.scan-raw.outputs.report }}
+        run: |
+          if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${CHAT_ID:-}" ]; then
+            TEXT=$(printf 'RAW FINDINGS:\n%s' "${REPORT:-No raw findings. See GitHub Actions for details.}")
+            curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${CHAT_ID}" \
+              --data-urlencode "text=${TEXT}" || true
+          else
+            echo "Telegram reply skipped (token or chat_id not set)"
+          fi
+
+      - name: Run Web3Guard AI analysis
+        id: scan-ai
         env:
           NIM_API_KEY: ${{ secrets.NIM_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           TARGET: ${{ github.event.client_payload.target }}
           BUDGET: ${{ github.event.client_payload.budget }}
-          CHAT_ID: ${{ github.event.client_payload.chat_id }}
           MIN_SEVERITY: ${{ github.event.client_payload.min_severity || 'LOW' }}
         run: |
           set -e
-          echo "::group::Scanning $TARGET"
+          echo "::group::AI analysis on $TARGET"
           python -m web3guard.cli scan "$TARGET|$BUDGET" \
             --min-severity "$MIN_SEVERITY" \
             --no-exploit \
+            --ai-only \
             --out reports
           echo "::endgroup::"
           {
@@ -203,17 +240,18 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Reply to Telegram
+      - name: Reply to Telegram (AI findings)
         if: always()
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ github.event.client_payload.chat_id }}
-          REPORT: ${{ steps.scan.outputs.report }}
+          REPORT: ${{ steps.scan-ai.outputs.report }}
         run: |
           if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${CHAT_ID:-}" ]; then
+            TEXT=$(printf 'AI FINDINGS:\n%s' "${REPORT:-AI analysis complete. See GitHub Actions for details.}")
             curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               --data-urlencode "chat_id=${CHAT_ID}" \
-              --data-urlencode "text=${REPORT:-Scan completed. See GitHub Actions for the report.}" || true
+              --data-urlencode "text=${TEXT}" || true
           else
             echo "Telegram reply skipped (token or chat_id not set)"
           fi

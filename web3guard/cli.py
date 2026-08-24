@@ -76,6 +76,12 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--no-exploit", action="store_true",
                       help="Skip PoC generation (analysis only)")
     scan.add_argument("--no-self-critique", action="store_true")
+    scan.add_argument("--discovery-only", action="store_true",
+                      help="Run offline discovery/static analysis only "
+                           "(skip AI chunk analysis)")
+    scan.add_argument("--ai-only", action="store_true",
+                      help="Run AI chunk analysis only "
+                           "(skip offline discovery/static analysis)")
     scan.add_argument("--seed", type=int, default=0,
                       help="Random seed for deterministic replays")
     scan.add_argument("--scan-dependencies", action="store_true",
@@ -181,6 +187,13 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         cfg["enable_exploit"] = False
     if args.no_self_critique:
         cfg["enable_self_critique"] = False
+    if args.discovery_only:
+        cfg["enable_ai_analysis"] = False
+    if args.ai_only:
+        cfg["enable_discovery"] = False
+    if args.discovery_only and args.ai_only:
+        print("error: --discovery-only and --ai-only are mutually exclusive")
+        return 2
     if args.fork_url:
         cfg["fork_url"] = args.fork_url
     if args.seed is not None:
