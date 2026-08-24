@@ -179,6 +179,28 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Cache Foundry
+        id: cache-foundry
+        uses: actions/cache@v4
+        with:
+          path: ~/.foundry
+          key: ${{ runner.os }}-foundry-nightly
+          restore-keys: |
+            ${{ runner.os }}-foundry-
+
+      - name: Add Foundry to PATH
+        run: echo "$HOME/.foundry/bin" >> "$GITHUB_PATH"
+
+      - name: Install Foundry
+        if: steps.cache-foundry.outputs.cache-hit != 'true'
+        run: |
+          curl -L https://foundry.paradigm.xyz | bash
+          ~/.foundry/bin/foundryup --install nightly
+
+      - name: Verify toolchain
+        run: |
+          forge --version || true
+
       - name: Run Web3Guard discovery (raw findings)
         id: scan-raw
         env:
@@ -225,12 +247,17 @@ jobs:
           TARGET: ${{ github.event.client_payload.target }}
           BUDGET: ${{ github.event.client_payload.budget }}
           MIN_SEVERITY: ${{ github.event.client_payload.min_severity || 'LOW' }}
+          ENABLE_EXPLOIT: ${{ github.event.client_payload.enable_exploit || 'true' }}
         run: |
           set -e
           echo "::group::AI analysis on $TARGET"
+          EXTRAS=()
+          if [ "$ENABLE_EXPLOIT" != "true" ]; then
+            EXTRAS+=(--no-exploit)
+          fi
           python -m web3guard.cli scan "$TARGET|$BUDGET" \
             --min-severity "$MIN_SEVERITY" \
-            --no-exploit \
+            "${EXTRAS[@]}" \
             --ai-only \
             --out reports
           echo "::endgroup::"
