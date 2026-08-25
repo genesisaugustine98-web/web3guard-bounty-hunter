@@ -129,12 +129,14 @@ class OpenAICompatibleProvider(AIProvider):
         rpm: int = 35,
         timeout: float = 120.0,
         name: str = "openai-compatible",
+        use_streaming: bool = True,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key_env = api_key_env
         self.rpm = rpm
         self.timeout = timeout
         self.name = name
+        self.use_streaming = use_streaming
         self._last_request_ts: float = 0.0
         # The OpenAI client library is optional; if it's not installed
         # we fall back to raw urllib.
@@ -207,21 +209,35 @@ class OpenAICompatibleProvider(AIProvider):
                 kwargs["seed"] = seed
             if response_format is not None:
                 kwargs["response_format"] = dict(response_format)
-            completion = self._client.chat.completions.create(**kwargs)
+            if self.use_streaming:
+                kwargs["stream"] = True
+                stream = self._client.chat.completions.create(**kwargs)
+                content = "".join(
+                    (chunk.choices[0].delta.content or "")
+                    for chunk in stream
+                )
+                prompt_tokens = completion_tokens = total_tokens = 0
+                finish_reason = "stop"
+            else:
+                completion = self._client.chat.completions.create(**kwargs)
+                choice = completion.choices[0]
+                usage = completion.usage
+                content = choice.message.content or ""
+                prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+                completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+                total_tokens = getattr(usage, "total_tokens", 0) or 0
+                finish_reason = getattr(choice, "finish_reason", "") or ""
         except Exception as e:  # noqa: BLE001
             self._raise_for_openai_error(e)
             raise  # unreachable, but mypy-friendly
         elapsed_ms = int((time.monotonic() - start) * 1000)
-        choice = completion.choices[0]
-        usage = completion.usage
         return ChatResponse(
-            content=choice.message.content or "",
-            model=completion.model,
-            prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-            completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
-            total_tokens=getattr(usage, "total_tokens", 0) or 0,
-            finish_reason=getattr(choice, "finish_reason", "") or "",
-            raw=completion.model_dump() if hasattr(completion, "model_dump") else {},
+            content=content,
+            model=model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            finish_reason=finish_reason,
             provider=self.name,
             latency_ms=elapsed_ms,
         )

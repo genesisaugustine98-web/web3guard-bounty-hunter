@@ -80,7 +80,7 @@ class AIClient:
         injection_guard: PromptInjectionGuard | None = None,
         default_seed: int | None = 0,
         circuit_cooldown_seconds: float = 60.0,
-        max_retries_per_provider: int = 2,
+        max_retries_per_provider: int | None = 2,
     ) -> None:
         if not providers:
             raise ValueError("at least one AIProvider is required")
@@ -92,7 +92,7 @@ class AIClient:
         self._cache_path = cache_path
         self._circuit = {p.name: CircuitBreakerState() for p in providers}
         self._cooldown = circuit_cooldown_seconds
-        self._max_retries = max_retries_per_provider
+        self._max_retries = max_retries_per_provider if max_retries_per_provider is not None else 2
         if cache_path is not None:
             self._init_cache(cache_path)
 

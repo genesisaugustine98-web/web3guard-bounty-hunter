@@ -331,9 +331,19 @@ class Scanner:
                     rpm=int(p.get("rpm", 35)),
                     timeout=float(p.get("timeout", 120.0)),
                     name=p.get("name", p["type"]),
+                    use_streaming=bool(p.get("use_streaming", True)),
                 ))
             except Exception as e:  # noqa: BLE001
                 LOGGER.warning("failed to build provider %s: %s", p.get("name"), e)
+        # Retries: the first enabled provider's per-provider cap wins, so a
+        # flaky provider can be configured to fall through to the next one
+        # faster instead of burning N x timeout seconds on hopeless retries.
+        max_retries = None
+        for p in self.config.get("ai_providers", []):
+            if p.get("enabled", True) is False:
+                continue
+            max_retries = int(p.get("max_retries", 2))
+            break
         # Cost tracker with persistence
         cost_path = self.workdir / self.config.get("cost_db_path", ".web3guard/cost.db")
         cost_path.parent.mkdir(parents=True, exist_ok=True)
@@ -351,6 +361,7 @@ class Scanner:
             cache_path=cache_path,
             injection_guard=self.injection_guard,
             default_seed=self.config.get("default_seed", 0),
+            max_retries_per_provider=max_retries,
         )
 
     # ---- main entry point ------------------------------------------------

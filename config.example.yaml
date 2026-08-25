@@ -14,6 +14,8 @@ ai_providers:
     api_key_env: NIM_API_KEY
     rpm: 35
     timeout: 120
+    # max_retries: 2   # attempts per chunk before falling through to the next provider
+    # use_streaming: true  # stream tokens so slow generations are not killed by `timeout`
     model: deepseek-ai/deepseek-v4-flash-0731
   - type: openrouter
     name: openrouter-deepseek
