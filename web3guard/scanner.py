@@ -621,6 +621,24 @@ class Scanner:
             system += "\n\n" + adapter_catalog.strip()
         return system
 
+    @staticmethod
+    def _build_exploit_system_prompt(adapter: LanguageAdapter) -> str:
+        """Compose the exploit-generation system prompt.
+
+        Deliberately does NOT reuse the analysis system prompt, which
+        instructs the model to "respond with a single JSON object".
+        Live scans showed models following that instruction and
+        returning an analysis blob instead of a PoC, so every exploit
+        was rejected by the impact-assertion gate.
+        """
+        return (
+            "You are an expert smart-contract exploit developer. You "
+            "write proof-of-concept test code that compiles and runs "
+            "against the given target. Output ONLY the requested test "
+            "code inside a single fenced code block. Never output JSON, "
+            "analysis, prose, or explanation outside the code block."
+        )
+
     def _analyze_chunk(
         self,
         adapter: LanguageAdapter,
@@ -717,7 +735,7 @@ class Scanner:
         fork_hint = self._fork_hint() if self.config.get("fork_url") else ""
         max_attempts = int(self.config.get("max_exploit_attempts", 3))
         template = adapter.exploit_user_template()
-        system = self._build_system_prompt(adapter)
+        system = self._build_exploit_system_prompt(adapter)
         last_err = ""
         for _attempt in range(1, max_attempts + 1):
             try:
