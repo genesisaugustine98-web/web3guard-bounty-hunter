@@ -51,7 +51,14 @@ enable_ai_analysis: true
 # ----- Exploitation -----
 enable_exploit: true
 max_exploit_attempts: 3
-fork_url:                   # optional: mainnet RPC URL for fork-based PoCs
+# Optional: mainnet RPC URL (e.g. Alchemy/Infura/Ankr) for fork-based
+# PoCs. When set, Solidity/Vyper PoCs run `forge test --fork-url` so
+# they execute against live on-chain state, and the exploit prompt
+# asks the PoC to emit a `vuln_tvl` log that feeds the economic
+# analyzer's profit estimate. URLs with embedded keys are redacted
+# from reports.
+fork_url:
+
 
 # ----- Self-awareness passes -----
 enable_self_critique: true

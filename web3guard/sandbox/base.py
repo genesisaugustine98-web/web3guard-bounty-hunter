@@ -72,16 +72,21 @@ def create_sandbox(
     target_path: Path,
     workdir: Path,
     policy: SandboxPolicy | None = None,
+    fork_url: str | None = None,
 ) -> TestSandbox | None:
     """Return a sandbox appropriate for the adapter's test runner.
 
     The factory dispatches on ``adapter.test_runner.name``. If the
     runner name is unknown, returns ``None`` and logs a warning.
+
+    ``fork_url`` is EVM-specific: only the Foundry sandbox uses it to
+    add ``--fork-url`` so PoCs run against a live chain fork.
     """
     runner_name = adapter.test_runner.name
     if runner_name == "foundry":
         from web3guard.sandbox.foundry import FoundrySandbox
-        return FoundrySandbox(adapter, target_path, workdir, policy)
+        return FoundrySandbox(adapter, target_path, workdir, policy,
+                              fork_url=fork_url)
     if runner_name == "anchor":
         from web3guard.sandbox.anchor import AnchorSandbox
         return AnchorSandbox(adapter, target_path, workdir, policy)

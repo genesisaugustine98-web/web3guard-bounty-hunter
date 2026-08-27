@@ -83,10 +83,12 @@ class FoundrySandbox:
         target_path: Path,
         workdir: Path,
         policy: SandboxPolicy | None = None,
+        fork_url: str | None = None,
     ) -> None:
         self.adapter = adapter
         self.target_path = target_path
         self.workdir = workdir
+        self.fork_url = fork_url
         self.guard = SandboxGuard(policy or SandboxPolicy())
         self._root: Path | None = None
 
@@ -153,12 +155,21 @@ class FoundrySandbox:
             )
         # Test
         test_name = "test_autonomous_exploit"
+        test_cmd = [
+            "forge", "test", "--match-test", test_name, "-vvv",
+            "--no-match-path", "lib/**", "--via-ir",
+        ]
+        if self.fork_url:
+            test_cmd.extend(["--fork-url", self.fork_url])
         ok, out, err = self._run(
-            ["forge", "test", "--match-test", test_name, "-vvv",
-             "--no-match-path", "lib/**", "--via-ir"],
+            test_cmd,
             cwd=sandbox_path, timeout=timeout,
         )
         combined = out + "\n" + err
+        if self.fork_url:
+            # Foundry may echo the RPC URL (with embedded key) in error
+            # output; strip it so credentials never reach reports.
+            combined = combined.replace(self.fork_url, "<redacted-fork-url>")
         # Try to extract gas used
         gas_used = None
         import re

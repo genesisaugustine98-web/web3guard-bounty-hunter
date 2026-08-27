@@ -707,10 +707,14 @@ class Scanner:
     ) -> None:
         """Run the exploit-generation loop. Mutates ``finding`` in place."""
         from web3guard.sandbox import create_sandbox
-        sandbox = create_sandbox(adapter, target_path, self.workdir)
+        sandbox = create_sandbox(
+            adapter, target_path, self.workdir,
+            fork_url=self.config.get("fork_url"),
+        )
         if sandbox is None:
             finding.status = "POTENTIAL (sandbox init failed)"
             return
+        fork_hint = self._fork_hint() if self.config.get("fork_url") else ""
         max_attempts = int(self.config.get("max_exploit_attempts", 3))
         template = adapter.exploit_user_template()
         system = self._build_system_prompt(adapter)
@@ -726,7 +730,7 @@ class Scanner:
                         concept=finding.reasoning or "(see description)",
                         code=chunk.content[: self.config.get("max_chunk_chars", 6000)],
                         context=chunk.context or "(none)",
-                        fork_hint="",
+                        fork_hint=fork_hint,
                         oracle_hint="",
                     ),
                     max_tokens=3500,
@@ -749,10 +753,38 @@ class Scanner:
                 finding.status = "CONFIRMED EXPLOIT"
                 finding.poc_code = code
                 finding.exploit_log = out
+                self._capture_on_chain_tvl(finding, out)
                 return
             last_err = out[-1500:]
         finding.status = f"POTENTIAL (PoC unconfirmed: {last_err[:200]})"
         finding.poc_code = code if 'code' in locals() else ""
+
+    @staticmethod
+    def _fork_hint() -> str:
+        """Prompt guidance emitted only when a fork RPC is configured."""
+        return (
+            "FORK MODE: this PoC runs against a live chain fork, so real\n"
+            "on-chain state (token balances, oracle prices, DEX liquidity)\n"
+            "is available to the test. After the impact assertion, emit a\n"
+            "uint log named \"vuln_tvl\" with the value at risk, e.g.\n"
+            "    emit log_named_uint(\"vuln_tvl\", drainedWei);\n"
+            "Use the drained amount in wei, or an estimated USD value if\n"
+            "the drained asset is not ETH.\n"
+        )
+
+    @staticmethod
+    def _capture_on_chain_tvl(finding: Finding, output: str) -> None:
+        """Extract a ``vuln_tvl`` console log emitted by the PoC on the fork.
+
+        Foundry prints ``log_named_uint`` values as ``name: value``.
+        Stored raw so the economic analyzer can refine profit.
+        """
+        m = re.search(r"vuln_tvl:\s*(\d+)", output)
+        if m:
+            try:
+                finding.metadata["on_chain_tvl"] = int(m.group(1))
+            except ValueError:  # noqa: PERF203
+                pass
 
     def _self_critique(self, finding: Finding, chunk: Any) -> None:
         """Run an independent adversarial pass to try to disprove the finding.
@@ -1089,9 +1121,24 @@ class Scanner:
     def _economic_analyzer(self, finding: Finding) -> None:
         """Estimate the attacker's required capital and expected profit.
 
-        Uses a per-category offline model (order-of-magnitude). Real
-        on-chain TVL refinement is gated on ``--fork-url``.
+        Uses a per-category offline model (order-of-magnitude). When a
+        live fork RPC is configured and the PoC emitted an on-chain
+        ``vuln_tvl`` amount, that real value-at-risk overrides the
+        offline profit estimate.
         """
+        on_chain_tvl = finding.metadata.get("on_chain_tvl")
+        fork_configured = bool(self.config.get("fork_url"))
+        if on_chain_tvl is not None:
+            finding.cost_basis_usd = float(self._ECONOMIC_MODELS.get(
+                finding.category.lower(), {}).get("cost", 0.0))
+            finding.expected_profit_usd = min(float(on_chain_tvl), 1_000_000_000.0)
+            finding.metadata["economic"] = {
+                "on_chain": True,
+                "source": "fork-poc-log",
+                "note": "value at risk measured on a live fork PoC "
+                        "(vuln_tvl console log)",
+            }
+            return
         model = self._ECONOMIC_MODELS.get(finding.category.lower())
         if model:
             finding.cost_basis_usd = float(model["cost"])
@@ -1100,6 +1147,7 @@ class Scanner:
                 "note": "offline order-of-magnitude estimate; pass "
                         "--fork-url for on-chain TVL data",
                 "scope": model["scope"],
+                "on_chain": True if fork_configured else False,
             }
             return
         finding.cost_basis_usd = 0.0
@@ -1107,6 +1155,7 @@ class Scanner:
         finding.metadata["economic"] = {
             "note": "offline estimate; pass --fork-url for on-chain TVL data",
             "scope": "unknown category; see description",
+            "on_chain": True if fork_configured else False,
         }
 
     # ---- helpers ---------------------------------------------------------
