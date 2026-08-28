@@ -203,6 +203,7 @@ Category: {category}
 Severity hint: {severity}
 Description: {description}
 Concept: {concept}
+Source file: {file}
 
 Target code:
 {code}
@@ -211,6 +212,8 @@ Target code:
 
 The test must:
 1. Compile against the target Vyper code (use forge's Vyper support).
+   Import the target using its exact source filename above (e.g.
+   import {{Target}} from "../src/{file}").
 2. End with a real impact assertion.
 3. {oracle_hint}
 

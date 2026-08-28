@@ -748,6 +748,7 @@ class Scanner:
                         concept=finding.reasoning or "(see description)",
                         code=chunk.content[: self.config.get("max_chunk_chars", 6000)],
                         context=chunk.context or "(none)",
+                        file=chunk.file,
                         fork_hint=fork_hint,
                         oracle_hint="",
                     ),
