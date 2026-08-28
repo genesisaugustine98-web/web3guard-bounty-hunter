@@ -79,19 +79,34 @@ def _has_impact_assertion_solidity(code: str) -> bool:
     """Check whether a Foundry test contains a real impact assertion.
 
     We require *both* an ``assert*`` *and* a comparison operator inside
-    the assertion. A bare ``assert(true)`` is rejected.
+    the assertion. A bare ``assert(true)`` is rejected. Argument lists
+    are scanned with balanced-paren awareness so nested calls such as
+    ``assertGt(address(attacker).balance, x)`` are accepted.
     """
     if not code:
         return False
     if not re.search(r"\b(assert|assertEq|assertLt|assertGt|assertTrue|assertFalse|vm\.expectRevert)\b", code):
         return False
-    # Look for at least one numeric comparison or a before/after delta pattern.
-    if re.search(r"assert(?:Eq|Lt|Gt|True|False)\s*\([^,)]*,\s*[^,)]*\)", code):
-        return True
-    if re.search(r"assert\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*[<>!=]+\s*", code):
-        return True
     if re.search(r"vm\.expectRevert", code):
         return True
+    for m in re.finditer(r"\bassert(?:Eq|Lt|Gt|True|False)?\b", code):
+        start = code.find("(", m.end())
+        if start < 0:
+            continue
+        depth = 0
+        for i in range(start, len(code)):
+            if code[i] == "(":
+                depth += 1
+            elif code[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    arg = code[start + 1:i]
+                    # Named comparison asserts always assert impact; a bare
+                    # ``assert`` needs an explicit comparison operator.
+                    if re.search(r"(?:Eq|Lt|Gt|True|False)\b", m.group(0)) or \
+                       re.search(r"[<>!=]+", arg):
+                        return True
+                    break
     return False
 
 

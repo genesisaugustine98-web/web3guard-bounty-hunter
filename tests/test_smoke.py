@@ -181,6 +181,19 @@ def test_vyper_impact_assertion_accepts_real_one():
     assert not _has_impact_assertion_solidity("// just a comment")
 
 
+def test_impact_assertion_accepts_nested_parentheses():
+    from web3guard.languages.solidity import _has_impact_assertion_solidity
+    assert _has_impact_assertion_solidity(
+        'assertGt(address(attacker).balance, attackerDeposit, "profited")')
+    assert _has_impact_assertion_solidity(
+        'assertLt(address(target).balance, 1 ether, "drained")')
+    assert _has_impact_assertion_solidity("assertEq(addr(this).balance, 0)")
+    assert _has_impact_assertion_solidity("assert(getBalance() > 0)")
+    assert _has_impact_assertion_solidity("assert(balAfter < balBefore)")
+    assert _has_impact_assertion_solidity("assertEq(after - before, delta)")
+    assert not _has_impact_assertion_solidity("assert(ok)")
+
+
 # ---------------------------------------------------------------------------
 # Prompt-injection defense
 # ---------------------------------------------------------------------------
