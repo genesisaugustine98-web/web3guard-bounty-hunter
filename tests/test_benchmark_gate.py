@@ -17,7 +17,7 @@ CORPUS = REPO / "web3guard" / "bench" / "corpus.json"
 
 def _bench(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [sys.executable, "-m", "web3guard.cli", "bench",
+        [sys.executable, "-m", "web3guard", "bench",
          "--corpus", str(CORPUS), *args],
         capture_output=True, text=True, cwd=REPO,
     )
