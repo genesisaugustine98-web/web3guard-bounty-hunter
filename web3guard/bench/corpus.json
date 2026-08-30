@@ -17,6 +17,13 @@
     {"path": "test_contracts/vulnerable/solana_program/src/lib.rs", "language": "rust-solana", "vulnerabilities": ["unprotected-init", "access-control", "arithmetic"]},
     {"path": "test_contracts/vulnerable/sdksdk.ts", "language": "ts-sdk", "vulnerabilities": ["slippage", "unlimited-approval", "signature-replay"]},
     {"path": "test_contracts/clean/SafeVault.sol", "language": "solidity", "vulnerabilities": []},
-    {"path": "test_contracts/clean/SafeERC20.sol", "language": "solidity", "vulnerabilities": []}
+    {"path": "test_contracts/clean/SafeERC20.sol", "language": "solidity", "vulnerabilities": []},
+    {"path": "test_contracts/clean/SafeVault.vy", "language": "vyper", "vulnerabilities": []},
+    {"path": "test_contracts/clean/SafeVault.move", "language": "move", "vulnerabilities": []},
+    {"path": "test_contracts/clean/SafeVault.cairo", "language": "cairo", "vulnerabilities": []},
+    {"path": "test_contracts/clean/SafeVault.clar", "language": "clarity", "vulnerabilities": []},
+    {"path": "test_contracts/clean/SafeVault.fc", "language": "func", "vulnerabilities": []},
+    {"path": "test_contracts/clean/safe_program/src/lib.rs", "language": "rust-solana", "vulnerabilities": []},
+    {"path": "test_contracts/clean/SafeClient.ts", "language": "ts-sdk", "vulnerabilities": []}
   ]
 }

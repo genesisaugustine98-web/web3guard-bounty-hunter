@@ -1,0 +1,8 @@
+;; Clean FunC / TON contract - calls accept(), no unbounded slice
+;; parsing, no external state-changing entry points.
+#include "stdlib.fc";
+
+() recv_internal(int msg_value, cell in_msg, slice in_msg_body) impure {
+    accept();
+    ;; no slice parsing, no state changes - intentionally inert
+}

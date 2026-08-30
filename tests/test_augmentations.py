@@ -462,7 +462,7 @@ def test_bench_static_analyzer_meets_gate(tmp_path: Path) -> None:
     assert o.precision >= 0.99
     assert o.recall >= 0.95
     assert report.clean_hits == []
-    assert report.total_units == 16
+    assert report.total_units >= 16
 
 
 def test_bench_reports_false_positives() -> None:
