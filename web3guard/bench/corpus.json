@@ -24,6 +24,14 @@
     {"path": "test_contracts/clean/SafeVault.clar", "language": "clarity", "vulnerabilities": []},
     {"path": "test_contracts/clean/SafeVault.fc", "language": "func", "vulnerabilities": []},
     {"path": "test_contracts/clean/safe_program/src/lib.rs", "language": "rust-solana", "vulnerabilities": []},
-    {"path": "test_contracts/clean/SafeClient.ts", "language": "ts-sdk", "vulnerabilities": []}
+    {"path": "test_contracts/clean/SafeClient.ts", "language": "ts-sdk", "vulnerabilities": []},
+    {"path": "test_contracts/vulnerable/TollBooth.vy", "language": "vyper", "vulnerabilities": ["reentrancy", "access-control"]},
+    {"path": "test_contracts/vulnerable/RescueWallet.vy", "language": "vyper", "vulnerabilities": ["unchecked-external-call", "access-control"]},
+    {"path": "test_contracts/vulnerable/TxOriginLottery.sol", "language": "solidity", "vulnerabilities": ["tx-origin"]},
+    {"path": "test_contracts/vulnerable/SpotOracle.sol", "language": "solidity", "vulnerabilities": ["oracle-manipulation"]},
+    {"path": "test_contracts/vulnerable/TokenRegistry.move", "language": "move", "vulnerabilities": ["access-control", "missing-acquires"]},
+    {"path": "test_contracts/vulnerable/L1Bridge.cairo", "language": "cairo", "vulnerabilities": ["signature-replay"]},
+    {"path": "test_contracts/vulnerable/AdminRegistry.rs", "language": "rust-solana", "vulnerabilities": ["unprotected-init", "access-control"]},
+    {"path": "test_contracts/vulnerable/mev-client.ts", "language": "ts-sdk", "vulnerabilities": ["slippage", "unlimited-approval"]}
   ]
 }
