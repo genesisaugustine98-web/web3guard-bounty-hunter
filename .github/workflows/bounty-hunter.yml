@@ -207,6 +207,15 @@ jobs:
           fi
           "$FOUNDRYUP" --install nightly
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install language toolchains
+        run: |
+          bash scripts/setup-toolchains.sh
+
       - name: Verify toolchain
         run: |
           forge --version || true
@@ -351,6 +360,15 @@ jobs:
             exit 1
           fi
           "$FOUNDRYUP" --install nightly
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install language toolchains
+        run: |
+          bash scripts/setup-toolchains.sh
 
       - name: Verify toolchain
         run: |
