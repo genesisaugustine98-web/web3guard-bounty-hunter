@@ -33,7 +33,10 @@ install_scarb() {
 
 install_blueprint() {
   has blueprint && return 0
-  npm install -g --no-fund --no-audit @ton-community/blueprint
+  # --ignore-scripts: @tact-lang/compiler (a transitive dep) runs a husky
+  # install hook that fails because husky is a devDependency, not installed
+  # for transitive deps. The blueprint CLI does not need its install scripts.
+  npm install -g --no-fund --no-audit --ignore-scripts @ton-community/blueprint
 }
 
 install_aptos() {
