@@ -77,6 +77,37 @@ jobs:
           python -m compileall -q web3guard tests
           python -m pytest -q
 
+  toolchain-smoke:
+    name: Toolchain sandbox smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout scanner
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install lightweight sandbox toolchains
+        run: |
+          bash scripts/setup-toolchains.sh clarinet scarb blueprint aptos
+
+      - name: Run non-Foundry sandbox smoke tests
+        run: |
+          python -m pytest tests/test_sandbox_smoke.py -v
+
   bench:
     name: Benchmark (precision/recall gate)
     runs-on: ubuntu-latest
