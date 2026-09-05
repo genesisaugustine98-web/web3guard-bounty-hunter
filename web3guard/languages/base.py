@@ -109,7 +109,7 @@ class TestRunner:
 
     Different runners exist for Foundry (Solidity + Vyper), Anchor
     (Solana), ``aptos move test`` / ``sui move test`` (Aptos + Sui),
-    ``scarb test`` (Cairo), ``clarinet test`` (Clarity), and ``tondev``
+    ``scarb test`` (Cairo), ``clarinet check`` (Clarity), and ``tondev``
     / blueprint (FunC).
     """
     name: str                                # e.g. "foundry"

@@ -16,8 +16,8 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from web3guard.languages import cairo_lang, clarity_lang, func_lang, move_lang  # noqa: E402
 from web3guard.sandbox import create_sandbox  # noqa: E402
-from web3guard.languages import clarity_lang, cairo_lang, func_lang, move_lang  # noqa: E402
 
 
 def _sandbox_run(adapter, target_dir: str, poc: str) -> tuple[bool, str]:
@@ -40,7 +40,9 @@ def test_clarity_sandbox_smoke() -> None:
     ok, out = _sandbox_run(
         clarity_lang.ClarityAdapter(),
         "test_contracts/vulnerable",
-        'Clarinet.test({ name: "exploit_test", async fn(chain: any, accounts: any) {} });',
+        '(define-public (exploit-proof)\n'
+        '    (begin (asserts! true "noop")\n'
+        '          (ok true)))\n',
     )
     assert ok, out
 
@@ -50,8 +52,7 @@ def test_cairo_sandbox_smoke() -> None:
     ok, out = _sandbox_run(
         cairo_lang.CairoAdapter(),
         "test_contracts/vulnerable",
-        "mod lib { #[test] fn it_passes() {} }",
-    )
+        "#[cfg(test)] mod lib { #[test] fn it_passes() {} }",    )
     assert ok, out
 
 

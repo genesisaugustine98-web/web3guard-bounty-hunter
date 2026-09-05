@@ -73,6 +73,7 @@ class GenericSandbox:
                         shutil.copy2(child, root / child.name)
                 shutil.rmtree(sub, ignore_errors=True)
                 break
+        self.post_init(root)
         # Copy the target's user code.
         for fp in target_path.rglob("*"):
             if not fp.is_file():
@@ -95,6 +96,14 @@ class GenericSandbox:
         self._root = root
         return root
 
+    def post_init(self, sandbox_path: Path) -> None:
+        """Hook run after project init/flatten, before target code is copied.
+
+        Subclasses use this to adjust the freshly generated manifest (e.g.
+        add dev-dependencies the runner needs). Default: no-op.
+        """
+        return
+
     def write_poc(self, sandbox_path: Path, code: str, fingerprint: str) -> Path:
         poc = sandbox_path / self.adapter.test_runner.poc_relative_path
         poc.parent.mkdir(parents=True, exist_ok=True)
@@ -115,7 +124,8 @@ class GenericSandbox:
                 return SandboxResult(ok=False, output=out, error=err, returncode=1)
         # Test
         test_name = poc_path.stem
-        test_cmd = [c.format(test_name=test_name) for c in self.adapter.test_runner.test_command_template]
+        fmt = {"test_name": test_name, "poc_path": str(poc_path)}
+        test_cmd = [c.format(**fmt) for c in self.adapter.test_runner.test_command_template]
         ok, out, err = self._run(test_cmd, cwd=sandbox_path, timeout=timeout)
         return SandboxResult(
             ok=ok,

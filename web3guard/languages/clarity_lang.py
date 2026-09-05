@@ -195,8 +195,9 @@ user message. Do not include any prose outside the JSON.
 """
 
 _CLARITY_EXPLOIT_TEMPLATE = """\
-You are a senior Clarity exploit developer. Write a single Clarinet
-test that proves the following vulnerability in the target.
+You are a senior Clarity exploit developer. Write a single standalone
+Clarity contract that encodes the exploit against the following
+vulnerability in the target.
 
 Category: {category}
 Severity hint: {severity}
@@ -206,21 +207,23 @@ Concept: {concept}
 Target code:
 {code}
 
-The test must:
-1. Run via `clarinet test`.
-2. End with a real impact assertion (asserts! with concrete state
-   comparison).
-3. Use a before/after state snapshot.
+The contract must:
+1. Compile under `clarinet check` (single-file syntax/type check). No
+   test-runner scaffold or imports are available.
+2. Be self-contained: inline the vulnerable logic it depends on rather
+   than relying on cross-contract calls to unregistered contracts.
+3. Expose a public function whose body mirrors the attack path and
+   concludes with an impact-shaped expression (asserts!, ok, or err).
 
-Respond with a single ```clarity block containing the test.
+Respond with a single ```clarity block containing the contract.
 """
 
 _CLARITY_DISCOVERY_ENGINES: tuple[DiscoveryEngine, ...] = (
     DiscoveryEngine(
-        name="clarinet-test",
+        name="clarinet-check",
         binary="clarinet",
         supported_languages=(TargetLanguage.CLARITY,),
-        notes="Clarinet is the canonical Stacks dev tool; `clarinet test` runs the test suite.",
+        notes="Clarinet is the canonical Stacks dev tool; `clarinet check` validates contract syntax/typing.",
     ),
 )
 
@@ -229,13 +232,17 @@ def _has_impact_assertion_clarity(code: str) -> bool:
     return bool(re.search(r"\(asserts!\s+", code)) or bool(re.search(r"\(ok\s+", code)) or bool(re.search(r"\(err\s+", code))
 
 
+# Clarinet removed its JS test runner (`clarinet test`) in v2.1+ and offers
+# no headless simnet unit-test command in 3.x, so the Clarity sandbox
+# validates PoCs by compiling them with `clarinet check FILE` instead of
+# executing runtime assertions.
 _CLARITY_RUNNER = TestRunner(
     name="clarinet",
     supported_languages=(TargetLanguage.CLARITY,),
-    init_command=("clarinet", "new", "web3guard-sandbox"),
-    build_command=("clarinet", "check"),
-    test_command_template=("clarinet", "test", "--filter", "{test_name}"),
-    poc_relative_path="tests/exploit_test.ts",
+    init_command=("echo", "Clarity project — no init needed"),
+    build_command=(),
+    test_command_template=("clarinet", "check", "{poc_path}"),
+    poc_relative_path="contracts/exploit_poc.clar",
     has_impact_assertion=_has_impact_assertion_clarity,
-    notes="Clarity test runner — Clarinet.",
+    notes="Clarity validation runner — Clarinet check (compile-proof).",
 )

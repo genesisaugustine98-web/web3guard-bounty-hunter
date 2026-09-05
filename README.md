@@ -42,7 +42,7 @@ Every language ships with its own:
 | Vyper        | Foundry                  | Slither-vyper, Mythril, Echidna  |
 | Move         | `aptos move test` / `sui move test` | Move Prover, Bytecode verifier |
 | Cairo        | `scarb test`             | Scarb, Cairo-analyzer            |
-| Clarity      | `clarinet test`          | Clarinet                         |
+| Clarity      | `clarinet check`         | Clarinet                         |
 | FunC         | Blueprint / local validator | Blueprint                      |
 | Rust / Solana| `anchor test`            | Anchor, cargo-audit, clippy, Soteria, Trident |
 | TypeScript / JS | `ts-node` / `tsx`     | Semgrep, npm-audit, Gitleaks     |

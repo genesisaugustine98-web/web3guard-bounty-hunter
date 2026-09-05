@@ -237,7 +237,12 @@ def _has_impact_assertion_cairo(code: str) -> bool:
 _CAIRO_RUNNER = TestRunner(
     name="scarb",
     supported_languages=(TargetLanguage.CAIRO,),
-    init_command=("scarb", "init", "--name", "web3guard-sandbox"),
+    # scarb rejects hyphens in package names (letters/numbers/_ only) and
+    # prompts for a test runner on a TTY; --test-runner none keeps the
+    # built-in cairo-test runner (see ScarbSandbox.post_init which adds the
+    # required cairo_test dev-dependency).
+    init_command=("scarb", "init", "--no-vcs", "--test-runner", "none",
+                  "--name", "web3guard_sandbox"),
     build_command=("scarb", "build"),
     test_command_template=("scarb", "test", "-f", "{test_name}"),
     poc_relative_path="src/lib.cairo",
