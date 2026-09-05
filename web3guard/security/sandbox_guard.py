@@ -142,7 +142,12 @@ class SandboxPolicy:
     max_address_space_bytes: int = 4 * 1024 * 1024 * 1024  # RLIMIT_AS = 4 GiB
     max_file_size_bytes: int = 100 * 1024 * 1024  # RLIMIT_FSIZE = 100 MiB
     max_open_files: int = 256             # RLIMIT_NOFILE
-    max_processes: int = 1                # RLIMIT_NPROC: no fork-bomb
+    # RLIMIT_NPROC caps runaway process/thread bombs. It cannot be 1:
+    # NPROC counts *threads* per real UID, and the Rust toolchains we run
+    # (clarinet, scarb, forge, aptos) spawn worker threads, which would
+    # fail with EAGAIN for non-root users. 256 still bounds any fork bomb,
+    # and RLIMIT_CPU/RLIMIT_AS/timeouts contain the rest.
+    max_processes: int = 256              # RLIMIT_NPROC
     max_revert_reason_bytes: int = 512    # truncate revert messages in reports
     drop_privileges_to_uid: int = 65534   # nobody, if we can
     force_tempdir: bool = True
