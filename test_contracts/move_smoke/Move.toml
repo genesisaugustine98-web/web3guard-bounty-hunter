@@ -1,0 +1,6 @@
+[package]
+name = "move_smoke"
+version = "1.0.0"
+
+[addresses]
+move_smoke = "_"

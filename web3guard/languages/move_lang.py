@@ -215,9 +215,11 @@ user message. Do not include any prose outside the JSON.
 """
 
 _MOVE_EXPLOIT_TEMPLATE = """\
-You are a senior Move exploit developer. Write a single Move test
-file (#[test_only] module Test {{ ... }}) that proves the following
-vulnerability in the target.
+You are a senior Move exploit developer. Write a single Move source
+file proving the vulnerability in the target. The file must be a
+well-formed module containing one test function literally named
+``test_exploit`` (the harness runs ``aptos move test --filter
+test_exploit`` or ``sui move test --filter test_exploit``).
 
 Category: {category}
 Severity hint: {severity}
@@ -227,15 +229,36 @@ Concept: {concept}
 Target code:
 {code}
 
-The test must:
-1. Compile against the target Move code (use `aptos move test` or
-   `sui move test` as appropriate; check the build tool).
-2. End with an ``assert!`` showing concrete impact (e.g. abort on a
+Requirements:
+1. Wrap everything in a module, e.g.:
+
+   ```move
+   module {project_address}::exploit {{
+       use {project_address}::{{...the target module(s)...}};
+       #[test]
+       fun test_exploit() {{
+           // ...
+           assert!(<impact is shown>, <abort code>);
+       }}
+   }}
+   ```
+
+2. Use the address / module names declared in the target's Move.toml
+   (read it before writing). If the target ships no Move.toml, prefer a
+   fully self-contained PoC that re-declares the vulnerable logic inline
+   and uses the placeholder address ``web3guard_sandbox`` for its own
+   module.
+3. If the target repo uses the Aptos framework, keep imports to the
+   packages actually declared in its Move.toml (``AptosFramework`` /
+   ``MoveStdlib`` / ``AptosStdlib``); never import undeclared packages.
+4. Do not add extra #[test] functions; exactly one test function named
+   ``test_exploit`` is enough. Keep the module free of
+   ``#[test_only]``-gated helpers that reference test-only utilities.
+5. End with an ``assert!`` showing concrete impact (e.g. abort on a
    stolen resource, an unbalanced coin transfer, or an oracle-
    manipulated price).
-3. Use a before/after state snapshot.
 
-Respond with a single ```move block containing the test file.
+Respond with a single ```move block containing the file.
 """
 
 _MOVE_DISCOVERY_ENGINES: tuple[DiscoveryEngine, ...] = (

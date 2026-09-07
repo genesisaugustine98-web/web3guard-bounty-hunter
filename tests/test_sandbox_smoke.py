@@ -70,7 +70,15 @@ def test_move_sandbox_smoke() -> None:
     _require(move_lang.MoveAdapter(), "aptos")
     ok, out = _sandbox_run(
         move_lang.MoveAdapter(),
-        "test_contracts/vulnerable",
-        "#[test] fun test_exploit() { let _x = 1; assert!(_x == 1, 0); }",
+        "test_contracts/move_smoke",
+        "#[test_only]\n"
+        "module move_smoke::exploit {\n"
+        "    use move_smoke::sale;\n"
+        "    #[test]\n"
+        "    fun test_exploit() {\n"
+        "        let paid = sale::quote(1000, 10000, 1000);\n"
+        "        assert!(paid == 10000, 1);\n"
+        "    }\n"
+        "}\n",
     )
     assert ok, out
