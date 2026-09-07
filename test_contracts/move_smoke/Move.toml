@@ -3,4 +3,6 @@ name = "move_smoke"
 version = "1.0.0"
 
 [addresses]
-move_smoke = "_"
+# Concrete address: aptos move test will not auto-resolve a "_" placeholder
+# for a module that is exercised, so give the package a real test address.
+move_smoke = "0x1234"

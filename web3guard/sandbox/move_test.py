@@ -18,7 +18,9 @@ name = "web3guard_sandbox"
 version = "1.0.0"
 
 [addresses]
-web3guard_sandbox = "_"
+# Concrete address: aptos move test refuses to auto-resolve a "_"
+# placeholder for a module that a PoC actually exercises.
+web3guard_sandbox = "0x1234"
 """
 
 
