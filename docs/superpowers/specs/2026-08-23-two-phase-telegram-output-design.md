@@ -39,7 +39,10 @@ Wrap the per-chunk AI analysis loop in `_scan_one`
 `if self.config.get("enable_ai_analysis", True):`.
 
 Discovery findings and AI findings already persist to the same
-`findings.db`, so the existing `dashboard` command works for both phases.
+`findings.db`, but the dashboard only renders short fingerprint rows.
+The Telegram replies instead render the actual findings persisted to
+disk by each phase (see "Digest rendering" below), so the chat shows
+the full finding text.
 
 ### 3. Workflow split
 
@@ -48,26 +51,41 @@ In `.github/workflows/bounty-hunter.yml`, split the `scan` step into two:
 - **Step 1 — Raw findings:**
   `python -m web3guard.cli scan "$TARGET|$BUDGET" --discovery-only
   --min-severity "$MIN_SEVERITY" --no-exploit --out reports_raw`
-  then `python -m web3guard.cli dashboard | head -12` and post to
-  Telegram as "RAW FINDINGS".
+  then post the findings rendered from `reports_raw` to Telegram as
+  "RAW FINDINGS".
 
 - **Step 2 — AI findings:**
   `python -m web3guard.cli scan "$TARGET|$BUDGET" --ai-only
   --min-severity "$MIN_SEVERITY" --no-exploit --out reports`
-  then `python -m web3guard.cli dashboard | head -12` and post to
-  Telegram as "AI FINDINGS".
+  then post the findings rendered from `reports` to Telegram as
+  "AI FINDINGS".
 
-Both steps share the runner workspace, so `findings.db` accumulates:
-message 1 = raw only, message 2 = raw + AI combined.
+Each phase writes its own report directory, so the two Telegram
+messages are independent (raw only, then AI only) — no cumulative
+database rows mixed in.
 
-Both steps use `if: always()` with Telegram fallback text, matching the
-existing pattern.
+### 4. Digest rendering
+
+`web3guard.cli digest --dir <report_dir>` renders the scan's
+`WEB3GUARD_FINDINGS.json` as plain text: severity/category, file:line +
+function, status, language, SWC id, the finding description, the
+evidence (`reasoning`) line, and for `CONFIRMED EXPLOIT` findings the
+PoC source and a tail of the exploit output. When no JSON exists the
+command falls back to the txt report. `scripts/send_telegram_report.sh`
+invokes that digest and posts it to the chat, splitting long reports
+into multiple messages (<=4096 chars) with a delay to respect Telegram
+rate limits.
+
+Both reply steps use `if: always()`: a phase that produced no report
+posts a short failure notice with a link to the Actions run.
 
 ## Error Handling
 
-- Telegram post failures are non-fatal (`|| true`), matching existing
-  behavior.
-- If a scan step fails, the reply still posts with fallback text.
+- Telegram post failures are non-fatal: `send_telegram_report.sh` retries
+  each message a few times, then gives up silently — it never fails the
+  workflow step.
+- If a scan phase fails, its reply step still posts a short failure
+  notice with a link to the Actions run.
 
 ## Testing (TDD)
 
@@ -79,7 +97,8 @@ existing pattern.
 ## Trade-offs
 
 - Repo cloned twice (once per step). Free on GitHub Actions, slower.
-- Message 2 shows raw + AI combined (dashboard is cumulative).
+- Raw and AI phases post separate, independent messages (each phase
+  writes its own report directory).
 
 ## Out of Scope
 

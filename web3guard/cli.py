@@ -5,6 +5,7 @@ Subcommands:
 
 - ``scan``  — run a scan against one or more targets.
 - ``dashboard`` — show a TUI of finding-submission history.
+- ``digest`` — render a saved scan report as plain-text findings.
 - ``mark`` — update a finding's submission status.
 - ``serve`` — run a small HTTP server that exposes scan endpoints.
 - ``price`` — show the cost-pricing model and current rates.
@@ -93,6 +94,20 @@ def build_parser() -> argparse.ArgumentParser:
     dash = sub.add_parser("dashboard", help="Show submission-history dashboard")
     dash.add_argument("--db", type=Path, default=None)
 
+    # ---- digest ---------------------------------------------------------
+    dig = sub.add_parser(
+        "digest",
+        help="Render a saved scan report as plain-text findings "
+             "(for chat/TUI output, not for the full report files)",
+    )
+    dig.add_argument("--dir", type=Path, default=None,
+                     help="Scan output dir containing WEB3GUARD_FINDINGS.json "
+                          "(default: current directory)")
+    dig.add_argument("--no-poc", action="store_true",
+                     help="Omit PoC code / exploit output from confirmed findings")
+    dig.add_argument("--max-findings", type=int, default=0,
+                     help="Cap the number of findings rendered (0 = all)")
+
     # ---- mark -----------------------------------------------------------
     mark = sub.add_parser("mark", help="Update a finding's submission status")
     mark.add_argument("fingerprint")
@@ -157,6 +172,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "dashboard":
         return _cmd_dashboard(args)
+    if args.command == "digest":
+        return _cmd_digest(args)
     if args.command == "mark":
         return _cmd_mark(args)
     if args.command == "serve":
@@ -345,6 +362,29 @@ def _cmd_dashboard(args: argparse.Namespace) -> int:
         print(f"    [{f.severity:<8s}] {f.fingerprint[:16]}  "
               f"{f.target[:40]:<40}  {f.status:<10s}  {f.category}")
     return 0
+
+
+def _cmd_digest(args: argparse.Namespace) -> int:
+    """Print the findings of a saved scan as plain text (chat-friendly)."""
+    from web3guard.reports.digest import TXT_FILENAME, load_scan_report, render_digest
+
+    dir_path = args.dir or Path.cwd()
+    data = load_scan_report(dir_path)
+    if data is not None:
+        print(render_digest(
+            data,
+            include_poc=not args.no_poc,
+            max_findings=args.max_findings,
+        ).rstrip())
+        return 0
+    # Fall back to the txt report when no JSON is present (e.g. a phase
+    # that aborted after writing the report file).
+    txt = Path(dir_path) / TXT_FILENAME
+    if txt.is_file():
+        print(txt.read_text(encoding="utf-8").rstrip())
+        return 0
+    print(f"error: no scan report found in {dir_path}", file=sys.stderr)
+    return 1
 
 
 def _cmd_mark(args: argparse.Namespace) -> int:
