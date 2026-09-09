@@ -104,9 +104,16 @@ jobs:
         run: |
           bash scripts/setup-toolchains.sh clarinet scarb blueprint aptos
 
-      - name: Run non-Foundry sandbox smoke tests
+      - name: Install Foundry (EVM exploit-confirmation regression)
         run: |
-          python -m pytest tests/test_sandbox_smoke.py -v
+          curl -L https://foundry.paradigm.xyz | bash
+          export PATH="$HOME/.foundry/bin:$PATH"
+          foundryup --install stable
+          echo "$HOME/.foundry/bin" >> "$GITHUB_PATH"
+
+      - name: Run sandbox smoke + real exploit-confirmation tests
+        run: |
+          python -m pytest tests/test_sandbox_smoke.py tests/test_exploit_e2e_foundry.py -v
 
   bench:
     name: Benchmark (precision/recall gate)
