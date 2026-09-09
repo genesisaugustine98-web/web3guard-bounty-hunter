@@ -107,9 +107,17 @@ jobs:
       - name: Install Foundry (EVM exploit-confirmation regression)
         run: |
           curl -L https://foundry.paradigm.xyz | bash
-          export PATH="$HOME/.foundry/bin:$PATH"
+          FOUNDRYUP=""
+          for p in "$HOME/.foundry/bin/foundryup" "$HOME/.config/.foundry/bin/foundryup"; do
+            if [ -x "$p" ]; then FOUNDRYUP="$p"; break; fi
+          done
+          if [ -z "$FOUNDRYUP" ]; then
+            echo "::error::foundryup not found after install"
+            exit 1
+          fi
+          export PATH="$(dirname "$FOUNDRYUP"):$PATH"
           foundryup --install stable
-          echo "$HOME/.foundry/bin" >> "$GITHUB_PATH"
+          echo "$(dirname "$FOUNDRYUP")" >> "$GITHUB_PATH"
 
       - name: Run sandbox smoke + real exploit-confirmation tests
         run: |
