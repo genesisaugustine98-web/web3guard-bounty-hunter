@@ -25,51 +25,14 @@ from pathlib import Path
 from web3guard.languages.base import LanguageAdapter
 from web3guard.languages.vyper import VyperAdapter
 from web3guard.sandbox.base import SandboxResult
+from web3guard.sandbox.build_system import (
+    BuildProfile,
+    detect_build_profile,
+    render_foundry_toml,
+)
 from web3guard.security import SandboxGuard, SandboxPolicy
 
 LOGGER = logging.getLogger("web3guard.sandbox.foundry")
-
-
-# Hardened foundry.toml template. SandboxGuard overwrites this every
-# run so the AI's PoC can never set permissive fs_permissions or ffi.
-_HARDENED_FOUNDRY_TOML = """\
-# Web3Guard-managed foundry.toml. Regenerated every run.
-[profile.default]
-src = "src"
-out = "out"
-libs = ["lib"]
-test = "test"
-optimizer = true
-optimizer_runs = 200
-solc_version = "0.8.24"
-# Hard-deny filesystem and shell access. AI PoCs that use vm.ffi() will fail to compile.
-fs_permissions = []
-ffi = false
-verbosity = 1
-"""
-
-_HARDENED_FOUNDRY_TOML_VYPER = """\
-[profile.default]
-src = "src"
-out = "out"
-libs = ["lib"]
-test = "test"
-optimizer = true
-optimizer_runs = 200
-fs_permissions = []
-ffi = false
-verbosity = 1
-[profile.vyper]
-src = "src"
-out = "out"
-libs = ["lib"]
-test = "test"
-optimizer = true
-optimizer_runs = 200
-fs_permissions = []
-ffi = false
-verbosity = 1
-"""
 
 
 class FoundrySandbox:
@@ -84,11 +47,13 @@ class FoundrySandbox:
         workdir: Path,
         policy: SandboxPolicy | None = None,
         fork_url: str | None = None,
+        build_profile: BuildProfile | None = None,
     ) -> None:
         self.adapter = adapter
         self.target_path = target_path
         self.workdir = workdir
         self.fork_url = fork_url
+        self.build_profile = build_profile
         self.guard = SandboxGuard(policy or SandboxPolicy())
         self._root: Path | None = None
 
@@ -103,13 +68,16 @@ class FoundrySandbox:
         except Exception as e:  # noqa: BLE001
             LOGGER.error("forge init failed: %s", e)
             # Continue anyway — a partial sandbox is still useful.
-        # Copy user code, skip tests/mocks/libs
+        # Copy user code, skip tests/mocks/libs. Anchor relative paths at the
+        # project's own source root so files land directly under sandbox src/
+        # (e.g. src/Consumer.sol -> src/Consumer.sol, not src/src/Consumer.sol).
+        profile = self.build_profile or detect_build_profile(target_path)
         is_vyper = isinstance(self.adapter, VyperAdapter)
+        src_root = target_path / profile.src_dir
         for fp in target_path.rglob("*"):
             if not fp.is_file():
                 continue
-            rel = fp.relative_to(target_path)
-            rel_str = "/" + rel.as_posix().lower().strip("/") + "/"
+            rel_str = "/" + fp.relative_to(target_path).as_posix().lower().strip("/") + "/"
             if any(p in rel_str for p in (
                 "/test/", "/tests/", "/script/", "/scripts/",
                 "/lib/", "/libs/", "/node_modules/", "/.git/",
@@ -126,18 +94,47 @@ class FoundrySandbox:
             else:
                 if fp.suffix != ".sol":
                     continue
+            base = src_root if (src_root.is_dir() and fp.is_relative_to(src_root)) else target_path
+            rel = fp.relative_to(base)
             dest = root / "src" / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
             try:
                 shutil.copy2(fp, dest)
             except Exception as e:  # noqa: BLE001
                 LOGGER.debug("copy failed for %s: %s", fp, e)
-        # Regenerate foundry.toml
-        (root / "foundry.toml").write_text(
-            _HARDENED_FOUNDRY_TOML_VYPER if is_vyper else _HARDENED_FOUNDRY_TOML
-        )
+        # Regenerate foundry.toml from the detected profile, hardening
+        # ffi/fs but preserving remappings + solc so imports resolve.
+        (root / "foundry.toml").write_text(render_foundry_toml(profile))
+        self._vendor_dependencies(target_path, root, profile)
         self._root = root
         return root
+
+    def _vendor_dependencies(self, target_path: Path, root: Path, profile: BuildProfile) -> None:
+        """Copy the target's dependency trees so remapped imports resolve.
+
+        For each configured lib dir (e.g. ``lib``, ``node_modules``) copy its
+        contents into the sandbox ``lib/`` without clobbering forge-std.
+        OpenZeppelin under ``node_modules`` is remapped to
+        ``lib/openzeppelin-contracts/contracts`` to match
+        :func:`web3guard.sandbox.build_system.detect_build_profile`.
+        """
+        dest_root = root / "lib"
+        dest_root.mkdir(parents=True, exist_ok=True)
+        for lib_name in profile.libs:
+            src_dir = target_path / lib_name
+            if not src_dir.is_dir():
+                continue
+            if lib_name == "node_modules":
+                oz = src_dir / "@openzeppelin" / "contracts"
+                if oz.is_dir():
+                    dest = dest_root / "openzeppelin-contracts" / "contracts"
+                    shutil.copytree(oz, dest, dirs_exist_ok=True)
+                continue
+            for child in src_dir.iterdir():
+                if not child.is_dir():
+                    continue
+                dest = dest_root / child.name
+                shutil.copytree(child, dest, dirs_exist_ok=True)
 
     def write_poc(self, sandbox_path: Path, code: str, fingerprint: str) -> Path:
         poc_path = sandbox_path / "test" / "AutonomousExploit.t.sol"
