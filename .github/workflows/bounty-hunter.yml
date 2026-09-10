@@ -126,7 +126,8 @@ jobs:
 
       - name: Run sandbox smoke + real exploit-confirmation tests
         run: |
-          python -m pytest tests/test_sandbox_smoke.py tests/test_exploit_e2e_foundry.py -v
+          python -m pytest tests/test_sandbox_smoke.py tests/test_exploit_e2e_foundry.py \
+            tests/test_build_profile.py tests/test_foundry_build_repro.py -v
 
   live-exploit-e2e:
     name: Live exploit E2E (real model)

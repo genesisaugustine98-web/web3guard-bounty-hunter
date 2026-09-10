@@ -62,3 +62,34 @@ def test_vendored_lib_is_copied(tmp_path: Path) -> None:
     root = sb.setup(target)
     # lib/mylib was vendored from the target, not created by forge init.
     assert (root / "lib" / "mylib" / "contracts" / "Helper.sol").is_file()
+
+
+_HARDHAT = PROJECT_ROOT / "test_contracts/hardhat_project"
+
+
+@pytest.mark.skipif(shutil.which("forge") is None, reason="forge not installed")
+def test_hardhat_oz_import_compiles(tmp_path: Path) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    target = tmp_path / "target"
+    shutil.copytree(_HARDHAT, target)
+    sb = FoundrySandbox(SolidityAdapter(), target, work)
+    root = sb.setup(target)
+    toml = (root / "foundry.toml").read_text()
+    assert "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/" in toml
+    assert (root / "lib" / "openzeppelin-contracts" / "contracts" / "Ownable.sol").is_file()
+    ok, out = sb.write_and_run(
+        "// SPDX-License-Identifier: MIT\n"
+        "pragma solidity ^0.8.13;\n"
+        'import "forge-std/Test.sol";\n'
+        'import {Owned} from "../src/Consumer.sol";\n'
+        "contract ExploitTest is Test {\n"
+        "    function test_autonomous_exploit() public {\n"
+        "        Owned o = new Owned();\n"
+        "        assertEq(o.ownerOf(), address(this));\n"
+        "    }\n"
+        "}\n",
+        "hardhat",
+    )
+    assert ok, out
+    assert "1 passed" in out
