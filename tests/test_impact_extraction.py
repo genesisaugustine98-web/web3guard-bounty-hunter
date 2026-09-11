@@ -27,3 +27,25 @@ def test_zero_gain_is_not_confirmed() -> None:
 def test_loss_confirms() -> None:
     ev = extract_impact_solidity("impact_loss: 42")
     assert ev is not None and ev.loss == 42 and ev.confirmed
+
+
+from web3guard.languages.solidity import _has_impact_assertion_solidity  # noqa: E402
+
+
+def test_rejects_bare_assert_true() -> None:
+    assert not _has_impact_assertion_solidity("assert(true);")
+
+
+def test_rejects_assert_without_impact_log() -> None:
+    code = "function test_autonomous_exploit() public { assertEq(address(a).balance, 2 ether); }"
+    assert not _has_impact_assertion_solidity(code)
+
+
+def test_accepts_comparison_plus_impact_log() -> None:
+    code = (
+        "function test_autonomous_exploit() public {\n"
+        "    assertGt(address(a).balance, 1 ether);\n"
+        '    emit log_named_uint("impact_gain", 2 ether);\n'
+        "}"
+    )
+    assert _has_impact_assertion_solidity(code)

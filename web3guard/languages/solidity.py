@@ -98,12 +98,15 @@ def extract_impact_solidity(output: str) -> ImpactEvidence | None:
 def _has_impact_assertion_solidity(code: str) -> bool:
     """Check whether a Foundry test contains a real impact assertion.
 
-    We require *both* an ``assert*`` *and* a comparison operator inside
-    the assertion. A bare ``assert(true)`` is rejected. Argument lists
-    are scanned with balanced-paren awareness so nested calls such as
+    We require an ``impact_gain``/``impact_loss`` log emit, an ``assert*``,
+    and a comparison operator inside the assertion. A bare
+    ``assert(true)`` is rejected. Argument lists are scanned with
+    balanced-paren awareness so nested calls such as
     ``assertGt(address(attacker).balance, x)`` are accepted.
     """
     if not code:
+        return False
+    if not re.search(r'log_named_(?:uint|int)\s*\(\s*"impact_(?:gain|loss)"', code):
         return False
     if not re.search(r"\b(assert|assertEq|assertLt|assertGt|assertTrue|assertFalse|vm\.expectRevert)\b", code):
         return False

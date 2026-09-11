@@ -175,23 +175,26 @@ def test_move_adapter_chunks_at_declarations(tmp_path: Path):
 
 def test_vyper_impact_assertion_accepts_real_one():
     from web3guard.languages.solidity import _has_impact_assertion_solidity
-    assert _has_impact_assertion_solidity("assertEq(bal, 0)")
-    assert _has_impact_assertion_solidity("assert(bal < 100)")
-    assert not _has_impact_assertion_solidity("assert(true)")
+    log = 'emit log_named_uint("impact_gain", drained); '
+    assert _has_impact_assertion_solidity(log + "assertEq(bal, 0)")
+    assert _has_impact_assertion_solidity(log + "assert(bal < 100)")
+    assert not _has_impact_assertion_solidity(log + "assert(true)")
+    assert not _has_impact_assertion_solidity("assert(bal < 100)")
     assert not _has_impact_assertion_solidity("// just a comment")
 
 
 def test_impact_assertion_accepts_nested_parentheses():
     from web3guard.languages.solidity import _has_impact_assertion_solidity
+    log = 'emit log_named_uint("impact_gain", 1); '
     assert _has_impact_assertion_solidity(
-        'assertGt(address(attacker).balance, attackerDeposit, "profited")')
+        log + 'assertGt(address(attacker).balance, attackerDeposit, "profited")')
     assert _has_impact_assertion_solidity(
-        'assertLt(address(target).balance, 1 ether, "drained")')
-    assert _has_impact_assertion_solidity("assertEq(addr(this).balance, 0)")
-    assert _has_impact_assertion_solidity("assert(getBalance() > 0)")
-    assert _has_impact_assertion_solidity("assert(balAfter < balBefore)")
-    assert _has_impact_assertion_solidity("assertEq(after - before, delta)")
-    assert not _has_impact_assertion_solidity("assert(ok)")
+        log + 'assertLt(address(target).balance, 1 ether, "drained")')
+    assert _has_impact_assertion_solidity(log + "assertEq(addr(this).balance, 0)")
+    assert _has_impact_assertion_solidity(log + "assert(getBalance() > 0)")
+    assert _has_impact_assertion_solidity(log + "assert(balAfter < balBefore)")
+    assert _has_impact_assertion_solidity(log + "assertEq(after - before, delta)")
+    assert not _has_impact_assertion_solidity(log + "assert(ok)")
 
 
 # ---------------------------------------------------------------------------
