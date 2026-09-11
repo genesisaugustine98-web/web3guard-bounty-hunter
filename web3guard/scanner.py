@@ -769,9 +769,20 @@ class Scanner:
                 continue
             ok, out = sandbox.write_and_run(code, finding.fingerprint or "exploit")
             if ok:
+                extractor = getattr(adapter.test_runner, "extract_impact", None)
+                evidence = extractor(out) if extractor is not None else None
+                if extractor is not None and evidence is None:
+                    last_err = "PoC passed but emitted no impact_gain/impact_loss evidence"
+                    continue
+                if evidence is not None and not evidence.confirmed:
+                    last_err = "PoC passed but impact evidence was zero"
+                    continue
                 finding.status = "CONFIRMED EXPLOIT"
                 finding.poc_code = code
                 finding.exploit_log = out
+                if evidence is not None:
+                    finding.metadata["impact_gain"] = evidence.gain
+                    finding.metadata["impact_loss"] = evidence.loss
                 self._capture_on_chain_tvl(finding, out)
                 return
             last_err = out[-1500:]

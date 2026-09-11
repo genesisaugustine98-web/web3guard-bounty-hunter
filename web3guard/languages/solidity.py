@@ -390,7 +390,12 @@ The test must:
 2. End with a concrete impact assertion (assertLt/assertGt/
    assertEq showing actual loss or state change; not just `assert(true)`).
 3. Use a before/after balance or state snapshot to prove impact.
-4. {oracle_hint}
+4. Emit a machine-readable impact log proving value moved:
+       emit log_named_uint("impact_gain", <attackerGainWei>);
+       emit log_named_uint("impact_loss", <victimLossWei>);
+   Use 0 for the side with no measurable delta. A passing test
+   without this log is rejected.
+5. {oracle_hint}
 
 Respond with a single ```solidity block containing the full test
 file. No prose, no explanation, no comments outside the test.
