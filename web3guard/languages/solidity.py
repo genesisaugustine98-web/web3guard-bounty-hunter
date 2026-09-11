@@ -36,6 +36,7 @@ from typing import Any
 from web3guard.languages.base import (
     Chunk,
     DiscoveryEngine,
+    ImpactEvidence,
     LanguageAdapter,
     RepoSummary,
     TargetLanguage,
@@ -73,6 +74,25 @@ _PROXY_RE = re.compile(
 )
 # Inline assembly
 _ASSEMBLY_RE = re.compile(r"\bassembly\s*(\(|\{)")
+# Impact logs emitted by a PoC, e.g. log_named_uint("impact_gain", drained)
+_IMPACT_LOG_RE = re.compile(r"impact_(gain|loss):\s*(\d+)")
+
+
+def extract_impact_solidity(output: str) -> ImpactEvidence | None:
+    """Parse ``log_named_uint("impact_gain"|"impact_loss", n)`` lines.
+
+    Returns ``None`` when no impact log was emitted, which the scanner
+    treats as "no evidence" (not as "zero impact").
+    """
+    gain = loss = 0
+    found = False
+    for kind, value in _IMPACT_LOG_RE.findall(output or ""):
+        found = True
+        if kind == "gain":
+            gain += int(value)
+        else:
+            loss += int(value)
+    return ImpactEvidence(gain=gain, loss=loss) if found else None
 
 
 def _has_impact_assertion_solidity(code: str) -> bool:
@@ -409,5 +429,6 @@ _FOUNDRY_RUNNER = TestRunner(
                             "--no-match-path", "lib/**", "--via-ir"),
     poc_relative_path="test/AutonomousExploit.t.sol",
     has_impact_assertion=_has_impact_assertion_solidity,
+    extract_impact=extract_impact_solidity,
     notes="Foundry is the canonical test runner for Solidity and Vyper.",
 )

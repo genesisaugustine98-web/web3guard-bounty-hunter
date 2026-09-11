@@ -119,7 +119,19 @@ class TestRunner:
     test_command_template: Sequence[str]     # e.g. ["forge", "test", "--match-test", "{test_name}"]
     poc_relative_path: str                   # e.g. "test/AutonomousExploit.t.sol"
     has_impact_assertion: Callable[[str], bool] | None = None
+    extract_impact: Callable[[str], "ImpactEvidence | None"] | None = None
     notes: str = ""
+
+
+@dataclass(frozen=True)
+class ImpactEvidence:
+    """Machine-readable proof that a PoC moved value or broke an invariant."""
+    gain: int = 0
+    loss: int = 0
+
+    @property
+    def confirmed(self) -> bool:
+        return self.gain > 0 or self.loss > 0
 
 
 class LanguageAdapter(abc.ABC):
