@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import re
 import shutil
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from web3guard.sandbox import create_sandbox
+from web3guard import sandbox as _sandbox
 
 _REENTRANCY_CALL = re.compile(
     r'\(bool\s+ok,\)\s*=\s*msg\.sender\.call\{value:\s*_amount\}\(""\);\s*'
@@ -23,16 +24,35 @@ _REENTRANCY_CALL = re.compile(
     re.DOTALL,
 )
 
+# withdraw-all variant: the balance is zeroed after the external call.
+_REENTRANCY_ZERO = re.compile(
+    r'\(bool\s+ok,\)\s*=\s*msg\.sender\.call\{value:\s*(\w+)\}\(""\);\s*'
+    r'require\(ok,\s*"send fail"\);\s*'
+    r'balances\[msg\.sender\]\s*=\s*0;',
+    re.DOTALL,
+)
+
 
 def _mutate_reentrancy(source: str) -> str | None:
-    def _fix(m: re.Match[str]) -> str:
+    def _fix_sub(m: re.Match[str]) -> str:
         return (
             "balances[msg.sender] -= _amount;\n        "
             '(bool ok,) = msg.sender.call{value: _amount}("");\n        '
             'require(ok, "send fail");'
         )
 
-    new, count = _REENTRANCY_CALL.subn(_fix, source)
+    new, count = _REENTRANCY_CALL.subn(_fix_sub, source)
+    if count:
+        return new
+
+    def _fix_zero(m: re.Match[str]) -> str:
+        return (
+            "balances[msg.sender] = 0;\n        "
+            f'(bool ok,) = msg.sender.call{{value: {m.group(1)}}}("");\n        '
+            'require(ok, "send fail");'
+        )
+
+    new, count = _REENTRANCY_ZERO.subn(_fix_zero, source)
     return new if count else None
 
 
@@ -109,17 +129,17 @@ def run_differential(
 ) -> DifferentialOutcome:
     if category not in MUTATORS:
         return DifferentialOutcome("no-mutator")
-    vuln = create_sandbox(adapter, target_path, workdir)
+    vuln = _sandbox.create_sandbox(adapter, target_path, workdir)
     if vuln is None:
         return DifferentialOutcome("vulnerable-failed", "sandbox init failed", "")
     ok_v, out_v = vuln.write_and_run(poc_code, f"{fingerprint}-vuln")
     if not ok_v:
         return DifferentialOutcome("vulnerable-failed", out_v, "")
-    patched_dir = workdir / f"patched-{fingerprint[:12] or 'fp'}"
+    patched_dir = Path(tempfile.mkdtemp(prefix="web3guard-patched-"))
     shutil.copytree(target_path, patched_dir, dirs_exist_ok=True)
     if not _apply_mutation(category, patched_dir):
         return DifferentialOutcome("no-mutator", out_v, "")
-    patched = create_sandbox(adapter, patched_dir, workdir)
+    patched = _sandbox.create_sandbox(adapter, patched_dir, workdir)
     if patched is None:
         return DifferentialOutcome("no-mutator", out_v, "")
     ok_p, out_p = patched.write_and_run(poc_code, f"{fingerprint}-patched")

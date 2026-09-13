@@ -24,6 +24,23 @@ def test_reentrancy_mutator_reorders_state_update() -> None:
     assert out.index("balances[msg.sender] -= _amount;") < out.index('call{value: _amount}("")')
 
 
+_VULN_WITHDRAW_ALL = """\
+function withdraw() external {
+    uint256 amount = balances[msg.sender];
+    require(amount > 0, "no balance");
+    (bool ok,) = msg.sender.call{value: amount}("");
+    require(ok, "send fail");
+    balances[msg.sender] = 0;
+}
+"""
+
+
+def test_reentrancy_mutator_handles_withdraw_all() -> None:
+    out = mutate_source("reentrancy", _VULN_WITHDRAW_ALL)
+    assert out is not None
+    assert out.index("balances[msg.sender] = 0;") < out.index('call{value: amount}("")')
+
+
 def test_access_control_mutator_inserts_guard() -> None:
     src = "function setOwner(address n) external { owner = n; }"
     out = mutate_source("access-control", src)

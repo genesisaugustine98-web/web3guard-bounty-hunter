@@ -10,12 +10,13 @@ contract VulnerableBank {
         balances[msg.sender] += msg.value;
     }
 
-    function withdraw(uint256 _amount) external {
-        require(balances[msg.sender] >= _amount, "insufficient");
+    function withdraw() external {
+        uint256 amount = balances[msg.sender];
+        require(amount > 0, "no balance");
         // VULN: external call BEFORE state update — classic reentrancy
-        (bool ok,) = msg.sender.call{value: _amount}("");
+        (bool ok,) = msg.sender.call{value: amount}("");
         require(ok, "send fail");
-        balances[msg.sender] -= _amount;
+        balances[msg.sender] = 0;
     }
 
     function balanceOf(address u) external view returns (uint256) {

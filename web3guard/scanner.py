@@ -51,6 +51,10 @@ from web3guard.languages import (
     detect_target_language,
 )
 from web3guard.reports import ReportBuilder
+from web3guard.sandbox.differential import (
+    DifferentialOutcome,
+    run_differential,
+)
 from web3guard.security import (
     PromptInjectionGuard,
     SandboxGuard,
@@ -203,6 +207,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "enable_ai_analysis": True,
     "enable_exploit": True,
     "max_exploit_attempts": 3,
+    "enable_differential": True,
     "use_ai_planning": True,
     "enable_self_critique": True,
     "enable_attack_sequence_brainstorm": True,
@@ -777,6 +782,18 @@ class Scanner:
                 if evidence is not None and not evidence.confirmed:
                     last_err = "PoC passed but impact evidence was zero"
                     continue
+                if self.config.get("enable_differential", True):
+                    outcome: DifferentialOutcome = run_differential(
+                        adapter, target_path, self.workdir, code,
+                        finding.fingerprint or "exploit", finding.category,
+                    )
+                    finding.metadata["differential"] = outcome.status
+                    if outcome.status == "patched-still-passes":
+                        last_err = "differential: exploit also passes on patched copy"
+                        continue
+                    if outcome.status == "vulnerable-failed":
+                        last_err = "differential: vulnerable run failed"
+                        continue
                 finding.status = "CONFIRMED EXPLOIT"
                 finding.poc_code = code
                 finding.exploit_log = out
