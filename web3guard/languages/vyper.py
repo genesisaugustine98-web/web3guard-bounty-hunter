@@ -214,8 +214,14 @@ The test must:
 1. Compile against the target Vyper code (use forge's Vyper support).
    Import the target using its exact source filename above (e.g.
    import {{Target}} from "../src/{file}").
-2. End with a real impact assertion.
-3. {oracle_hint}
+2. End with a real impact assertion (assertLt/assertGt/assertEq
+   showing actual loss or state change; not just `assert(true)`).
+3. Emit a machine-readable impact log proving value moved:
+       emit log_named_uint("impact_gain", <attackerGainWei>);
+       emit log_named_uint("impact_loss", <victimLossWei>);
+   Use 0 for the side with no measurable delta. A passing test
+   without this log is rejected.
+4. {oracle_hint}
 
 Respond with a single ```solidity block containing the test file.
 """

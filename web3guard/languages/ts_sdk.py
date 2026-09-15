@@ -321,5 +321,8 @@ _TS_SDK_RUNNER = TestRunner(
     test_command_template=("npx", "ts-node", "{test_name}"),
     poc_relative_path="poc.ts",
     has_impact_assertion=_has_impact_assertion_ts,
-    notes="Off-chain SDK test runner — TypeScript with ts-node or tsx.",
+    # The sandbox does not install ts-node/tsc, so the runner cannot be
+    # verified to execute; no CONFIRMED until a real harness exists.
+    runtime_confirmable=False,
+    notes="Off-chain SDK test runner — TypeScript with ts-node or tsx (no confirmation harness).",
 )

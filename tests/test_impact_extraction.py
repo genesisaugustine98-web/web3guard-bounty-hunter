@@ -90,3 +90,10 @@ def test_cairo_prefilter_accepts_assert_plus_marker() -> None:
         'println!("impact_gain: {}", gain); }'
     )
     assert _has_impact_assertion_cairo(code)
+
+
+def test_vyper_template_requires_impact_log() -> None:
+    from web3guard.languages.vyper import _VYPER_EXPLOIT_TEMPLATE
+
+    assert "impact_gain" in _VYPER_EXPLOIT_TEMPLATE
+    assert "impact_loss" in _VYPER_EXPLOIT_TEMPLATE

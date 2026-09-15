@@ -287,5 +287,8 @@ _ANCHOR_RUNNER = TestRunner(
     test_command_template=("anchor", "test", "--skip-deploy"),
     poc_relative_path="tests/exploit.ts",
     has_impact_assertion=_has_impact_assertion_rust_ts,
-    notes="Anchor test runner for Solana programs.",
+    # The Solana/Anchor toolchain is not installed in CI and the PoC has no
+    # verified impact-marker path, so confirmation cannot be trusted.
+    runtime_confirmable=False,
+    notes="Anchor test runner for Solana programs (no confirmation harness).",
 )

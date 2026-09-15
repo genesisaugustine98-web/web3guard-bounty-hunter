@@ -295,5 +295,10 @@ _MOVE_RUNNER = TestRunner(
     test_command_template=("aptos", "move", "test", "--filter", "{test_name}"),
     poc_relative_path="sources/TestExploit.move",
     has_impact_assertion=_has_impact_assertion_move,
-    notes="Move test runner — `aptos move test` for Aptos, `sui move test` for Sui.",
+    # `aptos move test` executes tests, but Move has no primitive for a
+    # named numeric impact marker, so we cannot distinguish a real exploit
+    # from a trivially-passing assertion at runtime. No CONFIRMED until a
+    # marker-based harness exists.
+    runtime_confirmable=False,
+    notes="Move test runner — `aptos move test` for Aptos, `sui move test` for Sui (no confirmation harness).",
 )
