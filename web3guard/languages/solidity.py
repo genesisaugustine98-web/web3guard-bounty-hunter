@@ -41,6 +41,7 @@ from web3guard.languages.base import (
     RepoSummary,
     TargetLanguage,
     TestRunner,
+    parse_impact_marker,
 )
 
 # Boundary regex used by the chunker. Matches the *start* of a top-level
@@ -74,8 +75,6 @@ _PROXY_RE = re.compile(
 )
 # Inline assembly
 _ASSEMBLY_RE = re.compile(r"\bassembly\s*(\(|\{)")
-# Impact logs emitted by a PoC, e.g. log_named_uint("impact_gain", drained)
-_IMPACT_LOG_RE = re.compile(r"impact_(gain|loss):\s*(\d+)")
 
 
 def extract_impact_solidity(output: str) -> ImpactEvidence | None:
@@ -84,15 +83,7 @@ def extract_impact_solidity(output: str) -> ImpactEvidence | None:
     Returns ``None`` when no impact log was emitted, which the scanner
     treats as "no evidence" (not as "zero impact").
     """
-    gain = loss = 0
-    found = False
-    for kind, value in _IMPACT_LOG_RE.findall(output or ""):
-        found = True
-        if kind == "gain":
-            gain += int(value)
-        else:
-            loss += int(value)
-    return ImpactEvidence(gain=gain, loss=loss) if found else None
+    return parse_impact_marker(output)
 
 
 def _has_impact_assertion_solidity(code: str) -> bool:

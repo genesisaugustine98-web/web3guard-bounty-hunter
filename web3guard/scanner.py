@@ -774,6 +774,10 @@ class Scanner:
                 continue
             ok, out = sandbox.write_and_run(code, finding.fingerprint or "exploit")
             if ok:
+                if not getattr(adapter.test_runner, "runtime_confirmable", True):
+                    last_err = ("runner cannot confirm at runtime "
+                                "(compile-only or no working harness)")
+                    continue
                 extractor = getattr(adapter.test_runner, "extract_impact", None)
                 evidence = extractor(out) if extractor is not None else None
                 if extractor is not None and evidence is None:

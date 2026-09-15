@@ -20,6 +20,7 @@ adding a new language a matter of writing one subclass.
 from __future__ import annotations
 
 import abc
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -120,6 +121,9 @@ class TestRunner:
     poc_relative_path: str                   # e.g. "test/AutonomousExploit.t.sol"
     has_impact_assertion: Callable[[str], bool] | None = None
     extract_impact: Callable[[str], "ImpactEvidence | None"] | None = None
+    # False when the runner cannot execute a PoC at runtime (compile-only,
+    # or no working harness). Such runners must never yield CONFIRMED EXPLOIT.
+    runtime_confirmable: bool = True
     notes: str = ""
 
 
@@ -132,6 +136,28 @@ class ImpactEvidence:
     @property
     def confirmed(self) -> bool:
         return self.gain > 0 or self.loss > 0
+
+
+_IMPACT_MARKER_RE = re.compile(r"impact_(gain|loss):\s*([0-9][0-9_]*)")
+
+
+def parse_impact_marker(output: str) -> ImpactEvidence | None:
+    """Parse ``impact_gain:`` / ``impact_loss:`` markers from runner output.
+
+    Shared by every test runner whose PoC can emit a machine-readable impact
+    line. Values may use ``_`` thousands separators. Returns ``None`` when no
+    marker was emitted (the scanner treats that as "no evidence", not zero).
+    """
+    gain = loss = 0
+    found = False
+    for kind, value in _IMPACT_MARKER_RE.findall(output or ""):
+        found = True
+        n = int(value.replace("_", ""))
+        if kind == "gain":
+            gain += n
+        else:
+            loss += n
+    return ImpactEvidence(gain=gain, loss=loss) if found else None
 
 
 class LanguageAdapter(abc.ABC):

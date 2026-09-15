@@ -148,7 +148,7 @@ class SandboxPolicy:
     # fail with EAGAIN for non-root users. 256 still bounds any fork bomb,
     # and RLIMIT_CPU/RLIMIT_AS/timeouts contain the rest.
     max_processes: int = 256              # RLIMIT_NPROC
-    max_revert_reason_bytes: int = 512    # truncate revert messages in reports
+    max_revert_reason_bytes: int = 8192    # truncate revert messages in reports
     drop_privileges_to_uid: int = 65534   # nobody, if we can
     force_tempdir: bool = True
     env_allowlist: frozenset[str] = SAFE_ENV_ALLOWLIST
@@ -247,13 +247,21 @@ class SandboxGuard:
             pass
 
     def truncate_revert_reason(self, text: str) -> str:
-        """Truncate a revert reason to the policy's max bytes for safe reporting."""
+        """Truncate a revert reason to the policy's max bytes for safe reporting.
+
+        Keeps both the head and the tail: runtime impact markers are emitted
+        near the end of test output and must survive truncation.
+        """
         if not text:
             return text
         limit = self._policy.max_revert_reason_bytes
         if len(text) <= limit:
             return text
-        return text[: limit - 32] + "...[truncated by SandboxGuard]"
+        marker = "...[truncated by SandboxGuard]..."
+        keep = max(0, (limit - len(marker)) // 2)
+        if keep == 0:
+            return marker[:limit]
+        return text[:keep] + marker + text[-keep:]
 
     def regenerate_foundry_config(self, sandbox_path: Path) -> None:
         """Overwrite the test-runner config with a hardened, deterministic version.

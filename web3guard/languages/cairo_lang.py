@@ -35,10 +35,12 @@ from typing import Any
 from web3guard.languages.base import (
     Chunk,
     DiscoveryEngine,
+    ImpactEvidence,
     LanguageAdapter,
     RepoSummary,
     TargetLanguage,
     TestRunner,
+    parse_impact_marker,
 )
 
 _CAIRO_DECL_RE = re.compile(
@@ -210,6 +212,11 @@ The test must:
 2. End with a real impact assertion (assert! with concrete state
    comparison).
 3. Use a before/after state snapshot.
+4. Emit a machine-readable impact log so the scanner can verify impact:
+       println!("impact_gain: {{}}", attacker_gain);
+       println!("impact_loss: {{}}", victim_loss);
+   Use 0 for the side with no measurable delta. A test that passes
+   without this log is rejected.
 
 Respond with a single ```cairo block containing the test module.
 """
@@ -231,7 +238,14 @@ _CAIRO_DISCOVERY_ENGINES: tuple[DiscoveryEngine, ...] = (
 
 
 def _has_impact_assertion_cairo(code: str) -> bool:
-    return bool(re.search(r"assert!\s*\(", code)) or bool(re.search(r"assert\s*\(", code))
+    has_assert = bool(re.search(r"\bassert!?\s*\(", code))
+    has_marker = bool(re.search(r'println!\s*\(\s*"impact_(gain|loss):', code))
+    return has_assert and has_marker
+
+
+def extract_impact_cairo(output: str) -> ImpactEvidence | None:
+    """Parse ``println!("impact_gain: ...")`` markers from `scarb test` output."""
+    return parse_impact_marker(output)
 
 
 _CAIRO_RUNNER = TestRunner(
@@ -247,5 +261,6 @@ _CAIRO_RUNNER = TestRunner(
     test_command_template=("scarb", "test", "-f", "{test_name}"),
     poc_relative_path="src/lib.cairo",
     has_impact_assertion=_has_impact_assertion_cairo,
+    extract_impact=extract_impact_cairo,
     notes="Cairo test runner — `scarb test`.",
 )

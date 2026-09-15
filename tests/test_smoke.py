@@ -285,6 +285,15 @@ def test_sandbox_revert_reason_truncation():
     assert "truncated" in out
 
 
+def test_sandbox_truncation_preserves_tail():
+    guard = SandboxGuard(SandboxPolicy(max_revert_reason_bytes=128))
+    text = "x" * 1000 + "impact_gain: 7"
+    out = guard.truncate_revert_reason(text)
+    assert "impact_gain: 7" in out
+    assert "truncated" in out
+    assert len(out) < 200
+
+
 # ---------------------------------------------------------------------------
 # Findings DB
 # ---------------------------------------------------------------------------

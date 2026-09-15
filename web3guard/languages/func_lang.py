@@ -263,5 +263,10 @@ _FUNC_RUNNER = TestRunner(
     test_command_template=("blueprint", "test", "--filter", "{test_name}"),
     poc_relative_path="tests/exploit.spec.ts",
     has_impact_assertion=_has_impact_assertion_func,
-    notes="TON test runner — Blueprint or the local validator.",
+    # `blueprint create web3guard-sandbox` is broken (rejects the hyphenated
+    # name, then hits a ts-node config error) and `blueprint test` exits 0
+    # without running the spec. Until a real harness exists, TON must not
+    # produce CONFIRMED findings.
+    runtime_confirmable=False,
+    notes="TON test runner — Blueprint or the local validator (no way to confirm).",
 )

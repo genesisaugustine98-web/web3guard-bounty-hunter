@@ -244,5 +244,6 @@ _CLARITY_RUNNER = TestRunner(
     test_command_template=("clarinet", "check", "{poc_path}"),
     poc_relative_path="contracts/exploit_poc.clar",
     has_impact_assertion=_has_impact_assertion_clarity,
-    notes="Clarity validation runner — Clarinet check (compile-proof).",
+    runtime_confirmable=False,
+    notes="Clarity validation runner — Clarinet check (compile-proof, no runtime confirmation).",
 )
