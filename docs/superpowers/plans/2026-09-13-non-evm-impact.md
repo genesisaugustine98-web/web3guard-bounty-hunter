@@ -97,3 +97,18 @@ head *and* the tail so markers survive, and raise the default cap.
 - `python3 -m pytest tests/test_cairo_impact_e2e.py -q` (needs scarb)
 - `PATH="$HOME/.foundry/bin:$PATH" python3 -m pytest -q`
 - Push and poll CI.
+
+## Follow-on #2: remaining runner honesty (done, df94aa8)
+
+**Files:** `web3guard/languages/{vyper,move_lang,rust_solana,ts_sdk}.py`,
+`tests/test_impact_extraction.py`, `tests/test_exploit_confirmation.py`
+
+- Vyper shares `_FOUNDRY_RUNNER`, so it is runtime-confirmable, but its
+  `_VYPER_EXPLOIT_TEMPLATE` never asked for the `impact_gain`/`impact_loss`
+  log. Every Vyper PoC was rejected by the pre-filter and could never
+  confirm. Added the marker instruction to the template.
+- Move, Solana/Anchor, and ts-sdk have no verified runtime impact harness
+  (and Solana/ts-node are not installed in CI). Set
+  `runtime_confirmable=False` so they never emit `CONFIRMED EXPLOIT`.
+- Pinned the confirmable/non-confirmable runner matrix in a test.
+- Still out: real Move/Solana/ts-sdk harnesses; real TON/Blueprint harness.
