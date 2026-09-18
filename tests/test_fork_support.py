@@ -140,6 +140,76 @@ def test_create_sandbox_threads_fork_url():
 
 
 # ---------------------------------------------------------------------------
+# Differential fork parity
+# ---------------------------------------------------------------------------
+
+
+_FORK_DIFF_FIXTURE = """\
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract Vault {
+    mapping(address => uint256) public balances;
+
+    function withdraw() external {
+        uint256 amount = balances[msg.sender];
+        (bool ok,) = msg.sender.call{value: amount}("");
+        require(ok, "send fail");
+        balances[msg.sender] = 0;
+    }
+}
+"""
+
+
+def _run_differential_capture(tmp_path, monkeypatch, fork_url):
+    from web3guard import sandbox as sandbox_mod
+    from web3guard.languages.solidity import SolidityAdapter
+    from web3guard.sandbox.differential import run_differential
+
+    created: list[dict] = []
+
+    class _SB:
+        def __init__(self, kwargs):
+            self.kwargs = kwargs
+
+        def write_and_run(self, code, fingerprint, timeout=90):
+            return True, "PASSED"
+
+    def _fake_create(adapter, path, workdir, **kwargs):
+        created.append(kwargs)
+        return _SB(kwargs)
+
+    monkeypatch.setattr(sandbox_mod, "create_sandbox", _fake_create)
+
+    target = tmp_path / "t"
+    target.mkdir()
+    (target / "Vault.sol").write_text(_FORK_DIFF_FIXTURE)
+    work = tmp_path / "w"
+    work.mkdir()
+    out = run_differential(
+        SolidityAdapter(), target, work, "// poc", "fp", "reentrancy",
+        fork_url=fork_url,
+    )
+    return out, created
+
+
+def test_run_differential_threads_fork_url(tmp_path, monkeypatch):
+    out, created = _run_differential_capture(
+        tmp_path, monkeypatch, "https://rpc.example/v1"
+    )
+    assert len(created) == 2
+    assert all(k.get("fork_url") == "https://rpc.example/v1" for k in created)
+    assert out.status == "patched-still-passes"
+
+
+def test_run_differential_omits_fork_url_when_unset(tmp_path, monkeypatch):
+    out, created = _run_differential_capture(tmp_path, monkeypatch, None)
+    assert len(created) == 2
+    assert all(k.get("fork_url") is None for k in created)
+    assert out.status == "patched-still-passes"
+
+
+# ---------------------------------------------------------------------------
 # Scanner wiring
 # ---------------------------------------------------------------------------
 

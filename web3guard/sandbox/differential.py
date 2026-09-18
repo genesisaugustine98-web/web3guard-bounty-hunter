@@ -126,10 +126,11 @@ def run_differential(
     poc_code: str,
     fingerprint: str,
     category: str,
+    fork_url: str | None = None,
 ) -> DifferentialOutcome:
     if category not in MUTATORS:
         return DifferentialOutcome("no-mutator")
-    vuln = _sandbox.create_sandbox(adapter, target_path, workdir)
+    vuln = _sandbox.create_sandbox(adapter, target_path, workdir, fork_url=fork_url)
     if vuln is None:
         return DifferentialOutcome("vulnerable-failed", "sandbox init failed", "")
     ok_v, out_v = vuln.write_and_run(poc_code, f"{fingerprint}-vuln")
@@ -139,7 +140,7 @@ def run_differential(
     shutil.copytree(target_path, patched_dir, dirs_exist_ok=True)
     if not _apply_mutation(category, patched_dir):
         return DifferentialOutcome("no-mutator", out_v, "")
-    patched = _sandbox.create_sandbox(adapter, patched_dir, workdir)
+    patched = _sandbox.create_sandbox(adapter, patched_dir, workdir, fork_url=fork_url)
     if patched is None:
         return DifferentialOutcome("no-mutator", out_v, "")
     ok_p, out_p = patched.write_and_run(poc_code, f"{fingerprint}-patched")
