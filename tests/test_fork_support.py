@@ -314,6 +314,33 @@ def test_confirmed_poc_parses_vuln_tvl(tmp_path, monkeypatch):
     assert finding.metadata.get("on_chain_tvl") == 5000000
 
 
+def test_scanner_forwards_fork_url_to_differential(tmp_path, monkeypatch):
+    import web3guard.scanner as scanner_mod
+    from web3guard import sandbox as sandbox_mod
+    from web3guard.ai.provider import ChatResponse
+
+    cap = _CaptureSandbox()
+    monkeypatch.setattr(sandbox_mod, "create_sandbox", lambda *a, **k: cap)
+
+    captured: dict = {}
+
+    def _fake_diff(*args, **kwargs):
+        captured.update(kwargs)
+        return scanner_mod.DifferentialOutcome("confirmed")
+
+    monkeypatch.setattr(scanner_mod, "run_differential", _fake_diff)
+
+    cfg = {"enable_ai_analysis": True, "enable_discovery": False,
+           "enable_exploit": True, "max_exploit_attempts": 1,
+           "enable_differential": True,
+           "fork_url": "https://rpc.example/v1"}
+    ai = _FakeChat([ChatResponse(content=_valid_poc(), model="m")])
+    scanner = Scanner(config=cfg, workdir=tmp_path, ai_client=ai)
+    finding = Finding(target="x", language="solidity", file="Vault.sol")
+    scanner._generate_poc(_FakeAdapter(), finding, _chunk(), tmp_path)
+    assert captured.get("fork_url") == "https://rpc.example/v1"
+
+
 def test_economic_analyzer_uses_on_chain_tvl():
     scanner = Scanner(config={"fork_url": "https://rpc.example/v1"},
                       ai_client=object())

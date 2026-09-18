@@ -828,6 +828,7 @@ class Scanner:
                     outcome: DifferentialOutcome = run_differential(
                         adapter, target_path, self.workdir, code,
                         finding.fingerprint or "exploit", finding.category,
+                        fork_url=self.config.get("fork_url"),
                     )
                     finding.metadata["differential"] = outcome.status
                     if outcome.status == "patched-still-passes":
