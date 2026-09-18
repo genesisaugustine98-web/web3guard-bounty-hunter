@@ -20,11 +20,9 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import pytest  # noqa: E402
 
-from web3guard.scanner import Finding, Scanner  # noqa: E402
 from web3guard.languages.base import TargetLanguage  # noqa: E402
-
+from web3guard.scanner import Finding, Scanner  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # FoundrySandbox fork flag
