@@ -1237,7 +1237,8 @@ class Scanner:
                 "note": "offline order-of-magnitude estimate; pass "
                         "--fork-url for on-chain TVL data",
                 "scope": model["scope"],
-                "on_chain": True if fork_configured else False,
+                "on_chain": False,
+                "fork_configured": fork_configured,
             }
             return
         finding.cost_basis_usd = 0.0
@@ -1245,7 +1246,8 @@ class Scanner:
         finding.metadata["economic"] = {
             "note": "offline estimate; pass --fork-url for on-chain TVL data",
             "scope": "unknown category; see description",
-            "on_chain": True if fork_configured else False,
+            "on_chain": False,
+            "fork_configured": fork_configured,
         }
 
     # ---- helpers ---------------------------------------------------------

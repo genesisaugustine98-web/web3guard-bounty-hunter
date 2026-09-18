@@ -362,6 +362,18 @@ def test_economic_analyzer_offline_without_fork():
     assert finding.expected_profit_usd > 0  # offline order-of-magnitude model
 
 
+def test_economic_analyzer_fork_configured_without_tvl_is_offline():
+    scanner = Scanner(config={"fork_url": "https://rpc.example/v1"},
+                      ai_client=object())
+    finding = Finding(target="x", language="solidity", file="Vault.sol",
+                      category="reentrancy")
+    scanner._economic_analyzer(finding)
+    econ = finding.metadata["economic"]
+    assert econ.get("on_chain") is False
+    assert econ.get("fork_configured") is True
+    assert finding.expected_profit_usd > 0
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
