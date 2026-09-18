@@ -10,7 +10,6 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from web3guard.reachability.solidity_index import FunctionIndex  # noqa: E402
 
-
 SOURCE = """\
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;

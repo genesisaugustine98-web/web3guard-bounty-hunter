@@ -60,7 +60,7 @@ class FunctionIndex:
             self._by_name.setdefault(fn.name, []).append(fn)
 
     @classmethod
-    def build(cls, target_path: Path) -> "FunctionIndex":
+    def build(cls, target_path: Path) -> FunctionIndex:
         root = Path(target_path)
         funcs: list[FunctionInfo] = []
         for path in sorted(root.rglob("*.sol")):

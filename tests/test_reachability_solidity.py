@@ -12,7 +12,6 @@ from web3guard.reachability.solidity import resolve_solidity  # noqa: E402
 from web3guard.reachability.solidity_index import FunctionIndex  # noqa: E402
 from web3guard.reachability.types import ReachabilityVerdict  # noqa: E402
 
-
 SOURCE = """\
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;

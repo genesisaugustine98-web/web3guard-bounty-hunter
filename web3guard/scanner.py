@@ -50,6 +50,7 @@ from web3guard.languages import (
     default_registry,
     detect_target_language,
 )
+from web3guard.reachability import ReachabilityAnalyzer, ReachabilityVerdict
 from web3guard.reports import ReportBuilder
 from web3guard.sandbox.differential import (
     DifferentialOutcome,
@@ -62,7 +63,6 @@ from web3guard.security import (
 )
 from web3guard.utils.secrets import scan_path
 from web3guard.utils.vuln_catalog import get_catalog
-from web3guard.reachability import ReachabilityAnalyzer, ReachabilityVerdict
 
 LOGGER = logging.getLogger("web3guard.scanner")
 
