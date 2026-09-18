@@ -62,6 +62,7 @@ from web3guard.security import (
 )
 from web3guard.utils.secrets import scan_path
 from web3guard.utils.vuln_catalog import get_catalog
+from web3guard.reachability import ReachabilityAnalyzer, ReachabilityVerdict
 
 LOGGER = logging.getLogger("web3guard.scanner")
 
@@ -208,6 +209,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "enable_exploit": True,
     "max_exploit_attempts": 3,
     "enable_differential": True,
+    "enable_reachability": True,
+    "reachability_use_slither": True,
     "use_ai_planning": True,
     "enable_self_critique": True,
     "enable_attack_sequence_brainstorm": True,
@@ -489,6 +492,12 @@ class Scanner:
         seen_fps: set[str] = set()
         tr.role_map = {}
         tr.attack_sequences = {}
+        reachability = None
+        if self.config.get("enable_reachability", True):
+            reachability = ReachabilityAnalyzer(
+                target_path,
+                use_slither=bool(self.config.get("reachability_use_slither", True)),
+            )
         for adapter in adapters:
             lang = adapter.language.value
             LOGGER.info("adapter %s analyzing target", lang)
@@ -499,6 +508,8 @@ class Scanner:
                         continue
                     if not self._severity_at_least(finding.severity, min_severity):
                         continue
+                    if reachability is not None:
+                        self._apply_reachability(reachability, finding)
                     seen_fps.add(finding.fingerprint)
                     tr.findings.append(finding)
             # Discover files, ordered by research-plan risk.
@@ -531,7 +542,9 @@ class Scanner:
             tr.chunks_analyzed += len(chunks_to_analyze)
             if self.config.get("enable_ai_analysis", True):
                 for ch in chunks_to_analyze:
-                    finding = self._analyze_chunk(adapter, ch, target_path, target)
+                    finding = self._analyze_chunk(
+                        adapter, ch, target_path, target, reachability=reachability
+                    )
                     if finding is None:
                         continue
                     if finding.fingerprint in seen_fps:
@@ -650,6 +663,8 @@ class Scanner:
         chunk: Any,
         target_path: Path,
         target_url: str,
+        *,
+        reachability: ReachabilityAnalyzer | None = None,
     ) -> Finding | None:
         """Run analysis + exploit generation + self-critique for one chunk."""
         # 1. Build the system prompt (generic + language-specific catalog)
@@ -710,6 +725,8 @@ class Scanner:
             line_hint=parsed.get("line_hint", ""),
         )
         finding.fingerprint = self._fingerprint(finding)
+        if reachability is not None and not self._apply_reachability(reachability, finding):
+            return finding
         # 5. Generate a PoC if enabled
         if self.config.get("enable_exploit", True):
             self._generate_poc(adapter, finding, chunk, target_path)
@@ -720,6 +737,27 @@ class Scanner:
         if self.config.get("enable_economic_analyzer", True):
             self._economic_analyzer(finding)
         return finding
+
+    def _apply_reachability(
+        self, reachability: ReachabilityAnalyzer, finding: Finding
+    ) -> bool:
+        """Annotate ``finding`` with its reachability verdict.
+
+        Returns True when the finding should proceed (reachable or
+        unknown) and False when it was definitively not reachable and has
+        been rejected.
+        """
+        try:
+            evidence = reachability.classify(finding)
+        except Exception as e:  # noqa: BLE001
+            LOGGER.warning("reachability classification failed: %s", e)
+            return True
+        finding.metadata["reachability"] = evidence.to_metadata()
+        if evidence.verdict != ReachabilityVerdict.NOT_REACHABLE:
+            return True
+        finding.status = "REJECTED"
+        finding.metadata["rejection_reason"] = "not externally reachable"
+        return False
 
     def _generate_poc(
         self,
