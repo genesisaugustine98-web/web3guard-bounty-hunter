@@ -25,6 +25,7 @@ from web3guard.bench.metrics import (
     diff_reports,
     evaluate,
 )
+from web3guard.bench.pipeline import language_for, make_reachability_analyzer
 from web3guard.bench.runner import run_benchmark
 
 __all__ = [
@@ -40,4 +41,6 @@ __all__ = [
     "evaluate",
     "diff_reports",
     "run_benchmark",
+    "language_for",
+    "make_reachability_analyzer",
 ]

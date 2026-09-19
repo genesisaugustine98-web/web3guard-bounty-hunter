@@ -61,7 +61,10 @@ def load_corpus(manifest: Path | str | None = None) -> BenchmarkCorpus:
     if not manifest_path.is_absolute():
         manifest_path = REPO_ROOT / manifest_path
     data = json.loads(manifest_path.read_text(encoding="utf-8"))
-    root = manifest_path.parent if manifest_path != DEFAULT_CORPUS else REPO_ROOT
+    if data.get("root"):
+        root = (manifest_path.parent / str(data["root"])).resolve()
+    else:
+        root = manifest_path.parent if manifest_path != DEFAULT_CORPUS else REPO_ROOT
     units = tuple(
         CorpusUnit(
             path=str(u["path"]),
@@ -102,7 +105,10 @@ def validate_corpus(manifest: Path | str) -> list[str]:
     if not manifest_path.is_absolute():
         manifest_path = REPO_ROOT / manifest_path
     data = json.loads(manifest_path.read_text(encoding="utf-8"))
-    root = REPO_ROOT if manifest_path == DEFAULT_CORPUS else manifest_path.parent
+    if data.get("root"):
+        root = (manifest_path.parent / str(data["root"])).resolve()
+    else:
+        root = REPO_ROOT if manifest_path == DEFAULT_CORPUS else manifest_path.parent
 
     from web3guard.bench.metrics import VALID_CATEGORIES
 
