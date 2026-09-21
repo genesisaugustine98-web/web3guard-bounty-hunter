@@ -1,0 +1,12 @@
+{
+  "name": "confirmation",
+  "description": "L2 runtime confirmation calibration. A golden PoC that drains the vulnerable fixture must confirm (positive); the same PoC must fail against the fixed fixture (negative). No AI: the PoC is a fixed input, and the real scanner, sandbox, impact extractor, and differential are exercised.",
+  "cases": [
+    {"name": "reentrancy_positive", "target": "targets/reentrancy_vuln",
+     "poc": "pocs/reentrancy.t.sol", "category": "reentrancy",
+     "language": "solidity", "expect_confirmed": true},
+    {"name": "reentrancy_fixed", "target": "targets/reentrancy_fixed",
+     "poc": "pocs/reentrancy.t.sol", "category": "reentrancy",
+     "language": "solidity", "expect_confirmed": false}
+  ]
+}

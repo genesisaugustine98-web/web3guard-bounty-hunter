@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from pathlib import Path
+
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -67,3 +70,23 @@ def test_calibrate_l1_rejects_unreachable_and_keeps_recall() -> None:
     assert result.data["filtered"]["precision"] == 1.0
     rejected = {item["file"] for item in result.data["rejected"]}
     assert any("UnreachableReentrancy" in f for f in rejected)
+
+
+CASES = PROJECT_ROOT / "bench" / "calibration" / "cases.json"
+
+
+@pytest.mark.skipif(shutil.which("forge") is None, reason="forge not installed")
+def test_calibrate_l2_golden_cases(tmp_path: Path) -> None:
+    from web3guard.bench.calibration import calibrate_l2
+    from web3guard.bench.cases import load_cases
+
+    cases = load_cases(CASES)
+    result = calibrate_l2(cases, cases_root=CASES.parent, workdir=tmp_path)
+
+    assert result.status == "measured", result.reason
+    assert result.data["tp"] == 1
+    assert result.data["tn"] == 1
+    assert result.data["fp"] == 0
+    assert result.data["fn"] == 0
+    assert result.data["precision"] == 1.0
+    assert result.data["recall"] == 1.0

@@ -10,6 +10,13 @@ Usage from the CLI: ``web3guard bench`` (see ``cli.py``).
 
 from __future__ import annotations
 
+from web3guard.bench.calibration import (
+    CalibrationReport,
+    LayerResult,
+    calibrate_l1,
+    calibrate_l2,
+)
+from web3guard.bench.cases import CalibrationCase, load_cases, load_live_cases
 from web3guard.bench.corpus import (
     DEFAULT_CORPUS,
     BenchmarkCorpus,
@@ -43,4 +50,11 @@ __all__ = [
     "run_benchmark",
     "language_for",
     "make_reachability_analyzer",
+    "CalibrationReport",
+    "LayerResult",
+    "calibrate_l1",
+    "calibrate_l2",
+    "CalibrationCase",
+    "load_cases",
+    "load_live_cases",
 ]

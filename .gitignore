@@ -37,6 +37,8 @@ Thumbs.db
 
 # Scanned targets (per-run clones)
 targets/
+# Calibration fixtures are committed, not per-run clones
+!bench/calibration/targets/
 *.tar
 *.tar.gz
 *.zip
