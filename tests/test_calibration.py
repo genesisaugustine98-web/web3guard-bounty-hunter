@@ -51,3 +51,19 @@ def test_pipeline_fails_open_for_unknown_language(tmp_path: Path) -> None:
         "(define-public (withdraw) (ok true))", encoding="utf-8")
     kept = make_reachability_analyzer()(tmp_path)
     assert isinstance(kept, list)
+
+
+def test_calibrate_l1_rejects_unreachable_and_keeps_recall() -> None:
+    from web3guard.bench import default_corpus, load_corpus
+    from web3guard.bench.calibration import calibrate_l1
+
+    main = default_corpus()
+    reach = load_corpus(REACHABILITY_CORPUS)
+    result = calibrate_l1(main_corpus=main, reachability_corpus=reach)
+
+    assert result.status == "measured", result.reason
+    assert result.data["precision_delta"] > 0
+    assert result.data["recall_delta"] == 0
+    assert result.data["filtered"]["precision"] == 1.0
+    rejected = {item["file"] for item in result.data["rejected"]}
+    assert any("UnreachableReentrancy" in f for f in rejected)

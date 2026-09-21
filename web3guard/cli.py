@@ -154,6 +154,29 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Validate the corpus manifest (paths exist, labels "
                             "are known) and exit non-zero on errors")
 
+    # ---- calibrate ------------------------------------------------------
+    cal = sub.add_parser(
+        "calibrate",
+        help="Measure pipeline precision/recall across calibration layers",
+    )
+    cal.add_argument("--layers", default="l1",
+                     help="Comma-separated layers to run (l1,l2,l3)")
+    cal.add_argument("--corpus", type=Path, default=None,
+                     help="Main corpus manifest (default: built-in)")
+    cal.add_argument("--reachability-corpus", type=Path,
+                     default=Path("bench/reachability/corpus.json"),
+                     help="Reachability calibration corpus manifest")
+    cal.add_argument("--cases", type=Path,
+                     default=Path("bench/calibration/cases.json"),
+                     help="L2 golden-case manifest")
+    cal.add_argument("--live-cases", type=Path,
+                     default=Path("bench/calibration/live.json"),
+                     help="L3 live-case manifest")
+    cal.add_argument("--json", type=Path, default=None, dest="json_out",
+                     help="Write the calibration report here")
+    cal.add_argument("--fail-on-regression", action="store_true",
+                     help="Exit non-zero when L1 precision does not improve")
+
     # ---- version --------------------------------------------------------
     sub.add_parser("version", help="Print version and exit")
 
@@ -180,6 +203,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_serve(args)
     if args.command == "bench":
         return _cmd_bench(args)
+    if args.command == "calibrate":
+        return _cmd_calibrate(args)
     if args.command == "scan":
         return _cmd_scan(args)
     parser.print_help()
@@ -334,6 +359,57 @@ def _cmd_bench(args: argparse.Namespace) -> int:
 
     if args.diff_path and d["regressed"]:
         return 1
+    return 0
+
+
+def _cmd_calibrate(args: argparse.Namespace) -> int:
+    from web3guard.bench import default_corpus, load_corpus
+    from web3guard.bench.calibration import CalibrationReport
+
+    layers = {x.strip().lower() for x in args.layers.split(",") if x.strip()}
+    results: dict[str, object] = {}
+
+    if "l1" in layers:
+        from web3guard.bench.calibration import calibrate_l1
+
+        main = load_corpus(args.corpus) if args.corpus else default_corpus()
+        reach = load_corpus(args.reachability_corpus)
+        results["l1"] = calibrate_l1(
+            main_corpus=main, reachability_corpus=reach)
+
+    if "l2" in layers:
+        from web3guard.bench.calibration import calibrate_l2
+        from web3guard.bench.cases import load_cases
+
+        cases = load_cases(args.cases)
+        results["l2"] = calibrate_l2(
+            cases, cases_root=args.cases.parent,
+            workdir=Path("bench/calibration/run"))
+
+    if "l3" in layers:
+        from web3guard.bench.calibration import calibrate_l3
+        from web3guard.bench.cases import load_live_cases
+
+        cases = load_live_cases(args.live_cases)
+        results["l3"] = calibrate_l3(
+            cases, cases_root=args.live_cases.parent,
+            workdir=Path("bench/calibration/run"))
+
+    report = CalibrationReport(layers=results)  # type: ignore[arg-type]
+    print(json.dumps(report.to_dict(), indent=2))
+    if args.json_out:
+        args.json_out.parent.mkdir(parents=True, exist_ok=True)
+        args.json_out.write_text(
+            json.dumps(report.to_dict(), indent=2), encoding="utf-8")
+        print(f"\nCalibration report written to {args.json_out}")
+
+    if args.fail_on_regression and "l1" in results:
+        delta = results["l1"].data.get("precision_delta", 0.0)  # type: ignore[union-attr]
+        recall_delta = results["l1"].data.get("recall_delta", 0.0)  # type: ignore[union-attr]
+        if delta <= 0 or recall_delta < 0:
+            print(f"\nL1 regression: precision_delta={delta} "
+                  f"recall_delta={recall_delta}")
+            return 1
     return 0
 
 

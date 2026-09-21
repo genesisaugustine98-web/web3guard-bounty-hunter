@@ -1,0 +1,10 @@
+{
+  "name": "reachability",
+  "description": "Reachability pre-filter calibration. UnreachableReentrancy.sol is flagged by the static analyzer but has no external path (label set empty, so a hit is a false positive). InheritedReentrancy.sol is a real reentrancy reachable through a derived public function. SafeVault.sol is a clean control.",
+  "root": "../..",
+  "units": [
+    {"path": "test_contracts/reachability/UnreachableReentrancy.sol", "language": "solidity", "vulnerabilities": []},
+    {"path": "test_contracts/reachability/InheritedReentrancy.sol", "language": "solidity", "vulnerabilities": ["reentrancy"]},
+    {"path": "test_contracts/clean/SafeVault.sol", "language": "solidity", "vulnerabilities": []}
+  ]
+}
