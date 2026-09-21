@@ -17,14 +17,12 @@ from __future__ import annotations
 
 import logging
 import shutil
-import subprocess
-import sys
 import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
 from web3guard.languages.base import LanguageAdapter
-from web3guard.sandbox.base import SandboxResult
+from web3guard.sandbox.base import SandboxResult, hardened_run
 from web3guard.security import SandboxGuard, SandboxPolicy
 
 LOGGER = logging.getLogger("web3guard.sandbox.generic")
@@ -77,6 +75,12 @@ class GenericSandbox:
         # Copy the target's user code.
         for fp in target_path.rglob("*"):
             if not fp.is_file():
+                continue
+            if fp.is_symlink():
+                # Never follow symlinks out of the target: a malicious repo
+                # can point a source file at /etc/passwd or ~/.aws/credentials
+                # and have its contents compiled into the sandbox.
+                LOGGER.warning("skipping symlink in target: %s", fp)
                 continue
             rel = fp.relative_to(target_path)
             rel_str = "/" + rel.as_posix().lower().strip("/") + "/"
@@ -144,25 +148,4 @@ class GenericSandbox:
             return False, f"{self.language} sandbox error: {e}"
 
     def _run(self, cmd: Sequence[str], *, cwd: Path, timeout: int) -> tuple[bool, str, str]:
-        report = self.guard.prepare_subprocess(list(cmd), cwd=cwd)
-        env = report.env
-        for k in (
-            "NIM_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
-            "GROQ_API_KEY", "DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY",
-        ):
-            env.pop(k, None)
-        try:
-            proc = subprocess.run(
-                list(cmd), cwd=report.cwd, env=env,
-                capture_output=True, text=True, timeout=timeout,
-                preexec_fn=self.guard.apply_resource_limits if sys.platform != "win32" else None,
-            )
-            return (
-                proc.returncode == 0,
-                self.guard.truncate_revert_reason(proc.stdout),
-                self.guard.truncate_revert_reason(proc.stderr),
-            )
-        except subprocess.TimeoutExpired:
-            return False, "", f"timed out after {timeout}s"
-        except FileNotFoundError as e:
-            return False, "", f"command not found: {e}"
+        return hardened_run(self.guard, cmd, cwd=cwd, timeout=timeout)

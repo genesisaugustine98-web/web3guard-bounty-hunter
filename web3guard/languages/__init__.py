@@ -40,6 +40,21 @@ from web3guard.languages.clarity_lang import ClarityAdapter
 from web3guard.languages.func_lang import FunCAdapter
 from web3guard.languages.rust_solana import RustSolanaAdapter
 from web3guard.languages.ts_sdk import TypeScriptSDKAdapter
+from web3guard.languages.extended import (
+    AlchemyAdapter,
+    Cairo1Adapter,
+    CosmWasmAdapter,
+    GoCosmosAdapter,
+    HuffAdapter,
+    InkAdapter,
+    MichelsonAdapter,
+    SassAdapter,
+    ScillaAdapter,
+    SolidityAsmAdapter,
+    SubstrateAdapter,
+    WasmAdapter,
+    YulAdapter,
+)
 
 __all__ = [
     "LanguageAdapter",
@@ -58,4 +73,17 @@ __all__ = [
     "FunCAdapter",
     "RustSolanaAdapter",
     "TypeScriptSDKAdapter",
+    "HuffAdapter",
+    "YulAdapter",
+    "InkAdapter",
+    "CosmWasmAdapter",
+    "SubstrateAdapter",
+    "AlchemyAdapter",
+    "ScillaAdapter",
+    "MichelsonAdapter",
+    "Cairo1Adapter",
+    "SassAdapter",
+    "GoCosmosAdapter",
+    "SolidityAsmAdapter",
+    "WasmAdapter",
 ]

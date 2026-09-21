@@ -43,6 +43,20 @@ class TargetLanguage(StrEnum):
     RUST_SOLANA = "rust-solana"
     TS_SDK = "ts-sdk"
     UNKNOWN = "unknown"
+    # Extended coverage (analysis-tier adapters).
+    HUFF = "huff"
+    YUL = "yul"
+    INK = "ink"
+    COSMWASM = "cosmwasm"
+    SUBSTRATE = "substrate"
+    ALCHEMY = "alchemy"
+    SCILLA = "scilla"
+    MICHELSON = "michelson"
+    CAIRO1 = "cairo1"
+    SASM = "sasm"
+    GO_COSMOS = "go-cosmos"
+    SOLIDITY_ASM = "solidity-asm"
+    WEBASSEMBLY = "webassembly"
 
 
 @dataclass

@@ -34,6 +34,21 @@ from web3guard.languages.clarity_lang import ClarityAdapter
 from web3guard.languages.func_lang import FunCAdapter
 from web3guard.languages.rust_solana import RustSolanaAdapter
 from web3guard.languages.ts_sdk import TypeScriptSDKAdapter
+from web3guard.languages.extended import (
+    AlchemyAdapter,
+    Cairo1Adapter,
+    CosmWasmAdapter,
+    GoCosmosAdapter,
+    HuffAdapter,
+    InkAdapter,
+    MichelsonAdapter,
+    SassAdapter,
+    ScillaAdapter,
+    SolidityAsmAdapter,
+    SubstrateAdapter,
+    WasmAdapter,
+    YulAdapter,
+)
 
 LOGGER = logging.getLogger("web3guard.languages.registry")
 
@@ -96,6 +111,21 @@ def detect_target_language(target_path: Path) -> LanguageDetection:
 
     for pattern, lang, tool in _BUILD_TOOL_SIGNATURES:
         # Match files at the root, or directories (e.g. ``func/``).
+        candidate = target_path / pattern
+        if candidate.exists():
+            detected.setdefault(lang, []).append(tool)
+            if tool not in build_tools:
+                build_tools.append(tool)
+            notes.append(f"detected {tool} ({lang.value}) via {pattern}")
+
+    # Extended-coverage signatures (analysis-tier languages).
+    _EXTENDED_SIGNATURES: tuple[tuple[str, TargetLanguage, str], ...] = (
+        ("huff.toml", TargetLanguage.HUFF, "huff"),
+        ("huffc.json", TargetLanguage.HUFF, "huff"),
+        ("Cargo.toml", TargetLanguage.INK, "ink"),
+        ("go.mod", TargetLanguage.GO_COSMOS, "go-cosmos"),
+    )
+    for pattern, lang, tool in _EXTENDED_SIGNATURES:
         candidate = target_path / pattern
         if candidate.exists():
             detected.setdefault(lang, []).append(tool)
@@ -168,13 +198,26 @@ class LanguageRegistry:
 
     _ADAPTERS: tuple[type[LanguageAdapter], ...] = (
         SolidityAdapter,        # most common; check first
+        SolidityAsmAdapter,     # asm-heavy Solidity gets the deep-assembly prompt
         VyperAdapter,
         MoveAdapter,
         CairoAdapter,
+        Cairo1Adapter,
         ClarityAdapter,
         FunCAdapter,
         RustSolanaAdapter,
+        InkAdapter,
+        CosmWasmAdapter,
+        SubstrateAdapter,
+        GoCosmosAdapter,
         TypeScriptSDKAdapter,
+        HuffAdapter,
+        YulAdapter,
+        ScillaAdapter,
+        MichelsonAdapter,
+        AlchemyAdapter,
+        SassAdapter,
+        WasmAdapter,
     )
 
     def __init__(self, extra_adapters: Iterable[type[LanguageAdapter]] = ()) -> None:

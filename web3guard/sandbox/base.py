@@ -19,13 +19,54 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 from web3guard.languages.base import LanguageAdapter, TestRunner
 from web3guard.security import SandboxGuard, SandboxPolicy
+
+# The LLM provider keys, popped defensively in addition to the allowlist
+# filtering (belt and suspenders; see SandboxGuard._filter_env).
+_LLM_KEY_ENVS: tuple[str, ...] = (
+    "NIM_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
+    "GROQ_API_KEY", "DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY",
+)
+
+
+def hardened_run(
+    guard: SandboxGuard,
+    cmd: Sequence[str],
+    *,
+    cwd: Path,
+    timeout: int,
+    extra_env: Mapping[str, str] | None = None,
+) -> tuple[bool, str, str]:
+    """Shared hardened subprocess runner for every sandbox.
+
+    Routes through :func:`web3guard.security.sandbox_guard.run_sandboxed`
+    so every runner gets the full policy uniformly: rlimits, privilege
+    drop, env allowlist, output truncation, wall-clock timeout, and a
+    dedicated process group (a timeout kills the whole process tree,
+    not just the direct child).
+    """
+    from web3guard.security.sandbox_guard import run_sandboxed
+
+    env_extra: dict[str, str] = dict(extra_env or {})
+    try:
+        rc, out, err = run_sandboxed(
+            [str(c) for c in cmd],
+            cwd=cwd,
+            timeout=timeout,
+            extra_env=env_extra,
+            guard=guard,
+        )
+    except FileNotFoundError as e:
+        return False, "", f"command not found: {e}"
+    return rc == 0, out, err
 
 LOGGER = logging.getLogger("web3guard.sandbox.base")
 
@@ -105,5 +146,16 @@ def create_sandbox(
     if runner_name == "ts-sdk":
         from web3guard.sandbox.ts_sdk import TSSandbox
         return TSSandbox(adapter, target_path, workdir, policy)
+    if runner_name == "none":
+        # Analysis-tier adapters (Huff, Yul, ink!, CosmWasm, Substrate,
+        # Go/Cosmos, Scilla, Michelson, Wasm, Alchemy, Sass): no free or
+        # safe execution harness exists. Returning None makes the scanner
+        # mark findings POTENTIAL (sandbox init failed) rather than
+        # pretending to confirm them.
+        LOGGER.info(
+            "language %s has no execution harness (analysis-tier adapter)",
+            adapter.language.value,
+        )
+        return None
     LOGGER.warning("no sandbox implementation for runner %r", runner_name)
     return None

@@ -57,41 +57,47 @@ class AderynEngine(DiscoveryEngineBase):
         # Aderyn's report format: {"high_count": ..., "lower_count": ...,
         # "issues": [...]}. Each issue has a "title" and "details".
         for issue in data.get("issues", []) or []:
-            results.append(self._translate(issue, target_path))
+            results.extend(self._translate_all(issue, target_path))
         return results
 
     @staticmethod
-    def _translate(issue: dict[str, Any], target_path: Path) -> DiscoveryResult:
+    def _translate_all(issue: dict[str, Any], target_path: Path) -> list[DiscoveryResult]:
+        """Translate one Aderyn detector report into one result *per instance*.
+
+        Aderyn groups findings by detector with an ``instances`` list; each
+        instance is a distinct (file, line) occurrence. Returning only the
+        first instance silently dropped findings.
+        """
         severity = _ADERYN_IMPACT_TO_SEVERITY.get(issue.get("impact", "Medium"), "MEDIUM")
+        category = (issue.get("title", "") or "").lower().replace(" ", "-")
         instances = issue.get("instances", []) or []
         results: list[DiscoveryResult] = []
         for inst in instances:
-            path_str = inst.get("path", "")
+            path_str = inst.get("path", "") or ""
             line_no = inst.get("line", 0) or 0
-            return DiscoveryResult(
+            results.append(DiscoveryResult(
                 engine="aderyn",
                 target=str(target_path),
                 file=path_str,
                 line=int(line_no) if str(line_no).isdigit() else 0,
                 function=inst.get("function", "") or "",
-                category=(issue.get("title", "") or "").lower().replace(" ", "-"),
+                category=category,
                 severity=severity,
                 title=issue.get("title", ""),
                 description=issue.get("details", ""),
                 confidence=0.5,
                 raw=issue,
-            )
-        # No instances — emit one synthetic finding per detector
+            ))
         if not results:
-            return DiscoveryResult(
+            results.append(DiscoveryResult(
                 engine="aderyn",
                 target=str(target_path),
                 file="",
-                category=(issue.get("title", "") or "").lower().replace(" ", "-"),
+                category=category,
                 severity=severity,
                 title=issue.get("title", ""),
                 description=issue.get("details", ""),
                 confidence=0.5,
                 raw=issue,
-            )
-        return results[0]
+            ))
+        return results

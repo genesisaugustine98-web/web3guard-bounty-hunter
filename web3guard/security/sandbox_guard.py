@@ -336,6 +336,7 @@ def run_sandboxed(
     extra_env: Mapping[str, str] | None = None,
     policy: SandboxPolicy | None = None,
     input_text: str | None = None,
+    guard: SandboxGuard | None = None,
 ) -> tuple[int, str, str]:
     """Run ``command`` under the sandbox policy and return (rc, stdout, stderr).
 
@@ -344,13 +345,21 @@ def run_sandboxed(
     - a best-effort privilege drop
     - a filtered environment
     - a hard wall-clock timeout
+    - its own process group, so a timeout kills the whole tree
+      (forge/anchor spawn grandchildren that outlive a plain kill)
+
+    Every sandbox's ``_run`` routes through this function so the policy
+    is enforced uniformly; pass an existing ``guard`` to reuse its env
+    filtering (which carries the caller's ``extra_env``).
     """
-    guard = SandboxGuard(policy)
+    guard = guard or SandboxGuard(policy)
     report = guard.prepare_subprocess(command, cwd=cwd, extra_env=extra_env)
     if report.verdict != SandboxVerdict.OK:
         raise RuntimeError(f"refusing to run: {report.verdict}: {report.notes}")
     if shutil.which(command[0]) is None:
         raise FileNotFoundError(f"{command[0]!r} not on PATH")
+
+    new_session = sys.platform != "win32"
 
     def _preexec() -> None:  # pragma: no cover - child-side
         guard.apply_resource_limits()
@@ -367,6 +376,7 @@ def run_sandboxed(
             timeout=timeout,
             check=False,
             preexec_fn=_preexec if sys.platform != "win32" else None,
+            start_new_session=new_session,
         )
         return (
             completed.returncode,
@@ -374,6 +384,7 @@ def run_sandboxed(
             guard.truncate_revert_reason(completed.stderr),
         )
     except subprocess.TimeoutExpired as e:
+        _kill_process_group()
         stdout = e.stdout.decode("utf-8", errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
         stderr = e.stderr.decode("utf-8", errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
         return (
@@ -381,3 +392,14 @@ def run_sandboxed(
             stdout,
             f"timed out after {timeout}s\n{stderr}",
         )
+
+
+def _kill_process_group() -> None:
+    """Best-effort kill of the whole process group (timed-out children)."""
+    if sys.platform == "win32":
+        return
+    import signal
+    try:
+        os.killpg(0, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass

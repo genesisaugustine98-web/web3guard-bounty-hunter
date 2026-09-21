@@ -73,6 +73,9 @@ _FN_DEFS = {
     "rust": re.compile(r"\bfn\s+([A-Za-z0-9_]+)\s*[^{;]*"),
     "move": re.compile(r"\b(?:entry\s+)?fun\s+([A-Za-z0-9_]+)\s*[^{;]*"),
     "cairo": re.compile(r"\bfn\s+([A-Za-z0-9_]+)\s*[^{;]*"),
+    "go": re.compile(r"\bfunc\s+(?:\([^)]*\)\s*)?([A-Za-z0-9_]+)\s*[^{;]*"),
+    "huff": re.compile(r"#define\s+macro\s+([A-Za-z0-9_]+)"),
+    "scilla": re.compile(r"\btransition\s+([A-Za-z0-9_]+)\s*\("),
 }
 
 
@@ -115,11 +118,18 @@ def _clean_code(text: str, lang: str) -> str:
     reported line numbers stay aligned with the original file even when
     header comments are stripped.
     """
-    if lang in ("solidity", "rust", "move", "cairo", "func", "ts"):
+    if lang in ("solidity", "rust", "move", "cairo", "func", "ts", "go", "wat"):
         text = re.sub(r"/\*.*?\*/",
                       lambda m: re.sub(r"[^\n]", " ", m.group(0)), text,
                       flags=re.DOTALL)
         text = re.sub(r"(?m)^[ \t]*//.*$", "", text)
+    elif lang in ("huff", "yul", "scilla", "michelson", "sass", "al"):
+        text = re.sub(r"(?m)^[ \t]*//.*$", "", text)
+        if lang in ("yul", "michelson"):
+            # Yul/Michelson block comments
+            text = re.sub(r"/\*.*?\*/",
+                          lambda m: re.sub(r"[^\n]", " ", m.group(0)), text,
+                          flags=re.DOTALL)
     elif lang == "vyper":
         text = re.sub(r"(?m)^[ \t]*#.*$", "", text)
     if lang in ("func", "clarity"):
@@ -701,6 +711,372 @@ def _detect_ts_sdk(content: str, rel: str) -> list[StaticIssue]:
 
 
 # ---------------------------------------------------------------------------
+# Extended-language detectors (analysis tier)
+# ---------------------------------------------------------------------------
+
+_UNCHECKED_CALL_SOLIDITY_WINDOW = re.compile(
+    r"\(bool\s+\w+\s*,?\s*\)?\s*=|require\s*\(\s*\w+\.(?:call|delegatecall)|"
+    r"assert\s*\(\s*\w+\.(?:call|delegatecall)"
+)
+
+
+def _detect_huff(content: str, rel: str) -> list[StaticIssue]:
+    content = _clean_code(content, "huff")
+    issues: list[StaticIssue] = []
+    for m in re.finditer(r"#define\s+macro\s+([A-Za-z0-9_]+)", content):
+        name = m.group(1)
+        body_start = m.end()
+        body = content[body_start:body_start + 3000]
+        # Unchecked call: CALL/STATICCALL/DELEGATECALL result discarded.
+        if re.search(r"\b(?:CALL|STATICCALL|DELEGATECALL)\b", body) and not re.search(
+                r"(?:ISZERO|DUP1\s+ISZERO|PUSH\d*\s+JUMPI)", body):
+            issues.append(_issue(
+                rel, content[:m.start()].count("\n") + 1, "unchecked-external-call", "HIGH",
+                "Unchecked CALL result in Huff macro",
+                f"macro {name}() issues a CALL-family opcode without branching on the "
+                "success flag (ISZERO/JUMPI); a reverted external call is treated "
+                "as success.", function=name, confidence=0.75))
+        # Auth: CALLVALUE/CALLER read but no comparison against stored owner.
+        if re.search(r"\bCALLER\b", body) and not re.search(
+                r"\b(?:EQ|DUP\d+\s+EQ|SLOAD)\b", body):
+            issues.append(_issue(
+                rel, content[:m.start()].count("\n") + 1, "access-control", "MEDIUM",
+                "CALLER read without comparison",
+                f"macro {name}() reads CALLER but never compares it against stored "
+                "authorization state; verify the auth path.",
+                function=name, confidence=0.5))
+    # selfdestruct without auth macro guard
+    for m in re.finditer(r"\bSELFDESTRUCT\b", content):
+        line = content[:m.start()].count("\n") + 1
+        window = content[max(0, m.start() - 800):m.start()]
+        if not re.search(r"(?:CALLER|AUTH|OWNER)", window):
+            issues.append(_issue(
+                rel, line, "selfdestruct", "CRITICAL",
+                "Unprotected SELFDESTRUCT in Huff macro",
+                "SELFDESTRUCT is reachable without a visible authorization "
+                "comparison; anyone who triggers this macro destroys the contract.",
+                confidence=0.7))
+    return issues
+
+
+def _detect_yul(content: str, rel: str) -> list[StaticIssue]:
+    content = _clean_code(content, "yul")
+    issues: list[StaticIssue] = []
+    for name, body, start_line, _, _sig in _iter_braced_functions(content, "huff") \
+            if False else []:
+        _ = name, body, start_line  # pragma: no cover
+    for m in re.finditer(r"\bfunction\s+([A-Za-z0-9_]+)\s*\(", content):
+        name = m.group(1)
+        brace = content.find("{", m.end())
+        if brace < 0:
+            continue
+        end = _brace_body(content, brace)
+        body = content[brace:end]
+        line = content[:m.start()].count("\n") + 1
+        if re.search(r"\b(?:call|staticcall|delegatecall)\s*\(", body) and not re.search(
+                r"\biszero\s*\(", body, re.IGNORECASE):
+            issues.append(_issue(
+                rel, line, "unchecked-external-call", "HIGH",
+                "Unchecked call success in Yul function",
+                f"{name}() invokes call/staticcall/delegatecall without an iszero "
+                "check on the returned success flag.", function=name, confidence=0.75))
+        if re.search(r"\bsstore\s*\(", body) and re.search(
+                r"\b(?:add|sub|mul)\s*\(\s*(?:calldataload|mload)", body, re.IGNORECASE):
+            issues.append(_issue(
+                rel, line, "arithmetic", "HIGH",
+                "Computed storage slot from user input (collision risk)",
+                f"{name}() derives an SSTORE slot from calldata/memory arithmetic; "
+                "verify slot-collision and overflow behavior.",
+                function=name, confidence=0.6))
+    return issues
+
+
+def _detect_ink(content: str, rel: str) -> list[StaticIssue]:
+    content = _clean_code(content, "rust")
+    issues: list[StaticIssue] = []
+    if "ink_lang" not in content and "use ink" not in content and "#[ink:" not in content:
+        return []
+    for name, body, start_line, _, sig in _iter_braced_functions(content, "rust"):
+        # Unchecked cross-contract call result
+        if re.search(r"\b(?:build_call|invoke_contract|call\()", body) and not re.search(
+                r"\b(?:unwrap_or|unwrap\(|expect\(|\?|match\s+)", body):
+            issues.append(_issue(
+                rel, start_line, "unchecked-external-call", "HIGH",
+                "Unchecked ink! cross-contract call result",
+                f"{name}() performs a cross-contract call without unwrapping the "
+                "returned Result; a failed call is silently ignored.",
+                function=name, confidence=0.7))
+        # Panic on user input
+        if re.search(r"\.unwrap\(\)|\.expect\(", body) and re.search(
+                r"(?:msg|caller|input|args|amount)", body, re.IGNORECASE) \
+                and "test" not in sig.lower():
+            issues.append(_issue(
+                rel, start_line, "denial-of-service", "MEDIUM",
+                "unwrap()/expect() on call path (caller-triggered abort)",
+                f"{name}() can panic on user-controlled input, aborting the "
+                "message and reverting state (gas griefing / DoS).",
+                function=name, confidence=0.6))
+    # Missing initializer guard on constructor-ish fns
+    for m in re.finditer(r"#\[ink\(constructor\)\]", content):
+        seg = content[m.start():m.start() + 1200]
+        if not re.search(r"already_init|initialized|self\.owner\.set", seg):
+            issues.append(_issue(
+                rel, content[:m.start()].count("\n") + 1, "unprotected-init", "MEDIUM",
+                "Constructor without visible initialization guard",
+                "ink! constructor sets state without an explicit initialized "
+                "flag; verify re-deployment semantics.", confidence=0.5))
+    return issues
+
+
+def _detect_cosmwasm(content: str, rel: str) -> list[StaticIssue]:
+    content = _clean_code(content, "rust")
+    issues: list[StaticIssue] = []
+    if "cosmwasm" not in content and "cw_" not in content:
+        return []
+    for name, body, start_line, _, _sig in _iter_braced_functions(content, "rust"):
+        if re.search(r"\b(?:addr_validate|addr_canonicalize|canonicalize)\b", body):
+            continue
+        if re.search(r"\b(?:Addr::unchecked|deps\.api\.addr_)\b", body):
+            issues.append(_issue(
+                rel, start_line, "access-control", "HIGH",
+                "Addr::unchecked on caller path",
+                f"{name}() constructs an Addr via Addr::unchecked; unvalidated "
+                "addresses enable addr aliasing and spoofing.",
+                function=name, confidence=0.75))
+        if re.search(r"\.unwrap\(\)", body) and re.search(
+                r"(?:Uint|Int|try_from|coins|amount)", body):
+            issues.append(_issue(
+                rel, start_line, "arithmetic", "MEDIUM",
+                "unwrap() on numeric conversion (truncation/overflow abort)",
+                f"{name}() unwraps a numeric conversion; a caller-chosen value "
+                "can panic the contract (DoS) or truncate balances.",
+                function=name, confidence=0.65))
+    # Reply reentrancy: ReplyOn::Always with state writes
+    if re.search(r"ReplyOn::Always", content) and re.search(
+            r"fn reply", content) and re.search(r"store\(|save\(|update\( minors", content):
+        issues.append(_issue(
+            rel, 1, "reentrancy", "MEDIUM",
+            "ReplyOn::Always with state writes in reply()",
+            "Submessages configured with ReplyOn::Always combined with state "
+            "mutations in reply() can double-apply state on failure paths.",
+            confidence=0.55))
+    return issues
+
+
+def _detect_substrate(content: str, rel: str) -> list[StaticIssue]:
+    content = _clean_code(content, "rust")
+    issues: list[StaticIssue] = []
+    if "frame_" not in content and "#[pallet" not in content:
+        return []
+    for m in re.finditer(r"#\[pallet::weight\]\s*\(\s*(\d+)", content):
+        weight = int(m.group(1))
+        seg_end = min(len(content), m.start() + 3000)
+        seg = content[m.start():seg_end]
+        loop_iters = len(re.findall(r"for\s+\w+\s+in\s+", seg))
+        if loop_iters and weight < 10_000:
+            issues.append(_issue(
+                rel, content[:m.start()].count("\n") + 1, "denial-of-service", "MEDIUM",
+                "Weight annotation below loop-complexity reality",
+                f"Extrinsic declares weight {weight} but iterates over storage "
+                "collections; the block-gas budget can be exhausted by a "
+                "single call.", confidence=0.6))
+    for name, body, start_line, _, _sig in _iter_braced_functions(content, "rust"):
+        if re.search(r"\bT::Currency::transfer\b", body) and not re.search(
+                r"\?\s*;|ensure!|\.map_err", body):
+            issues.append(_issue(
+                rel, start_line, "unchecked-external-call", "HIGH",
+                "Currency::transfer result ignored",
+                f"{name}() calls T::Currency::transfer without propagating the "
+                "result; failed transfers corrupt accounting.",
+                function=name, confidence=0.8))
+    return issues
+
+
+def _detect_go_cosmos_impl(content: str, rel: str) -> list[StaticIssue]:
+    content = _clean_code(content, "go")
+    issues: list[StaticIssue] = []
+    if "sdk" not in content and "bankkeeper" not in content.lower():
+        return []
+    for m in re.finditer(r"func\s+(?:\([^)]*\)\s*)?(\w+)\s*\([^)]*\)[^{]*\{", content):
+        name = m.group(1)
+        brace = content.find("{", m.end() - 1)
+        if brace < 0:
+            continue
+        end = _brace_body(content, brace)
+        body = content[brace:end]
+        line = content[:m.start()].count("\n") + 1
+        if re.search(r"SendCoins|SendCoinsFromModuleToAccount", body) and not re.search(
+                r"if\s+err\s*!=\s*nil|:=\s*.*err|return\s+err", body):
+            issues.append(_issue(
+                rel, line, "unchecked-external-call", "HIGH",
+                "Bank transfer error ignored",
+                f"{name}() invokes a bank-keeper transfer without checking the "
+                "returned error; failed sends leave state inconsistent.",
+                function=name, confidence=0.8))
+        if re.search(r"msg\.GetAuthority\(\)|\.GetAuthority\(\)", body) is None and re.search(
+                r"UpdateParams|SetParams|ParamChange", body):
+            issues.append(_issue(
+                rel, line, "access-control", "HIGH",
+                "Param update without authority check",
+                f"{name}() mutates module params without verifying "
+                "msg authority; any signer can rewrite module configuration.",
+                function=name, confidence=0.8))
+        for_range = len(re.findall(r"for\s+_?\w*\s*:?=\s*range\s+", body))
+        if for_range and not re.search(r"Paginator|limit|Limit", body):
+            issues.append(_issue(
+                rel, line, "denial-of-service", "MEDIUM",
+                "Unbounded store iteration (gas DoS)",
+                f"{name}() ranges over a store prefix without pagination; a "
+                "large dataset exhausts the block gas limit.",
+                function=name, confidence=0.65))
+    return issues
+
+
+def _detect_go_cosmos(content: str, rel: str) -> list[StaticIssue]:
+    return _detect_go_cosmos_impl(content, rel)
+
+
+def _detect_scilla(content: str, rel: str) -> list[StaticIssue]:
+    content = _clean_code(content, "scilla")
+    issues: list[StaticIssue] = []
+    for m in re.finditer(r"\btransition\s+([A-Za-z0-9_]+)", content):
+        name = m.group(1)
+        seg = content[m.start():m.start() + 4000]
+        line = content[:m.start()].count("\n") + 1
+        send_idx = seg.find("send")
+        balance_idx = max(seg.find("_balance"), seg.find("balance"))
+        sends_before_state = send_idx >= 0 and (
+            balance_idx < 0 or send_idx < balance_idx
+        )
+        if sends_before_state:
+            issues.append(_issue(
+                rel, line, "reentrancy", "HIGH",
+                "send before balance/state update (Scilla reentrancy)",
+                f"transition {name} issues messages with send before updating "
+                "_balance or state fields; a re-entrant transition can "
+                "double-spend.", function=name, confidence=0.7))
+        if re.search(r"\b_sender\b", seg) and re.search(
+                r"\bowner\b", seg) and not re.search(
+                r"_sender\s*=\s*owner|owner\s*=\s*_sender|builtin\s+eq", seg):
+            issues.append(_issue(
+                rel, line, "access-control", "MEDIUM",
+                "_sender accepted without owner comparison",
+                f"transition {name} reads _sender and references owner without "
+                "an equality check; verify the authorization path.",
+                function=name, confidence=0.5))
+    return issues
+
+
+def _detect_michelson(content: str, rel: str) -> list[StaticIssue]:
+    content = _clean_code(content, "michelson")
+    issues: list[StaticIssue] = []
+    if re.search(r"\bTRANSFER_TOKENS\b", content) and not re.search(
+            r"\bFAILWITH\b", content):
+        issues.append(_issue(
+            rel, 1, "unchecked-external-call", "HIGH",
+            "TRANSFER_TOKENS without visible failure path",
+            "The contract transfers tokens without a FAILWITH guard on the "
+            "operation; a failed transfer may be silently dropped.",
+            confidence=0.6))
+    if re.search(r"\bSOURCE\b", content):
+        issues.append(_issue(
+            rel, content[:content.find("SOURCE")].count("\n") + 1 if "SOURCE" in content else 1,
+            "tx-origin", "MEDIUM",
+            "SOURCE used (Tezos tx.origin equivalent)",
+            "SOURCE is the original transaction signer; authorization based on "
+            "SOURCE instead of SENDER enables proxy-contract spoofing.",
+            confidence=0.7))
+    if re.search(r"\bLAMBDA\b", content) and re.search(
+            r"\b(?:PUSH|CAR|CDR)\b[\s\S]{0,200}\bEXEC\b", content):
+        issues.append(_issue(
+            rel, 1, "delegatecall", "MEDIUM",
+            "Lambda EXEC on attacker-influenced parameter",
+            "A lambda built from storage/parameter values is EXECuted; a "
+            "caller able to shape the closure executes arbitrary logic.",
+            confidence=0.55))
+    return issues
+
+
+def _detect_sass(content: str, rel: str) -> list[StaticIssue]:
+    content = _clean_code(content, "sass")
+    issues: list[StaticIssue] = []
+    for m in re.finditer(r"(?:pub\s+)?func\s+([A-Za-z0-9_]+)", content):
+        name = m.group(1)
+        seg = content[m.start():m.start() + 3000]
+        line = content[:m.start()].count("\n") + 1
+        if re.search(r"\b(?:call|delegate)\s*\(", seg) and not re.search(
+                r"\b(?:if|assert|require|match)\b", seg):
+            issues.append(_issue(
+                rel, line, "unchecked-external-call", "MEDIUM",
+                "External call without visible check",
+                f"{name}() performs an external call without a visible result "
+                "check; verify failure handling.", function=name, confidence=0.5))
+    return issues
+
+
+def _detect_solidity_asm(content: str, rel: str) -> list[StaticIssue]:
+    """Assembly-focused pass over Solidity sources (inline Yul)."""
+    content = _clean_code(content, "solidity")
+    issues: list[StaticIssue] = []
+    for m in re.finditer(r"\bassembly\s*(?:\(|\{)", content):
+        line = content[:m.start()].count("\n") + 1
+        brace_idx = content.find("{", m.end() - 1)
+        if brace_idx < 0:
+            continue
+        body = content[brace_idx:_brace_body(content, brace_idx)]
+        if re.search(r"\bmstore\s*\(\s*0x40", body) is None and re.search(
+                r"\bm(?:load|store)\s*\(", body):
+            issues.append(_issue(
+                rel, line, "arithmetic", "MEDIUM",
+                "Manual memory use without updating free pointer",
+                "Assembly block performs mload/mstore without restoring the "
+                "free-memory pointer (0x40); subsequent allocations corrupt "
+                "memory.", confidence=0.55))
+        if re.search(r"\bdelegatecall\s*\(", body) and not re.search(
+                r"\b(?:extcodesize|require|iszero)\b", body):
+            issues.append(_issue(
+                rel, line, "delegatecall", "HIGH",
+                "Assembly delegatecall without address validation",
+                "Inline delegatecall executes with the caller's storage "
+                "context; without validating the target address a caller can "
+                "overwrite arbitrary storage.", confidence=0.7))
+        if re.search(r"\breturndatacopy\s*\(", body) and not re.search(
+                r"\breturndatasize\s*\(\s*\)", body):
+            issues.append(_issue(
+                rel, line, "unchecked-external-call", "MEDIUM",
+                "returndatacopy without returndatasize bound",
+                "Copying return data without checking returndatasize can read "
+                "out of bounds or copy attacker-controlled junk.",
+                confidence=0.6))
+    return issues
+
+
+def _detect_wat(content: str, rel: str) -> list[StaticIssue]:
+    content = _clean_code(content, "wat")
+    issues: list[StaticIssue] = []
+    for m in re.finditer(r"\bcall_indirect\b", content):
+        line = content[:m.start()].count("\n") + 1
+        window = content[max(0, m.start() - 500):m.start() + 500]
+        if not re.search(r"\b(?:i32\.(?:const|load)|table\.get|br_if)\b", window):
+            issues.append(_issue(
+                rel, line, "access-control", "HIGH",
+                "call_indirect without visible index validation",
+                "call_indirect dispatches through a table using a runtime "
+                "index; without bounds/type validation an attacker-controlled "
+                "index achieves type confusion / arbitrary dispatch.",
+                confidence=0.6))
+    if re.search(r"\bmemory\.grow\b", content) and not re.search(
+            r"\b(?:i32\.const|memory\.size)\b[\s\S]{0,120}memory\.grow", content):
+        issues.append(_issue(
+            rel, content[:content.find("memory.grow")].count("\n") + 1 if "memory.grow" in content else 1,
+            "denial-of-service", "MEDIUM",
+            "Unbounded memory.grow",
+            "memory.grow without a size ceiling lets a caller exhaust host "
+            "memory (OOM DoS).", confidence=0.6))
+    return issues
+
+
+# ---------------------------------------------------------------------------
 # Engine
 # ---------------------------------------------------------------------------
 
@@ -718,6 +1094,18 @@ _EXT_TO_LANGUAGE: tuple[tuple[str, TargetLanguage], ...] = (
     (".js", TargetLanguage.TS_SDK),
     (".mjs", TargetLanguage.TS_SDK),
     (".cjs", TargetLanguage.TS_SDK),
+    # Extended coverage (checked after the primary languages so a Rust
+    # Solana repo is not misread as ink!/CosmWasm/Substrate).
+    (".huff", TargetLanguage.HUFF),
+    (".yul", TargetLanguage.YUL),
+    (".scilla", TargetLanguage.SCILLA),
+    (".tz", TargetLanguage.MICHELSON),
+    (".michelson", TargetLanguage.MICHELSON),
+    (".al", TargetLanguage.ALCHEMY),
+    (".sass", TargetLanguage.SASM),
+    (".wat", TargetLanguage.WEBASSEMBLY),
+    (".wast", TargetLanguage.WEBASSEMBLY),
+    (".go", TargetLanguage.GO_COSMOS),
 )
 
 _DETECTORS = {
@@ -729,6 +1117,18 @@ _DETECTORS = {
     TargetLanguage.FUNC: _detect_func,
     TargetLanguage.RUST_SOLANA: _detect_rust_solana,
     TargetLanguage.TS_SDK: _detect_ts_sdk,
+    TargetLanguage.HUFF: _detect_huff,
+    TargetLanguage.YUL: _detect_yul,
+    TargetLanguage.INK: _detect_ink,
+    TargetLanguage.COSMWASM: _detect_cosmwasm,
+    TargetLanguage.SUBSTRATE: _detect_substrate,
+    TargetLanguage.GO_COSMOS: _detect_go_cosmos,
+    TargetLanguage.SCILLA: _detect_scilla,
+    TargetLanguage.MICHELSON: _detect_michelson,
+    TargetLanguage.CAIRO1: _detect_cairo,
+    TargetLanguage.SASM: _detect_sass,
+    TargetLanguage.SOLIDITY_ASM: _detect_solidity_asm,
+    TargetLanguage.WEBASSEMBLY: _detect_wat,
 }
 
 _SKIP_SUFFIXES = ("_test.move", ".test.ts", ".test.js", ".spec.ts",
@@ -740,8 +1140,33 @@ def _detector_for(fp: Path) -> tuple[TargetLanguage, Any] | None:
         if fp.name.lower().endswith(suffix):
             if any(fp.name.lower().endswith(s) for s in _SKIP_SUFFIXES):
                 return None
+            # Shared-extension disambiguation: .rs belongs to Solana,
+            # ink!, CosmWasm, and Substrate. Pick the detector by content
+            # signature so each file feeds the right vulnerability rules.
+            if lang is TargetLanguage.RUST_SOLANA:
+                return _rust_detector_for(fp)
             return lang, _DETECTORS.get(lang)
     return None
+
+
+_INK_SIG = re.compile(r"ink_lang|use ink::|#\[ink[(:]|#\[ink::")
+_CW_SIG = re.compile(r"cosmwasm_std|cosmwasm-std|cw_storage_plus|cw_serde|use cw_")
+_SUB_SIG = re.compile(r"frame_support|frame::|#\[pallet|sp_runtime")
+
+
+def _rust_detector_for(fp: Path) -> tuple[TargetLanguage, Any] | None:
+    """Route a .rs file to the right Rust-ecosystem detector by content."""
+    try:
+        text = fp.read_text(errors="ignore")[:8000]
+    except Exception:  # noqa: BLE001
+        text = ""
+    if _CW_SIG.search(text):
+        return TargetLanguage.COSMWASM, _detect_cosmwasm
+    if _INK_SIG.search(text):
+        return TargetLanguage.INK, _detect_ink
+    if _SUB_SIG.search(text):
+        return TargetLanguage.SUBSTRATE, _detect_substrate
+    return TargetLanguage.RUST_SOLANA, _detect_rust_solana
 
 
 def language_for_file(fp: Path) -> TargetLanguage | None:

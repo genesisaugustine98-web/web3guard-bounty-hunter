@@ -102,6 +102,23 @@ class AIProvider(abc.ABC):
 
 
 # ---------------------------------------------------------------------------
+# Token estimation
+# ---------------------------------------------------------------------------
+
+
+def _estimate_tokens(text: str) -> int:
+    """Cheap token estimate for providers that never report usage.
+
+    ~4 characters per token is a good median across code-heavy prompts;
+    it slightly over-counts source code, which is the safe direction for
+    a cost *ceiling* (never under-count what you might be billed for).
+    """
+    if not text:
+        return 0
+    return max(1, len(text) // 4)
+
+
+# ---------------------------------------------------------------------------
 # OpenAI-compatible implementation
 # ---------------------------------------------------------------------------
 
@@ -211,13 +228,46 @@ class OpenAICompatibleProvider(AIProvider):
                 kwargs["response_format"] = dict(response_format)
             if self.use_streaming:
                 kwargs["stream"] = True
-                stream = self._client.chat.completions.create(**kwargs)
-                content = "".join(
-                    (chunk.choices[0].delta.content or "")
-                    for chunk in stream
-                )
+                # Ask the provider to include a final usage chunk so token
+                # accounting (and therefore the cost ceiling) works on the
+                # streaming path. Providers that ignore the option still
+                # stream fine; we then fall back to estimating usage from
+                # the returned text below so cost tracking never silently
+                # reads zero.
+                kwargs["stream_options"] = {"include_usage": True}
+                try:
+                    stream = self._client.chat.completions.create(**kwargs)
+                except Exception as e:  # noqa: BLE001
+                    # Some providers reject unknown stream options; retry
+                    # once without them rather than failing the call.
+                    if "stream_options" in str(e).lower() or "usage" in str(e).lower():
+                        kwargs.pop("stream_options", None)
+                        stream = self._client.chat.completions.create(**kwargs)
+                    else:
+                        raise
+                parts: list[str] = []
                 prompt_tokens = completion_tokens = total_tokens = 0
                 finish_reason = "stop"
+                for chunk in stream:
+                    if getattr(chunk, "usage", None) is not None:
+                        usage = chunk.usage
+                        prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+                        completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+                        total_tokens = getattr(usage, "total_tokens", 0) or 0
+                    try:
+                        parts.append(chunk.choices[0].delta.content or "")
+                        if chunk.choices[0].finish_reason:
+                            finish_reason = chunk.choices[0].finish_reason
+                    except (IndexError, AttributeError):
+                        continue  # usage-only chunks carry no choices
+                content = "".join(parts)
+                if total_tokens == 0 and content:
+                    # No usage reported: estimate so the cost tracker and
+                    # the hard ceiling still see real numbers.
+                    prompt_tokens = _estimate_tokens("".join(
+                        m.get("content") or "" for m in messages))
+                    completion_tokens = _estimate_tokens(content)
+                    total_tokens = prompt_tokens + completion_tokens
             else:
                 completion = self._client.chat.completions.create(**kwargs)
                 choice = completion.choices[0]

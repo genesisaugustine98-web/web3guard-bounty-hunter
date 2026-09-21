@@ -66,6 +66,63 @@ from web3guard.utils.vuln_catalog import get_catalog
 
 LOGGER = logging.getLogger("web3guard.scanner")
 
+# Zero-dollar policy: providers that require paid accounts. Any provider
+# entry carrying one of these base_urls is rejected at config time so the
+# tool can never silently start spending money.
+ZERO_DOLLAR_BLOCKED_HOSTS = (
+    "api.openai.com",
+    "api.anthropic.com",
+    "generativelanguage.googleapis.com",  # Google Gemini
+    "api.mistral.ai",                     # paid tiers
+    "api.cohere.ai",
+    "api.together.xyz",
+    "api.perplexity.ai",
+    "azure.com",                          # Azure OpenAI (endswith match)
+    "amazonaws.com",                      # Bedrock (endswith match)
+)
+
+
+def _enforce_zero_dollar_providers(config: dict[str, Any]) -> None:
+    """Drop any AI provider whose endpoint is not a free tier.
+
+    The tool's operating policy is zero dollars: every provider must be a
+    free-tier endpoint (NIM, OpenRouter's :free models, Groq, DeepSeek
+    trial, local Ollama/LM Studio/vLLM). A paid-only provider would make
+    a scan silently cost money, so it is removed with a loud warning.
+    """
+    providers = config.get("ai_providers") or []
+    kept: list[dict[str, Any]] = []
+    for p in providers:
+        base_url = str(p.get("base_url", "")).lower()
+        model = str(p.get("model", "")).lower()
+        blocked = any(
+            base_url == h or base_url.endswith("." + h) or ("/" + h) in base_url
+            or (h.endswith(".com") and base_url.endswith(h))
+            for h in ZERO_DOLLAR_BLOCKED_HOSTS
+        )
+        # OpenRouter: only :free model variants are zero-dollar.
+        if "openrouter.ai" in base_url and model and ":free" not in model:
+            LOGGER.warning(
+                "zero-dollar policy: dropping OpenRouter provider with "
+                "non-free model %r (append ':free' or remove it)", model,
+            )
+            continue
+        if blocked:
+            LOGGER.warning(
+                "zero-dollar policy: dropping paid provider %s (%s)",
+                p.get("name", "?"), base_url,
+            )
+            continue
+        kept.append(p)
+    if not kept and providers:
+        raise ValueError(
+            "zero-dollar policy: every configured AI provider is a paid "
+            "endpoint. Configure a free provider (NIM_API_KEY from "
+            "build.nvidia.com, an OpenRouter ':free' model, Groq, or a "
+            "local Ollama/LM Studio endpoint) and re-run."
+        )
+    config["ai_providers"] = kept
+
 
 # ---------------------------------------------------------------------------
 # Top-level data types
@@ -104,6 +161,20 @@ class Finding:
     cost_basis_usd: float = 0.0
     expected_profit_usd: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def engine_marker(self) -> str:
+        """Identity of the signal source that produced this finding.
+
+        Discovery-engine findings carry their engine name(s) in
+        ``tool_consensus``; AI-analysis findings are marked ``ai``. Used
+        by the consensus pass to detect independent corroboration.
+        """
+        if self.tool_consensus:
+            return self.tool_consensus[0]
+        if "discovery" in self.metadata:
+            return "static"
+        return "ai"
 
 
 @dataclass
@@ -295,8 +366,11 @@ class Scanner:
         sandbox_guard: SandboxGuard | None = None,
         injection_guard: PromptInjectionGuard | None = None,
         workdir: Path | None = None,
+        zero_dollar: bool = True,
     ) -> None:
         self.config = config
+        if zero_dollar:
+            _enforce_zero_dollar_providers(self.config)
         self.registry = registry or default_registry
         self.workdir = workdir or Path.cwd()
         self.workdir.mkdir(parents=True, exist_ok=True)
@@ -560,6 +634,12 @@ class Scanner:
         # Optional: secret scan (whole target once).
         if self.config.get("enable_secret_scan", True):
             tr.secrets_findings = scan_path(target_path)
+        # Cross-validate: when the AI pass and the deterministic discovery
+        # layer independently agree on (file, function, category), boost
+        # confidence and record tool consensus. This is the proven
+        # precision lever for hybrid scanners (GPTScan-style candidate
+        # corroboration) — without it the two signal sources never meet.
+        self._apply_consensus(tr.findings)
         # Sort findings by severity then confidence.
         severity_order = {"INFO": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
         tr.findings.sort(
@@ -570,25 +650,77 @@ class Scanner:
         )
         return tr
 
+    # ---- cross-validation (consensus) -------------------------------------
+
+    def _apply_consensus(self, findings: list[Finding]) -> None:
+        """Boost findings corroborated by more than one signal source.
+
+        A finding's ``tool_consensus`` lists the independent engines that
+        saw the same (file, function, category). When a finding has two
+        or more distinct sources, its confidence is nudged up (bounded at
+        0.99) and it is tagged in metadata. Conversely, a single-source
+        finding whose only origin is the LLM gets a small penalty — LLM-
+        only findings without corroboration or PoC confirmation are the
+        noisiest class in every published evaluation.
+        """
+        groups: dict[tuple[str, str, str], list[Finding]] = {}
+        for f in findings:
+            key = (f.file, f.function, f.category)
+            groups.setdefault(key, []).append(f)
+        for key, members in groups.items():
+            if len(members) < 2:
+                continue
+            sources: set[str] = set()
+            for m in members:
+                sources.update(m.tool_consensus or ())
+            # Tag each member with the cross-validation evidence.
+            for m in members:
+                others = [o.engine_marker for o in members if o is not m]
+                for marker in others:
+                    if marker not in (m.tool_consensus or []):
+                        m.tool_consensus.append(marker)
+                if len(set(m.tool_consensus)) >= 2:
+                    m.confidence = min(0.99, m.confidence + 0.15)
+                    m.metadata["consensus"] = {
+                        "corroborated": True,
+                        "sources": sorted(set(m.tool_consensus)),
+                        "group_key": f"{key[0]}::{key[1]}::{key[2]}",
+                    }
+        # Single-source LLM findings with low confidence get a gentle
+        # penalty so report ordering reflects corroboration reality.
+        for f in findings:
+            consensus = f.tool_consensus or []
+            if len(set(consensus)) < 2 and "discovery" not in f.metadata \
+                    and f.confidence < 0.55:
+                f.confidence = max(0.05, f.confidence - 0.05)
+                f.metadata["consensus"] = {"corroborated": False,
+                                           "sources": sorted(set(consensus))}
+
     def _clone_target(self, target: str) -> Path | None:
-        """Clone a git URL or accept a local path."""
-        if target.startswith(("http://", "https://", "git@", "git://")):
-            import subprocess
-            import tempfile
-            tmp_root = Path(tempfile.mkdtemp(prefix="web3guard-target-"))
-            clone_path = tmp_root / "repo"
-            try:
-                subprocess.run(
-                    ["git", "clone", "--depth", "1", target, str(clone_path)],
-                    check=True, capture_output=True, timeout=120,
-                )
-            except Exception as e:  # noqa: BLE001
-                LOGGER.error("clone failed: %s", e)
-                return None
-            return clone_path
-        # Local path
-        p = Path(target).resolve()
-        return p if p.is_dir() else None
+        """Resolve any supported target shape to a local directory.
+
+        Delegates to :func:`web3guard.utils.fetch.fetch_target`, which
+        handles GitHub *and* non-GitHub sources: GitLab, Bitbucket,
+        SourceHut, Codeberg, cgit, self-hosted Gitea/GitLab, ssh remotes,
+        tarball/zip archives, single raw source files, and
+        ``gl:``/``bb:``/``sr:``/``cb:``/``gh:``/``owner/repo`` shorthands.
+        Local paths short-circuit before any network call.
+        """
+        from web3guard.utils.fetch import FetchError, fetch_target
+
+        # Fast path: local directory (no network, no temp dir).
+        if not target.startswith(("http://", "https://", "git@", "git://", "ssh://")):
+            p = Path(target).expanduser().resolve()
+            if p.is_dir():
+                return p
+        try:
+            return fetch_target(target)
+        except FetchError as e:
+            LOGGER.error("target fetch failed for %s: %s", target, e)
+            return None
+        except Exception as e:  # noqa: BLE001
+            LOGGER.error("unexpected fetch error for %s: %s", target, e)
+            return None
 
     def _scan_dependencies(
         self,
@@ -780,21 +912,37 @@ class Scanner:
         template = adapter.exploit_user_template()
         system = self._build_exploit_system_prompt(adapter)
         last_err = ""
+        previous_code = ""
         for _attempt in range(1, max_attempts + 1):
             try:
+                user = template.format(
+                    category=finding.category,
+                    severity=finding.severity,
+                    description=finding.description,
+                    concept=finding.reasoning or "(see description)",
+                    code=chunk.content[: self.config.get("max_chunk_chars", 6000)],
+                    context=chunk.context or "(none)",
+                    file=chunk.file,
+                    fork_hint=fork_hint,
+                    oracle_hint="",
+                )
+                if previous_code and last_err:
+                    # Repair loop: feed the failing attempt back so the
+                    # model fixes its own output instead of re-rolling an
+                    # identical prompt (identical retries are a lottery,
+                    # not debugging).
+                    user += (
+                        "\n\n---- PREVIOUS ATTEMPT (REJECTED) ----\n"
+                        f"{previous_code}\n"
+                        "---- END PREVIOUS ATTEMPT ----\n"
+                        f"\nFAILURE REASON: {last_err}\n\n"
+                        "Fix the previous attempt so it satisfies the failure "
+                        "reason while still proving the vulnerability. Output "
+                        "the complete corrected test file only."
+                    )
                 resp = self.ai_client.chat(
                     system,
-                    template.format(
-                        category=finding.category,
-                        severity=finding.severity,
-                        description=finding.description,
-                        concept=finding.reasoning or "(see description)",
-                        code=chunk.content[: self.config.get("max_chunk_chars", 6000)],
-                        context=chunk.context or "(none)",
-                        file=chunk.file,
-                        fork_hint=fork_hint,
-                        oracle_hint="",
-                    ),
+                    user,
                     max_tokens=3500,
                     temperature=0.3,
                     role="exploit",
@@ -806,6 +954,7 @@ class Scanner:
             if not code:
                 last_err = "no code block in response"
                 continue
+            previous_code = code
             if adapter.test_runner.has_impact_assertion and \
                not adapter.test_runner.has_impact_assertion(code):
                 last_err = "PoC missing impact assertion"
@@ -882,6 +1031,21 @@ class Scanner:
         Uses a *different* prompt and (optionally) a different provider
         so the critique is not the same model checking its own work.
         """
+        # Route the critique to a provider OTHER than the one that produced
+        # the finding, so the model is not grading its own work. The primary
+        # (first) provider wrote the finding; excluding it forces the first
+        # fallback to take the critique. With a single configured provider
+        # there is nothing to rotate to and the pass proceeds on it (the
+        # different prompt still adds value).
+        primary_name = ""
+        try:
+            providers = getattr(self.ai_client, "_providers", [])
+            if providers:
+                primary_name = providers[0].name
+        except Exception:  # noqa: BLE001
+            primary_name = ""
+        if primary_name:
+            self.ai_client.exclude_provider(primary_name)
         try:
             resp = self.ai_client.chat(
                 "You are an adversarial security reviewer. The job is to "
@@ -1305,7 +1469,7 @@ class Scanner:
                     ),
                     tool_consensus=[item.engine],
                     metadata={"discovery": item.raw},
-                )
+                )  # engine identity lives in tool_consensus[0] via engine_marker
                 finding.fingerprint = self._fingerprint(finding)
                 findings.append(finding)
         return findings

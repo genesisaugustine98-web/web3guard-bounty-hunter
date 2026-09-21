@@ -93,6 +93,7 @@ class AIClient:
         self._circuit = {p.name: CircuitBreakerState() for p in providers}
         self._cooldown = circuit_cooldown_seconds
         self._max_retries = max_retries_per_provider if max_retries_per_provider is not None else 2
+        self._excluded: set[str] = set()
         if cache_path is not None:
             self._init_cache(cache_path)
 
@@ -103,6 +104,17 @@ class AIClient:
 
     def set_seed(self, seed: int | None) -> None:
         self._seed = seed
+
+    def exclude_provider(self, name: str) -> None:
+        """Temporarily drop ``name`` from the rotation for the next call.
+
+        Popped automatically after one successful (or exhausted) call so
+        the exclusion applies to exactly one chat() invocation. Used to
+        route the adversarial self-critique pass to a *different*
+        provider than the one that produced the finding, so the model
+        is not grading its own work.
+        """
+        self._excluded.add(name)
 
     def cost_tracker(self) -> CostTracker:
         return self._cost
@@ -221,7 +233,21 @@ class AIClient:
 
         # 4. Walk providers
         last_error: ProviderError | None = None
+        eligible: list[AIProvider] = []
         for provider in self._providers:
+            if provider.name in self._excluded:
+                continue
+            eligible.append(provider)
+        # Consume the one-shot exclusion: it applies to this call only,
+        # whether it succeeds, falls through, or fails outright.
+        self._excluded.clear()
+        if not eligible:
+            # Everything excluded: honor the caller's intent is impossible,
+            # but a hard failure here would kill the scan. Fall back to the
+            # full rotation and log the deviation.
+            LOGGER.warning("all providers excluded; using full rotation")
+            eligible = list(self._providers)
+        for provider in eligible:
             state = self._circuit[provider.name]
             if state.is_open(cooldown=self._cooldown):
                 LOGGER.warning("circuit open for %s, skipping", provider.name)

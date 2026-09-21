@@ -24,7 +24,7 @@ from pathlib import Path
 
 from web3guard.languages.base import LanguageAdapter
 from web3guard.languages.vyper import VyperAdapter
-from web3guard.sandbox.base import SandboxResult
+from web3guard.sandbox.base import SandboxResult, hardened_run
 from web3guard.sandbox.build_system import (
     BuildProfile,
     detect_build_profile,
@@ -76,6 +76,12 @@ class FoundrySandbox:
         src_root = target_path / profile.src_dir
         for fp in target_path.rglob("*"):
             if not fp.is_file():
+                continue
+            if fp.is_symlink():
+                # Never follow symlinks out of the target: a malicious repo
+                # can point a source file at /etc/passwd or ~/.aws/credentials
+                # and have its contents compiled into the sandbox.
+                LOGGER.warning("skipping symlink in target: %s", fp)
                 continue
             rel_str = "/" + fp.relative_to(target_path).as_posix().lower().strip("/") + "/"
             if any(p in rel_str for p in (
@@ -196,30 +202,7 @@ class FoundrySandbox:
             return False, f"sandbox error: {e}"
 
     def _run(self, cmd: list[str], *, cwd: Path, timeout: int) -> tuple[bool, str, str]:
-        report = self.guard.prepare_subprocess(cmd, cwd=cwd)
-        env = report.env
-        # Don't expose API keys to the subprocess
-        env.pop("NIM_API_KEY", None)
-        env.pop("OPENAI_API_KEY", None)
-        env.pop("OPENROUTER_API_KEY", None)
-        env.pop("GROQ_API_KEY", None)
-        env.pop("DEEPSEEK_API_KEY", None)
-        env.pop("ANTHROPIC_API_KEY", None)
-        try:
-            proc = subprocess.run(
-                cmd, cwd=report.cwd, env=env,
-                capture_output=True, text=True, timeout=timeout,
-                preexec_fn=self.guard.apply_resource_limits if sys.platform != "win32" else None,
-            )
-            return (
-                proc.returncode == 0,
-                self.guard.truncate_revert_reason(proc.stdout),
-                self.guard.truncate_revert_reason(proc.stderr),
-            )
-        except subprocess.TimeoutExpired:
-            return False, "", f"timed out after {timeout}s"
-        except FileNotFoundError as e:
-            return False, "", f"command not found: {e}"
+        return hardened_run(self.guard, cmd, cwd=cwd, timeout=timeout)
 
     @staticmethod
     def _extract_revert_reason(output: str) -> str:

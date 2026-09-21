@@ -9,13 +9,11 @@ from __future__ import annotations
 
 import logging
 import shutil
-import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
 from web3guard.languages.base import LanguageAdapter
-from web3guard.sandbox.base import SandboxResult
+from web3guard.sandbox.base import SandboxResult, hardened_run
 from web3guard.security import SandboxGuard, SandboxPolicy
 
 LOGGER = logging.getLogger("web3guard.sandbox.anchor")
@@ -56,22 +54,25 @@ class AnchorSandbox:
             for child in init_dir.iterdir():
                 shutil.move(str(child), str(root / child.name))
             init_dir.rmdir()
-        # Copy the target's programs/ into the sandbox
+        # Copy the target's programs/ into the sandbox. Files are copied
+        # individually so symlinks can be rejected (a hostile repo can
+        # point a source file at any readable path on this host).
         target_programs = target_path / "programs"
         if target_programs.is_dir():
             for child in target_programs.iterdir():
                 dest = root / "programs" / child.name
                 if dest.exists():
                     shutil.rmtree(dest, ignore_errors=True)
-                shutil.copytree(child, dest)
-        # Copy target's tests/ if present
-        target_tests = target_path / "tests"
-        if target_tests.is_dir():
-            for child in target_tests.iterdir():
-                dest = root / "tests" / child.name
-                if dest.exists():
-                    shutil.rmtree(dest, ignore_errors=True)
-                shutil.copytree(child, dest) if child.is_dir() else shutil.copy2(child, dest)
+                if child.is_symlink():
+                    LOGGER.warning("skipping symlink in target programs/: %s", child)
+                    continue
+                if child.is_dir():
+                    shutil.copytree(child, dest, symlinks=False)
+                else:
+                    shutil.copy2(child, dest)
+        # Deliberately do NOT copy the target's tests/: they are TS files
+        # that `anchor test` would EXECUTE as arbitrary Node code. Target
+        # test suites are untrusted input, not fixtures.
         self._root = root
         return root
 
@@ -108,25 +109,4 @@ class AnchorSandbox:
             return False, f"anchor sandbox error: {e}"
 
     def _run(self, cmd: list[str], *, cwd: Path, timeout: int) -> tuple[bool, str, str]:
-        report = self.guard.prepare_subprocess(cmd, cwd=cwd)
-        env = report.env
-        for k in (
-            "NIM_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
-            "GROQ_API_KEY", "DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY",
-        ):
-            env.pop(k, None)
-        try:
-            proc = subprocess.run(
-                cmd, cwd=report.cwd, env=env,
-                capture_output=True, text=True, timeout=timeout,
-                preexec_fn=self.guard.apply_resource_limits if sys.platform != "win32" else None,
-            )
-            return (
-                proc.returncode == 0,
-                self.guard.truncate_revert_reason(proc.stdout),
-                self.guard.truncate_revert_reason(proc.stderr),
-            )
-        except subprocess.TimeoutExpired:
-            return False, "", f"timed out after {timeout}s"
-        except FileNotFoundError as e:
-            return False, "", f"command not found: {e}"
+        return hardened_run(self.guard, cmd, cwd=cwd, timeout=timeout)
