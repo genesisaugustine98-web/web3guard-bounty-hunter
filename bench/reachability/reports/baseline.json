@@ -1,0 +1,44 @@
+{
+  "schema": "web3guard-calibration/1",
+  "l1": {
+    "status": "measured",
+    "main_static": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "tp": 53,
+      "fp": 0,
+      "fn": 0,
+      "findings": 68,
+      "clean_hits": 0
+    },
+    "static": {
+      "precision": 0.5,
+      "recall": 1.0,
+      "f1": 0.6667,
+      "tp": 1,
+      "fp": 1,
+      "fn": 0,
+      "findings": 68,
+      "clean_hits": 1
+    },
+    "filtered": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "tp": 1,
+      "fp": 0,
+      "fn": 0,
+      "findings": 67,
+      "clean_hits": 0
+    },
+    "precision_delta": 0.5,
+    "recall_delta": 0.0,
+    "rejected": [
+      {
+        "file": "test_contracts/reachability/UnreachableReentrancy.sol",
+        "category": "reentrancy"
+      }
+    ]
+  }
+}
