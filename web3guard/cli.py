@@ -21,8 +21,8 @@ import dataclasses
 import json
 import logging
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 import web3guard
 from web3guard.findings_db import FindingsDB
@@ -573,7 +573,6 @@ def _cmd_price() -> int:
     from web3guard.pricing import (
         compute_estimate,
         pricing_summary,
-        DEFAULT_RATES,
     )
     print("=" * 60)
     print("  Web3Guard Pricing — verifier-economics model")

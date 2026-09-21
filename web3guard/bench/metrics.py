@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from web3guard.bench.corpus import BenchmarkCorpus, CorpusUnit
+from web3guard.bench.corpus import BenchmarkCorpus
 
 # The analyzer's vulnerability vocabulary. Corpus manifests must only
 # label units with these categories so the benchmark measures the

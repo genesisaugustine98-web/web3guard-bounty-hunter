@@ -8,10 +8,10 @@ is used to benchmark external corpora (e.g. ARC) once they are labeled.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Callable, Sequence
 
-from web3guard.bench.corpus import BenchmarkCorpus, CorpusUnit
+from web3guard.bench.corpus import BenchmarkCorpus
 from web3guard.bench.metrics import BenchFinding, BenchmarkReport, evaluate
 
 
