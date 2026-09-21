@@ -1,0 +1,10 @@
+{
+  "name": "live",
+  "description": "L3 online calibration with a real provider. The vulnerable target should yield CONFIRMED EXPLOIT; the clean target should not. Runs only in the opt-in live CI job.",
+  "cases": [
+    {"name": "live_reentrancy", "target": "targets/reentrancy_live",
+     "category": "reentrancy", "language": "solidity", "expect_confirmed": true},
+    {"name": "live_clean", "target": "targets/clean_vault",
+     "category": "", "language": "solidity", "expect_confirmed": false}
+  ]
+}

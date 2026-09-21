@@ -90,3 +90,18 @@ def test_calibrate_l2_golden_cases(tmp_path: Path) -> None:
     assert result.data["fn"] == 0
     assert result.data["precision"] == 1.0
     assert result.data["recall"] == 1.0
+
+
+LIVE_CASES = PROJECT_ROOT / "bench" / "calibration" / "live.json"
+
+
+def test_calibrate_l3_reports_not_measured_without_prereqs(tmp_path: Path) -> None:
+    from web3guard.bench.calibration import calibrate_l3
+    from web3guard.bench.cases import load_live_cases
+
+    cases = load_live_cases(LIVE_CASES)
+    result = calibrate_l3(cases, cases_root=LIVE_CASES.parent,
+                          workdir=tmp_path, env={})
+    assert result.status == "not-measured"
+    assert result.reason
+    assert result.data == {}

@@ -8,6 +8,7 @@ No layer substitutes a fake for the component it measures.
 
 from __future__ import annotations
 
+import os
 import shutil
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -188,3 +189,55 @@ def calibrate_l2(
         except Exception:  # noqa: BLE001
             outcomes.append(False)
     return LayerResult(data=_confusion(cases, outcomes))
+
+
+def _live_skip_reason(env: dict[str, str]) -> str:
+    if env.get("WEB3GUARD_LIVE_E2E") != "1":
+        return "set WEB3GUARD_LIVE_E2E=1 to run the live layer"
+    if not any(env.get(k) for k in _PROVIDER_KEY_ENVS):
+        return "no provider API key set (one of: " + ", ".join(_PROVIDER_KEY_ENVS) + ")"
+    return ""
+
+
+def calibrate_l3(
+    cases: Sequence[Any], *, cases_root: Path, workdir: Path,
+    env: dict[str, str] | None = None,
+) -> LayerResult:
+    environment = dict(os.environ) if env is None else env
+    reason = _live_skip_reason(environment)
+    if reason:
+        return LayerResult(status="not-measured", reason=reason)
+
+    from web3guard.scanner import DEFAULT_CONFIG, Scanner
+
+    cfg = dict(DEFAULT_CONFIG)
+    cfg.update({
+        "enable_ai_analysis": True,
+        "enable_discovery": False,
+        "enable_exploit": True,
+        "max_exploit_attempts": 3,
+        "max_cost_usd": 5.0,
+        "enable_self_critique": False,
+        "enable_attack_sequence_brainstorm": False,
+        "enable_role_map": False,
+        "enable_secret_scan": False,
+        "enable_economic_analyzer": False,
+    })
+    outcomes: list[bool] = []
+    for case in cases:
+        target = (Path(cases_root) / case.target).resolve()
+        case_work = Path(workdir) / case.name
+        case_work.mkdir(parents=True, exist_ok=True)
+        scanner = Scanner(config=cfg, workdir=case_work)
+        try:
+            result = scanner.scan([str(target) + "|max"])
+            confirmed = bool(result.targets) and any(
+                f.status == "CONFIRMED EXPLOIT"
+                for f in result.targets[0].findings)
+        except Exception:  # noqa: BLE001
+            confirmed = False
+        outcomes.append(confirmed)
+    data = _confusion(cases, outcomes)
+    data["provider_keys_present"] = sorted(
+        k for k in _PROVIDER_KEY_ENVS if environment.get(k))
+    return LayerResult(data=data)

@@ -129,7 +129,8 @@ jobs:
           python -m pytest tests/test_sandbox_smoke.py tests/test_exploit_e2e_foundry.py \
             tests/test_differential_e2e_foundry.py tests/test_cairo_impact_e2e.py \
             tests/test_build_profile.py tests/test_foundry_build_repro.py \
-            tests/test_impact_extraction.py tests/test_differential.py -v
+            tests/test_impact_extraction.py tests/test_differential.py \
+            tests/test_calibration.py::test_calibrate_l2_golden_cases -v
 
   live-exploit-e2e:
     name: Live exploit E2E (real model)
@@ -187,6 +188,17 @@ jobs:
         run: |
           python -m pytest tests/test_live_exploit_e2e.py -v -s
 
+      - name: Calibrate live model (L3)
+        env:
+          WEB3GUARD_LIVE_E2E: "1"
+          NIM_API_KEY: ${{ secrets.NIM_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          python -m web3guard.cli calibrate --layers l3 \
+            --json bench/calibration/reports/live.json
+
   bench:
     name: Benchmark (precision/recall gate)
     runs-on: ubuntu-latest
@@ -221,6 +233,12 @@ jobs:
         run: |
           python -m web3guard.cli bench \
             --diff bench/reports/test-contracts-baseline.json
+
+      - name: Calibrate offline reachability (L1)
+        run: |
+          python -m web3guard.cli calibrate --layers l1 \
+            --json bench/reachability/reports/current.json \
+            --fail-on-regression
 
       - name: Run benchmark with regression floor (SmartBugs corpus)
         run: |

@@ -15,6 +15,7 @@ from web3guard.bench.calibration import (
     LayerResult,
     calibrate_l1,
     calibrate_l2,
+    calibrate_l3,
 )
 from web3guard.bench.cases import CalibrationCase, load_cases, load_live_cases
 from web3guard.bench.corpus import (
@@ -54,6 +55,7 @@ __all__ = [
     "LayerResult",
     "calibrate_l1",
     "calibrate_l2",
+    "calibrate_l3",
     "CalibrationCase",
     "load_cases",
     "load_live_cases",
