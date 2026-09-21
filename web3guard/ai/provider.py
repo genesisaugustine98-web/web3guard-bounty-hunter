@@ -19,8 +19,9 @@ import abc
 import json
 import logging
 import time
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 LOGGER = logging.getLogger("web3guard.ai.provider")
 
@@ -214,7 +215,6 @@ class OpenAICompatibleProvider(AIProvider):
                      seed, response_format, api_key) -> ChatResponse:
         start = time.monotonic()
         try:
-            import openai  # type: ignore
             self._client.api_key = api_key
             kwargs: dict[str, Any] = dict(
                 model=model,
@@ -294,8 +294,8 @@ class OpenAICompatibleProvider(AIProvider):
 
     def _chat_urllib(self, messages, model, max_tokens, temperature,
                      seed, response_format, api_key) -> ChatResponse:
-        import urllib.request
         import urllib.error
+        import urllib.request
         start = time.monotonic()
         url = f"{self.base_url}/chat/completions"
         body: dict[str, Any] = {

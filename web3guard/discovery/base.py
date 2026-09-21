@@ -10,9 +10,7 @@ scanner core invokes them via the
 from __future__ import annotations
 
 import abc
-import json
 import logging
-import os
 import subprocess
 import sys
 import tempfile

@@ -3,7 +3,7 @@ dashboard's short fingerprint can be used with `mark`."""
 
 import pytest
 
-from web3guard.findings_db import FindingsDB, FindingRecord
+from web3guard.findings_db import FindingRecord, FindingsDB
 
 
 @pytest.fixture()

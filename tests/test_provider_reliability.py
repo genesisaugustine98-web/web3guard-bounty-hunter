@@ -150,6 +150,7 @@ def test_non_streaming_path_kept(provider, monkeypatch):
 
 def test_use_streaming_wired_from_scanner_config(tmp_path):
     import yaml
+
     from web3guard.scanner import Scanner
 
     cfg = load_config(None)
@@ -179,6 +180,7 @@ def test_use_streaming_wired_from_scanner_config(tmp_path):
 
 def test_max_retries_wired_from_scanner_config(tmp_path):
     import yaml
+
     from web3guard.ai import AIClient
     from web3guard.scanner import Scanner
 
@@ -203,8 +205,8 @@ def test_max_retries_wired_from_scanner_config(tmp_path):
 
 
 def test_default_max_retries_is_two():
-    from web3guard.ai.client import AIClient
     from web3guard.ai import OpenAICompatibleProvider
+    from web3guard.ai.client import AIClient
     p = OpenAICompatibleProvider(
         base_url="https://x/v1", api_key_env="NIM_API_KEY")
     client = AIClient(providers=[p])

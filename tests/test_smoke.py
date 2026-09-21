@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
-import json
 import tempfile
 from pathlib import Path
 
@@ -12,39 +12,27 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import web3guard  # noqa: E402
+from web3guard.ai import CostTracker  # noqa: E402
+from web3guard.findings_db import FindingRecord, FindingsDB  # noqa: E402
 from web3guard.languages import (  # noqa: E402
     LanguageRegistry,
     TargetLanguage,
-    default_registry,
     detect_target_language,
 )
-from web3guard.languages.solidity import SolidityAdapter  # noqa: E402
-from web3guard.languages.vyper import VyperAdapter  # noqa: E402
 from web3guard.languages.move_lang import MoveAdapter  # noqa: E402
-from web3guard.languages.cairo_lang import CairoAdapter  # noqa: E402
-from web3guard.languages.clarity_lang import ClarityAdapter  # noqa: E402
-from web3guard.languages.func_lang import FunCAdapter  # noqa: E402
-from web3guard.languages.rust_solana import RustSolanaAdapter  # noqa: E402
-from web3guard.languages.ts_sdk import TypeScriptSDKAdapter  # noqa: E402
+from web3guard.languages.solidity import SolidityAdapter  # noqa: E402
+from web3guard.pricing import (  # noqa: E402
+    PROGRAM_TIERS,
+    compute_estimate,
+    researcher_payout,
+)
+from web3guard.reports import ReportBuilder  # noqa: E402
+from web3guard.scanner import Scanner, load_config  # noqa: E402
 from web3guard.security import (  # noqa: E402
     PromptInjectionGuard,
     SandboxGuard,
     SandboxPolicy,
 )
-from web3guard.security.prompt_injection import INJECTION_PATTERNS  # noqa: E402
-from web3guard.findings_db import FindingsDB, FindingRecord  # noqa: E402
-from web3guard.ai import CostTracker  # noqa: E402
-from web3guard.ai.cost import DEFAULT_PRICING  # noqa: E402
-from web3guard.scanner import Scanner, load_config  # noqa: E402
-from web3guard.reports import ReportBuilder  # noqa: E402
-from web3guard.pricing import (  # noqa: E402
-    researcher_payout,
-    compute_estimate,
-    pricing_summary,
-    PROGRAM_TIERS,
-)
-
 
 # ---------------------------------------------------------------------------
 # Language detection
@@ -142,7 +130,8 @@ pragma solidity ^0.8.0;
 contract A { function f() public pure returns (uint) { return 1; } }
 contract B { function g() public pure returns (uint) { return 2; } }
 """
-    f = tmp_path / "Test.sol"; f.write_text(src)
+    f = tmp_path / "Test.sol"
+    f.write_text(src)
     adapter = SolidityAdapter()
     chunks = adapter.chunk(f, max_chars=6000)
     assert len(chunks) >= 1
@@ -166,7 +155,8 @@ def test_move_adapter_chunks_at_declarations(tmp_path: Path):
         public fun withdraw(): u64 { 2 }
     }
     """
-    f = tmp_path / "vault.move"; f.write_text(src)
+    f = tmp_path / "vault.move"
+    f.write_text(src)
     adapter = MoveAdapter()
     chunks = adapter.chunk(f, max_chars=6000)
     assert len(chunks) >= 1
@@ -343,7 +333,7 @@ def test_cost_tracker_enforces_ceiling():
     except RuntimeError as e:
         assert "cost ceiling exceeded" in str(e)
     else:
-        assert False, "expected RuntimeError"
+        raise AssertionError("expected RuntimeError")
 
 
 def test_cost_tracker_unknown_model_is_free():
@@ -391,6 +381,7 @@ def test_load_config_default():
 
 def test_provider_timeout_wired_from_config(tmp_path):
     import yaml
+
     from web3guard.ai import OpenAICompatibleProvider
     from web3guard.scanner import Scanner
 
@@ -489,7 +480,7 @@ def test_reports_render_for_empty_result(tmp_path: Path):
 
 
 def test_sarif_includes_findings(tmp_path: Path):
-    from web3guard.scanner import ScanResult, TargetResult, Finding
+    from web3guard.scanner import Finding, ScanResult, TargetResult
     sr = ScanResult(started_at="x", finished_at="x", config={})
     f = Finding(
         target="t", language="solidity", file="Vault.sol",
@@ -512,7 +503,7 @@ def test_sarif_includes_findings(tmp_path: Path):
 
 
 def test_catalog_covers_new_categories():
-    from web3guard.utils.vuln_catalog import get_catalog, CATALOG_BY_LANGUAGE
+    from web3guard.utils.vuln_catalog import get_catalog
     # C1 - C7 categories must be present in the Solidity catalog
     sol = get_catalog(TargetLanguage.SOLIDITY)
     for cat_id, label in [

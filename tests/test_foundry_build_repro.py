@@ -10,9 +10,9 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from web3guard.languages.solidity import SolidityAdapter  # noqa: E402
 from web3guard.sandbox.build_system import detect_build_profile  # noqa: E402
 from web3guard.sandbox.foundry import FoundrySandbox  # noqa: E402
-from web3guard.languages.solidity import SolidityAdapter  # noqa: E402
 
 _FIXTURE = PROJECT_ROOT / "test_contracts/remapping_project"
 

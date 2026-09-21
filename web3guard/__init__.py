@@ -15,26 +15,30 @@ This is the package entry point. The CLI entry point lives in
 
 from __future__ import annotations
 
-__version__ = "3.0.0"
+__version__ = "3.2.0"
 __author__ = "Web3Guard Contributors"
 __license__ = "MIT"
 
 # Public re-exports for the most common entry points.
-from web3guard.scanner import Scanner, ScanResult  # noqa: E402
+from web3guard.ai import AIClient, AIProvider  # noqa: E402
+from web3guard.findings_db import FindingsDB  # noqa: E402
 from web3guard.languages import (  # noqa: E402
     LanguageRegistry,
     TargetLanguage,
     detect_target_language,
 )
-from web3guard.ai import AIClient, AIProvider  # noqa: E402
 from web3guard.reports import ReportBuilder  # noqa: E402
+from web3guard.scanner import Scanner, ScanResult  # noqa: E402
 from web3guard.security import (  # noqa: E402
     PromptInjectionGuard,
     SandboxGuard,
 )
-from web3guard.findings_db import FindingsDB  # noqa: E402
+from web3guard.utils.fetch import FetchError, fetch_onchain_contract, fetch_target  # noqa: E402
 
 __all__ = [
+    "fetch_target",
+    "fetch_onchain_contract",
+    "FetchError",
     "Scanner",
     "ScanResult",
     "LanguageRegistry",

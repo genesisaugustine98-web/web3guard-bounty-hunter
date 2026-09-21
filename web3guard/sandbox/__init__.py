@@ -11,8 +11,8 @@ project. This module generalizes that pattern: every test runner
 """
 
 from web3guard.sandbox.base import (
-    TestSandbox,
     SandboxResult,
+    TestSandbox,
     create_sandbox,
 )
 

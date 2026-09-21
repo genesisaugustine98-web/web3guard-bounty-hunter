@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +32,7 @@ class MythrilEngine(DiscoveryEngineBase):
             LOGGER.info("mythril not installed; skipping")
             return []
         timeout = timeout or self.default_timeout
-        out_file = temp_report_path(target_path, "mythril")
+        out_file = temp_report_path(target_path, "mythril")  # noqa: F841 (reserved for report persistence)
         # Mythril analyzes one .sol file at a time, but you can pass
         # a directory if solc-select is configured. We run per top-level
         # .sol file to keep the timeout bounded.

@@ -53,6 +53,48 @@ name: Web3Guard Bounty Hunter
     - cron: "0 6 * * 0"  # weekly on Sunday at 06:00 UTC
 
 jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout scanner
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff
+        run: python -m pip install ruff
+
+      - name: Run ruff
+        run: python -m ruff check web3guard tests
+
+      - name: Node syntax check (trigger bot)
+        run: node --check bot/worker.js
+
+  telegram-smoke:
+    name: Telegram bot smoke (no network)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout scanner
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install package
+        run: python -m pip install -e .
+
+      - name: Bot module smoke (render, split, auth — no Telegram calls)
+        run: python -m pytest tests/test_v32_upgrade.py -q -k telegram
+
   test:
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest

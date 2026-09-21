@@ -134,7 +134,7 @@ class TestRunner:
     test_command_template: Sequence[str]     # e.g. ["forge", "test", "--match-test", "{test_name}"]
     poc_relative_path: str                   # e.g. "test/AutonomousExploit.t.sol"
     has_impact_assertion: Callable[[str], bool] | None = None
-    extract_impact: Callable[[str], "ImpactEvidence | None"] | None = None
+    extract_impact: Callable[[str], ImpactEvidence | None] | None = None
     # False when the runner cannot execute a PoC at runtime (compile-only,
     # or no working harness). Such runners must never yield CONFIRMED EXPLOIT.
     runtime_confirmable: bool = True

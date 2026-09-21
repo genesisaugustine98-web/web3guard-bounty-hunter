@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Mapping
 
 LOGGER = logging.getLogger("web3guard.pricing")
 

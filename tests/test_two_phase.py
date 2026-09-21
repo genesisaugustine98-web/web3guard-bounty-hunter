@@ -16,8 +16,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import pytest  # noqa: E402
 
-from web3guard.scanner import Scanner  # noqa: E402
 from web3guard.languages import TargetLanguage  # noqa: E402
+from web3guard.scanner import Scanner  # noqa: E402
 
 
 class FakeCostTracker:

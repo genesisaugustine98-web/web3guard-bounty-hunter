@@ -46,8 +46,8 @@ either glossed over or implemented only as informational warnings:
 """
 
 from web3guard.security.prompt_injection import (
-    PromptInjectionGuard,
     InjectionVerdict,
+    PromptInjectionGuard,
 )
 from web3guard.security.sandbox_guard import (
     SandboxGuard,

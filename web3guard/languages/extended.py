@@ -29,7 +29,6 @@ from web3guard.languages.base import (
 )
 from web3guard.languages.simple import SimpleAdapter
 
-
 # ---------------------------------------------------------------------------
 # Content-based disambiguation for shared extensions
 # ---------------------------------------------------------------------------

@@ -10,12 +10,12 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from web3guard.scanner import Scanner  # noqa: E402
 from tests.test_exploit_e2e_foundry import (  # noqa: E402
     _GOOD_POC,
     _REENTRANCY_FIXTURE,
     ScriptedExploitAI,
 )
+from web3guard.scanner import Scanner  # noqa: E402
 
 
 @pytest.mark.skipif(shutil.which("forge") is None, reason="forge not installed")

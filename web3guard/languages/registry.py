@@ -17,23 +17,17 @@ scanner then runs each adapter's analysis in priority order.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from itertools import islice
 from pathlib import Path
-from typing import Iterable
 
 from web3guard.languages.base import (
     LanguageAdapter,
     TargetLanguage,
 )
-from web3guard.languages.solidity import SolidityAdapter
-from web3guard.languages.vyper import VyperAdapter
-from web3guard.languages.move_lang import MoveAdapter
 from web3guard.languages.cairo_lang import CairoAdapter
 from web3guard.languages.clarity_lang import ClarityAdapter
-from web3guard.languages.func_lang import FunCAdapter
-from web3guard.languages.rust_solana import RustSolanaAdapter
-from web3guard.languages.ts_sdk import TypeScriptSDKAdapter
 from web3guard.languages.extended import (
     AlchemyAdapter,
     Cairo1Adapter,
@@ -49,6 +43,12 @@ from web3guard.languages.extended import (
     WasmAdapter,
     YulAdapter,
 )
+from web3guard.languages.func_lang import FunCAdapter
+from web3guard.languages.move_lang import MoveAdapter
+from web3guard.languages.rust_solana import RustSolanaAdapter
+from web3guard.languages.solidity import SolidityAdapter
+from web3guard.languages.ts_sdk import TypeScriptSDKAdapter
+from web3guard.languages.vyper import VyperAdapter
 
 LOGGER = logging.getLogger("web3guard.languages.registry")
 
@@ -236,7 +236,7 @@ class LanguageRegistry:
     def detect_for(self, target_path: Path) -> list[LanguageAdapter]:
         """Return the adapters that apply to ``target_path``, in priority order."""
         applicable: list[LanguageAdapter] = []
-        for lang, adapter in self._adapters.items():
+        for _lang, adapter in self._adapters.items():
             try:
                 if adapter.detect(target_path):
                     applicable.append(adapter)

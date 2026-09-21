@@ -18,15 +18,15 @@ first-class providers, with a circuit breaker that automatically
 falls back to a healthy provider when the primary fails.
 """
 
+from web3guard.ai.client import AIClient
+from web3guard.ai.cost import CostRecord, CostTracker
 from web3guard.ai.provider import (
     AIProvider,
-    OpenAICompatibleProvider,
-    ProviderError,
     ChatMessage,
     ChatResponse,
+    OpenAICompatibleProvider,
+    ProviderError,
 )
-from web3guard.ai.client import AIClient
-from web3guard.ai.cost import CostTracker, CostRecord
 
 __all__ = [
     "AIProvider",

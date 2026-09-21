@@ -177,6 +177,27 @@ def build_parser() -> argparse.ArgumentParser:
     cal.add_argument("--fail-on-regression", action="store_true",
                      help="Exit non-zero when L1 precision does not improve")
 
+    # ---- fetch ----------------------------------------------------------
+    fetch_p = sub.add_parser(
+        "fetch",
+        help="Resolve a target (git URL, archive, raw file, IPFS, or 0x "
+             "address) to a local directory without scanning",
+    )
+    fetch_p.add_argument("target", help="Target string (same shapes as scan)")
+    fetch_p.add_argument("--keep", action="store_true",
+                         help="Print the resolved path and keep it (default "
+                              "behavior); without --keep the path is printed "
+                              "but registered for cleanup on exit")
+
+    # ---- telegram -------------------------------------------------------
+    tg = sub.add_parser(
+        "telegram",
+        help="Run the Telegram console bot (long-polling; needs "
+             "TELEGRAM_BOT_TOKEN)",
+    )
+    tg.add_argument("--once", action="store_true",
+                    help="Process one update batch and exit")
+
     # ---- version --------------------------------------------------------
     sub.add_parser("version", help="Print version and exit")
 
@@ -190,6 +211,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "version":
         print(f"web3guard {web3guard.__version__}")
         return 0
+    if args.command == "fetch":
+        return _cmd_fetch(args)
+    if args.command == "telegram":
+        from web3guard.telegram_bot import main as tg_main
+
+        return tg_main(["--once"] if args.once else [])
     if args.command == "price":
         _cmd_price()
         return 0
@@ -565,6 +592,19 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         server.serve_forever()
     except KeyboardInterrupt:
         server.shutdown()
+    return 0
+
+
+def _cmd_fetch(args: argparse.Namespace) -> int:
+    """Resolve a target to a local directory and print the path."""
+    from web3guard.utils.fetch import FetchError, fetch_target
+
+    try:
+        path = fetch_target(args.target)
+    except FetchError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(path)
     return 0
 
 

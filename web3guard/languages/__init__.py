@@ -20,26 +20,15 @@ scanner core are required.
 """
 
 from web3guard.languages.base import (
-    LanguageAdapter,
-    DiscoveryEngine,
-    TestRunner,
     Chunk,
+    DiscoveryEngine,
+    LanguageAdapter,
     RepoSummary,
     TargetLanguage,
+    TestRunner,
 )
-from web3guard.languages.registry import (
-    LanguageRegistry,
-    default_registry,
-    detect_target_language,
-)
-from web3guard.languages.solidity import SolidityAdapter
-from web3guard.languages.vyper import VyperAdapter
-from web3guard.languages.move_lang import MoveAdapter
 from web3guard.languages.cairo_lang import CairoAdapter
 from web3guard.languages.clarity_lang import ClarityAdapter
-from web3guard.languages.func_lang import FunCAdapter
-from web3guard.languages.rust_solana import RustSolanaAdapter
-from web3guard.languages.ts_sdk import TypeScriptSDKAdapter
 from web3guard.languages.extended import (
     AlchemyAdapter,
     Cairo1Adapter,
@@ -55,6 +44,17 @@ from web3guard.languages.extended import (
     WasmAdapter,
     YulAdapter,
 )
+from web3guard.languages.func_lang import FunCAdapter
+from web3guard.languages.move_lang import MoveAdapter
+from web3guard.languages.registry import (
+    LanguageRegistry,
+    default_registry,
+    detect_target_language,
+)
+from web3guard.languages.rust_solana import RustSolanaAdapter
+from web3guard.languages.solidity import SolidityAdapter
+from web3guard.languages.ts_sdk import TypeScriptSDKAdapter
+from web3guard.languages.vyper import VyperAdapter
 
 __all__ = [
     "LanguageAdapter",
@@ -62,6 +62,7 @@ __all__ = [
     "TestRunner",
     "Chunk",
     "RepoSummary",
+    "TargetLanguage",
     "LanguageRegistry",
     "default_registry",
     "detect_target_language",

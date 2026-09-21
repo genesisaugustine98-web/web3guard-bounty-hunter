@@ -19,28 +19,28 @@ The original engines (Slither, Mythril, Echidna) are also re-exported
 here so the scanner core has a single import.
 """
 
+from web3guard.discovery.aderyn_engine import AderynEngine
+from web3guard.discovery.aptos_bytecode_engine import AptosBytecodeEngine
 from web3guard.discovery.base import (
     DiscoveryEngineBase,
     DiscoveryResult,
     safe_run_subprocess,
 )
-from web3guard.discovery.static_analyzer import StaticAnalyzerEngine
-from web3guard.discovery.slither_engine import SlitherEngine
-from web3guard.discovery.aderyn_engine import AderynEngine
-from web3guard.discovery.mythril_engine import MythrilEngine
+from web3guard.discovery.cargo_audit_engine import CargoAuditEngine
 from web3guard.discovery.echidna_engine import EchidnaEngine
 from web3guard.discovery.gitleaks_engine import GitleaksEngine
-from web3guard.discovery.semgrep_engine import SemgrepEngine
-from web3guard.discovery.npm_audit_engine import NpmAuditEngine
-from web3guard.discovery.cargo_audit_engine import CargoAuditEngine
-from web3guard.discovery.aptos_bytecode_engine import AptosBytecodeEngine
 
 # Legacy / opt-in engines (from the original scanner)
 from web3guard.discovery.legacy import (
+    ManticoreEngine,
     OyenteEngine,
     SecurifyEngine,
-    ManticoreEngine,
 )
+from web3guard.discovery.mythril_engine import MythrilEngine
+from web3guard.discovery.npm_audit_engine import NpmAuditEngine
+from web3guard.discovery.semgrep_engine import SemgrepEngine
+from web3guard.discovery.slither_engine import SlitherEngine
+from web3guard.discovery.static_analyzer import StaticAnalyzerEngine
 
 ALL_ENGINES = (
     StaticAnalyzerEngine,

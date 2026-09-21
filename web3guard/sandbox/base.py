@@ -16,17 +16,12 @@ based on the language adapter's :class:`TestRunner` description.
 from __future__ import annotations
 
 import logging
-import os
-import shutil
-import subprocess
-import sys
-import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from web3guard.languages.base import LanguageAdapter, TestRunner
+from web3guard.languages.base import LanguageAdapter
 from web3guard.security import SandboxGuard, SandboxPolicy
 
 # The LLM provider keys, popped defensively in addition to the allowlist

@@ -29,7 +29,6 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from web3guard.ai.client import AIClient  # noqa: E402
 from web3guard.ai.cost import CostTracker  # noqa: E402
 from web3guard.ai.provider import (  # noqa: E402
-    ChatMessage,
     ChatResponse,
     _estimate_tokens,
 )
@@ -39,37 +38,20 @@ from web3guard.discovery.static_analyzer import (  # noqa: E402
     language_for_file,
 )
 from web3guard.languages import (  # noqa: E402
-    LanguageRegistry,
     TargetLanguage,
     default_registry,
-)
-from web3guard.languages.extended import (  # noqa: E402
-    AlchemyAdapter,
-    Cairo1Adapter,
-    CosmWasmAdapter,
-    GoCosmosAdapter,
-    HuffAdapter,
-    InkAdapter,
-    MichelsonAdapter,
-    SassAdapter,
-    ScillaAdapter,
-    SolidityAsmAdapter,
-    SubstrateAdapter,
-    WasmAdapter,
-    YulAdapter,
 )
 from web3guard.scanner import (  # noqa: E402
     Finding,
     Scanner,
     _enforce_zero_dollar_providers,
 )
-from web3guard.security.sandbox_guard import SandboxGuard  # noqa: E402
 from web3guard.utils.fetch import (  # noqa: E402
+    FetchError,
     expand_shorthand,
     fetch_target,
     normalize_git_url,
 )
-
 
 # ---------------------------------------------------------------------------
 # Streaming cost accounting
@@ -90,7 +72,7 @@ def test_streaming_response_without_usage_still_counts_cost():
     streaming call, which silently disabled the cost ceiling).
     """
     tracker = CostTracker(max_cost_usd=1000.0)
-    messages = [{"role": "user", "content": "x" * 4000}]
+    _messages = [{"role": "user", "content": "x" * 4000}]
     content = "y" * 8000
     prompt_tokens = _estimate_tokens("x" * 4000)
     completion_tokens = _estimate_tokens(content)
@@ -325,7 +307,7 @@ def test_fetch_single_file(tmp_path):
     """Single-file fetch uses local path short-circuit; direct URL path
     is exercised with a file:// style canary through a local temp server
     substitute — here we verify the error surface for bad input."""
-    with pytest.raises(Exception):
+    with pytest.raises((FetchError, OSError)):
         fetch_target("https://nonexistent.invalid/repo.tar.gz")
 
 

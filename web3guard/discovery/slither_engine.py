@@ -43,7 +43,7 @@ class SlitherEngine(DiscoveryEngineBase):
             LOGGER.info("slither not installed; skipping")
             return []
         timeout = timeout or self.default_timeout
-        out_format = "json"
+        out_format = "json"  # noqa: F841 (reserved for --json output wiring)
         # Slither expects a target. We pass the project root and let it
         # autodetect the framework. We use --no-fail to keep going on
         # compilation errors (so we still get hints from files that

@@ -200,8 +200,8 @@ def test_dependency_discovery_dedupes_and_skips_none(tmp_path: Path) -> None:
 
 
 def test_scanner_scans_declared_dependencies(tmp_path: Path, monkeypatch) -> None:
-    from web3guard.scanner import Scanner, TargetResult
     from web3guard.languages import TargetLanguage
+    from web3guard.scanner import Scanner, TargetResult
 
     scanner = Scanner(config={"enable_dependency_scan": True},
                       ai_client=CleanAIStub(), workdir=tmp_path / "work")
@@ -234,8 +234,8 @@ def test_scanner_scans_declared_dependencies(tmp_path: Path, monkeypatch) -> Non
 
 
 def test_scanner_does_not_scan_itself_as_dependency(tmp_path: Path, monkeypatch) -> None:
-    from web3guard.scanner import Scanner, TargetResult
     from web3guard.languages import TargetLanguage
+    from web3guard.scanner import Scanner, TargetResult
 
     scanner = Scanner(config={"enable_dependency_scan": True},
                       ai_client=CleanAIStub(), workdir=tmp_path / "work")

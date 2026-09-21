@@ -46,6 +46,13 @@ Every language ships with its own:
 | FunC         | Blueprint / local validator | Blueprint                      |
 | Rust / Solana| `anchor test`            | Anchor, cargo-audit, clippy, Soteria, Trident |
 | TypeScript / JS | `ts-node` / `tsx`     | Semgrep, npm-audit, Gitleaks     |
+| Huff, Yul, Solidity-ASM | analysis-tier | Purpose-built static detectors |
+| ink!, CosmWasm, Substrate, Go/Cosmos | analysis-tier | Purpose-built static detectors |
+| Scilla, Michelson, Cairo 1, SasS, Wasm, Alchemy | analysis-tier | Purpose-built static detectors |
+
+Analysis-tier languages get deep static + AI analysis; findings are
+marked POTENTIAL (never fake-confirmed) because no free execution
+harness exists.
 
 ## Key features (this edition)
 
@@ -76,6 +83,32 @@ Every language ships with its own:
   `web3guard mark <fingerprint> <status>`.
 - **Adversarial self-critique**: every finding is challenged by a
   second pass whose only job is to try to disprove it.
+- **Scan anything, not just GitHub** (`web3guard fetch` / `scan`):
+  - any git host — GitHub, GitLab (incl. subgroups), Bitbucket,
+    SourceHut, Codeberg, cgit (kernel.org), self-hosted Gitea
+  - web UI URLs (`/tree/`, `/-/`, `/about/`) normalized to clones
+  - tarball/zip archives from any host, with **magic-byte sniffing**
+    for extension-less codeload links and zip-slip guards
+  - raw source files, GitHub gists (cloned as git repos), and IPFS
+    (`ipfs://CID` or gateway URLs)
+  - **on-chain contracts**: a bare `0x…` address, `base:0x…`-style
+    chain shorthand, a Blockscout page, or an Etherscan-family page
+    pulls the *verified* source from the chain's free Blockscout API —
+    no API key — unpacking multi-file verifications and fetching proxy
+    implementations one level deep so proxy + implementation are both
+    scanned (11 chains: eth, base, arb, opt, poly, gno, scroll + 4
+    testnets)
+  - SSRF guard on every HTTP path: private/loopback/link-local
+    (including the cloud metadata endpoint) and redirect hops are
+    refused; downloads are size-capped and retried with backoff
+- **God-level Telegram console** (`web3guard telegram`, stdlib-only):
+  inline keyboards, live progress editing through the pipeline stages,
+  file uploads (send a `.sol`/`.zip` straight to the chat), bare 0x
+  address scanning, HTML findings digests under Telegram's 4096-char
+  limit, per-chat rate limiting, allowlist auth, and a Cloudflare
+  Worker trigger (`bot/worker.js`) with callback buttons, budget
+  confirm dialogs, and `/chains` + `/languages` cards. Zero-dollar end
+  to end: free Bot API, free Blockscout, free-tier LLMs.
 - **Attack-sequence brainstorming**: cross-contract and multi-tx attack
   hypotheses that single-chunk analysis would miss.
 - **Role / governance map**: deterministic map of every privileged
@@ -154,6 +187,43 @@ python -m web3guard.cli scan \
 
 The `|max` suffix means unlimited token budget. Use `|200000` for a
 capped scan.
+
+### Beyond-GitHub targets
+
+```bash
+# Any git host
+web3guard scan https://gitlab.com/group/subgroup/project|max
+web3guard scan https://bitbucket.org/user/repo|max
+web3guard scan gh:owner/repo|max            # shorthand
+web3guard scan https://git.sr.ht/~user/repo
+
+# Archives, raw files, gists, IPFS
+web3guard scan https://example.com/audit-target.zip
+web3guard scan https://gist.github.com/user/abc123
+web3guard scan ipfs://bafybeicq…
+
+# On-chain verified contracts (free Blockscout, no API key)
+web3guard scan 0xdAC17F958D2ee523a2206206994597C13D831ec7        # Ethereum
+web3guard scan base:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913   # Base
+web3guard scan https://basescan.org/address/0x8335…#code         # explorer page
+
+# Or just resolve a target without scanning
+web3guard fetch <any-of-the-above>
+```
+
+### Telegram console
+
+```bash
+export TELEGRAM_BOT_TOKEN=123456:ABC…        # from @BotFather
+export ALLOWED_CHAT_IDS=6983105537           # your chat id
+python -m web3guard.telegram_bot             # long-polling console
+```
+
+Then in the app: `/scan 0xabc…`, `/scan https://…/repo`, or just send a
+`.sol`/`.zip` file — you get live progress edits, inline keyboards, and
+HTML findings digests. The Cloudflare Worker in `bot/worker.js` is the
+zero-infrastructure alternative: it dispatches scans to GitHub Actions
+via `repository_dispatch` (free tier end to end).
 
 ### Programmatic use
 

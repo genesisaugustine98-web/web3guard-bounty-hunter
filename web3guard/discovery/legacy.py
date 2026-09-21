@@ -15,12 +15,9 @@ understood.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 from web3guard.discovery.base import (
     DiscoveryEngineBase,
-    DiscoveryResult,
-    safe_run_subprocess,
 )
 from web3guard.languages.base import TargetLanguage
 

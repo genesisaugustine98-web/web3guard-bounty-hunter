@@ -407,7 +407,7 @@ def _detect_solidity(content: str, rel: str) -> list[StaticIssue]:
     # Unprotected proxy upgrade: upgradeTo + fallback delegatecall combo.
     upgrade_unprotected = False
     has_delegatecall_fallback = False
-    for name, body, start_line, _, sig in _iter_braced_functions(content, "solidity"):
+    for name, body, _sl, _e, sig in _iter_braced_functions(content, "solidity"):
         if re.match(r"^(upgradeTo|upgrade|authorizeUpgrade)", name) and \
                 not _GUARD_RE.search(sig + body):
             upgrade_unprotected = True
@@ -489,7 +489,7 @@ def _detect_vyper(content: str, rel: str) -> list[StaticIssue]:
 def _detect_move(content: str, rel: str) -> list[StaticIssue]:
     content = _clean_code(content, "move")
     issues: list[StaticIssue] = []
-    for name, body, start_line, _, sig in _iter_braced_functions(content, "move"):
+    for name, body, start_line, _, _sig in _iter_braced_functions(content, "move"):
         if re.search(r"borrow_global\s*<|borrow_global_mut\s*<", body) and \
                 not re.search(r"acquires\s+\w+", body):
             issues.append(_issue(
@@ -612,7 +612,7 @@ def _detect_func(content: str, rel: str) -> list[StaticIssue]:
 def _detect_rust_solana(content: str, rel: str) -> list[StaticIssue]:
     content = _clean_code(content, "rust")
     issues: list[StaticIssue] = []
-    for name, body, start_line, _, sig in _iter_braced_functions(content, "rust"):
+    for name, body, start_line, _, _sig in _iter_braced_functions(content, "rust"):
         if name not in ("initialize", "init"):
             continue
         guarded = re.search(
