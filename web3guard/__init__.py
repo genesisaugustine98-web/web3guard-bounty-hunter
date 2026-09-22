@@ -15,7 +15,7 @@ This is the package entry point. The CLI entry point lives in
 
 from __future__ import annotations
 
-__version__ = "3.2.0"
+__version__ = "3.3.0"
 __author__ = "Web3Guard Contributors"
 __license__ = "MIT"
 

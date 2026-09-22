@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "web3guard-bounty-hunter"
-version = "3.2.0"
+version = "3.3.0"
 description = "Multi-language Web3 smart contract vulnerability scanner with AI-driven semantic reasoning."
 readme = "README.md"
 license = "MIT"

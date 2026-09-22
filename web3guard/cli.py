@@ -23,6 +23,7 @@ import logging
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import web3guard
 from web3guard.findings_db import FindingsDB
@@ -507,19 +508,59 @@ def _cmd_mark(args: argparse.Namespace) -> int:
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
-    """Tiny HTTP server for programmatic access.
+    """Tiny HTTP server for programmatic and browser access.
 
     Endpoints:
-    - GET  /healthz        -> liveness
-    - GET  /summary        -> finding summary
-    - POST /scan           -> { "targets": [...], "config": {...} }
-    - GET  /findings       -> list findings
-    - POST /mark           -> { "fingerprint": ..., "status": ... }
+    - GET  /                -> browser dashboard (alias /dashboard)
+    - GET  /healthz         -> liveness
+    - GET  /summary         -> finding summary
+    - GET  /findings        -> list findings
+    - GET  /cost            -> scan cost breakdown by role
+    - POST /scan            -> { "targets": [...], "config": {...} }
+    - POST /mark            -> { "fingerprint": ..., "status": ... }
     """
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import urlparse
 
+    from web3guard.dashboard import dashboard_page
+
     db = FindingsDB(args.workdir / ".web3guard/findings.db")
+    cost_db_path = args.workdir / ".web3guard/cost.db"
+
+    def _cost_summary() -> dict[str, Any]:
+        """Per-role cost rollup straight from the cost SQLite DB.
+
+        Reads the records directly: CostTracker persists one-way (it
+        never re-loads rows at construction), so the dashboard must
+        aggregate the DB itself to survive server restarts.
+        """
+        if not cost_db_path.exists():
+            return {"total_cost_usd": 0.0, "by_role": {}}
+        import sqlite3
+        from contextlib import closing
+        try:
+            with closing(sqlite3.connect(str(cost_db_path))) as conn:
+                total = conn.execute(
+                    "SELECT COALESCE(SUM(cost_usd), 0) FROM cost_records"
+                ).fetchone()[0]
+                rows = conn.execute(
+                    "SELECT role, SUM(cost_usd), COUNT(*), "
+                    "SUM(prompt_tokens), SUM(completion_tokens) "
+                    "FROM cost_records GROUP BY role"
+                ).fetchall()
+            by_role = {
+                role: {
+                    "cost": float(cost or 0),
+                    "calls": int(calls or 0),
+                    "tokens_in": int(tin or 0),
+                    "tokens_out": int(tout or 0),
+                }
+                for role, cost, calls, tin, tout in rows
+            }
+            return {"total_cost_usd": float(total or 0), "by_role": by_role}
+        except Exception as e:  # noqa: BLE001
+            LOGGER.warning("could not read cost db: %s", e)
+            return {"total_cost_usd": 0.0, "by_role": {}, "error": str(e)}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):  # noqa: A003
@@ -527,12 +568,21 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
         def do_GET(self):  # noqa: N802
             parsed = urlparse(self.path)
-            if parsed.path == "/healthz":
+            if parsed.path in ("/", "/dashboard"):
+                body = dashboard_page().encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif parsed.path == "/healthz":
                 self._json({"ok": True, "version": web3guard.__version__})
             elif parsed.path == "/summary":
                 self._json(db.summary())
             elif parsed.path == "/findings":
                 self._json([dataclasses.asdict(f) for f in db.list_findings(limit=500)])
+            elif parsed.path == "/cost":
+                self._json(_cost_summary())
             else:
                 self._json({"error": "not found"}, status=404)
 

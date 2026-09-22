@@ -118,7 +118,11 @@ harness exists.
 - **Economic / profitability analysis**: estimates attacker capital,
   gas cost, and ROI per finding.
 - **HTTP server mode**: `web3guard serve --port 8080` exposes a small
-  REST API for programmatic integration.
+  REST API for programmatic integration, plus a built-in browser
+  dashboard at `/` (findings lifecycle, summary tiles, cost charts).
+- **Deployment verification** (opt-in, `enable_deployment_verification`):
+  fetches deployed bytecode over chain RPC and compares it with local
+  build artifacts so findings from a stale tree get flagged early.
 - **Verifier economics**: built-in pricing model — 10% revenue share
   capped at $50K / finding for researchers; tiered subscriptions for
   programs. Run `web3guard price` to see the full model.
@@ -245,9 +249,11 @@ python -m web3guard.cli serve --port 8080
 
 Endpoints:
 
+- `GET  /` — browser dashboard (alias `/dashboard`).
 - `GET  /healthz` — liveness check.
 - `GET  /summary` — finding counts by status / severity.
 - `GET  /findings` — list findings.
+- `GET  /cost` — scan cost breakdown by role (from the cost DB).
 - `POST /scan` — body `{"targets": ["..."], "config": {...}}`.
 - `POST /mark` — body `{"fingerprint": "...", "status": "paid",
   "paid_amount_usd": 50000}`.
@@ -255,10 +261,14 @@ Endpoints:
 ### Dashboard
 
 ```bash
-python -m web3guard.cli dashboard
+python -m web3guard.cli dashboard        # terminal view
+python -m web3guard.cli serve --port 8080
+# then open http://127.0.0.1:8080/ for the browser dashboard
 ```
 
-Shows total findings, paid-out totals, and recent activity.
+The terminal view shows totals and recent activity; the browser view
+adds a findings table with status updates, severity chips, and a
+scan-cost-by-role chart. Both read the same SQLite DB.
 
 ### Mark a finding's status
 

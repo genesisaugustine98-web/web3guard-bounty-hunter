@@ -75,6 +75,7 @@ class AIClient:
         *,
         providers: list[AIProvider],
         model: str = "deepseek-ai/deepseek-v4-flash-0731",
+        role_models: Mapping[str, str] | None = None,
         cost_tracker: CostTracker | None = None,
         cache_path: Path | None = None,
         injection_guard: PromptInjectionGuard | None = None,
@@ -86,6 +87,11 @@ class AIClient:
             raise ValueError("at least one AIProvider is required")
         self._providers = providers
         self._model = model
+        # v3.3: per-role model overrides. ``role`` flows through chat();
+        # a matching entry routes that call to a different model. The
+        # cache key already includes the model, so roles routed to
+        # different models never share cache entries.
+        self._role_models: dict[str, str] = dict(role_models or {})
         self._cost = cost_tracker or CostTracker()
         self._guard = injection_guard or PromptInjectionGuard()
         self._seed = default_seed
@@ -101,6 +107,13 @@ class AIClient:
 
     def set_model(self, model: str) -> None:
         self._model = model
+
+    def set_role_model(self, role: str, model: str) -> None:
+        """Set (or clear, with ``model=""``) a per-role model override."""
+        if model:
+            self._role_models[role] = model
+        else:
+            self._role_models.pop(role, None)
 
     def set_seed(self, seed: int | None) -> None:
         self._seed = seed
@@ -146,7 +159,7 @@ class AIClient:
             h.update(m.content.encode())
         return h.hexdigest()
 
-    def _cache_get(self, key: str) -> ChatResponse | None:
+    def _cache_get(self, key: str, *, model: str | None = None) -> ChatResponse | None:
         if self._cache_path is None:
             return None
         with closing(sqlite3.connect(str(self._cache_path))) as conn:
@@ -158,7 +171,7 @@ class AIClient:
             return None
         return ChatResponse(
             content=row[0],
-            model=self._model,
+            model=model or self._model,
             prompt_tokens=row[1],
             completion_tokens=row[2],
             total_tokens=row[1] + row[2],
@@ -223,10 +236,12 @@ class AIClient:
             ChatMessage(role="system", content=system),
             ChatMessage(role="user", content=user_quarantined),
         ]
+        # v3.3: resolve the model for this role (per-role override first).
+        model = self._role_models.get(role, self._model)
         # 3. Cache check
-        key = self._cache_key(messages, model=self._model, temperature=temperature,
+        key = self._cache_key(messages, model=model, temperature=temperature,
                               max_tokens=max_tokens, seed=self._seed)
-        cached = self._cache_get(key)
+        cached = self._cache_get(key, model=model)
         if cached is not None:
             LOGGER.info("cache hit: %s", key[:12])
             return cached
@@ -256,7 +271,7 @@ class AIClient:
                 try:
                     response = provider.chat(
                         messages,
-                        model=self._model,
+                        model=model,
                         max_tokens=max_tokens,
                         temperature=temperature,
                         seed=self._seed,
@@ -294,7 +309,7 @@ class AIClient:
                     # 6. Record cost
                     self._cost.record(
                         provider=provider.name,
-                        model=response.model or self._model,
+                        model=response.model or model,
                         prompt_tokens=response.prompt_tokens,
                         completion_tokens=response.completion_tokens,
                         role=role,

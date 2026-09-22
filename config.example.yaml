@@ -67,7 +67,24 @@ enable_attack_sequence_brainstorm: true
 enable_role_map: true
 enable_secret_scan: true
 enable_economic_analyzer: true
-enable_deployment_verification: false   # opt-in: needs chain RPC
+# Optional: verify the deployed bytecode matches the source tree via
+# chain RPC before scanning (catches stale/unverified deployments).
+# Requires compiled Forge artifacts (out/) or an on-chain target.
+enable_deployment_verification: false
+rpc_timeout_seconds: 15
+# rpc_urls:
+#   eth: "https://eth.llamarpc.com"
+#   base: "https://base.llamarpc.com"
+
+# Optional per-role model overrides (falls back to `model` above).
+# models:
+#   exploit: "deepseek-ai/deepseek-v4-flash-0731"
+#   analysis: "deepseek/deepseek-chat"
+
+# Dedicated diagnosis-first PoC repair rounds after the base
+# exploit attempts (0 disables). Adds extra attempts when the base
+# loop fails, with a stricter repair prompt.
+max_repair_attempts: 2
 
 # ----- Incremental scanning -----
 enable_incremental_scan: false          # remember findings across runs

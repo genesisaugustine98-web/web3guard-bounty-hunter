@@ -270,6 +270,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
     ],
     "model": "deepseek-ai/deepseek-v4-flash-0731",
+    "max_repair_attempts": 2,
     "max_cost_usd": 50.0,
     "default_seed": 0,
     "max_chunk_chars": 6000,
@@ -426,6 +427,17 @@ class Scanner:
                 continue
             max_retries = int(p.get("max_retries", 2))
             break
+        # Per-role model overrides (v3.3): ``models: {exploit: ...}`` in
+        # config routes that role to a different model. Falls back to
+        # the top-level ``model`` key. This keeps NIM model-ID churn a
+        # config edit instead of a code release.
+        models = self.config.get("models") or {}
+        default_model = str(self.config.get(
+            "model", "deepseek-ai/deepseek-v4-flash-0731"))
+        role_models = {
+            role: str(m) for role, m in models.items()
+            if isinstance(m, str) and m
+        } or None
         # Cost tracker with persistence
         cost_path = self.workdir / self.config.get("cost_db_path", ".web3guard/cost.db")
         cost_path.parent.mkdir(parents=True, exist_ok=True)
@@ -438,7 +450,8 @@ class Scanner:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         return AIClient(
             providers=providers,
-            model=str(self.config.get("model", "deepseek-ai/deepseek-v4-flash-0731")),
+            model=default_model,
+            role_models=role_models,
             cost_tracker=cost,
             cache_path=cache_path,
             injection_guard=self.injection_guard,
@@ -547,6 +560,19 @@ class Scanner:
             "build_tools": detection.build_tools,
             "confidence_notes": detection.confidence_notes,
         }
+        # Optional deployment verification (v3.3): fetch the deployed
+        # bytecode over chain RPC and compare with local build
+        # artifacts, so findings from a stale tree get flagged before
+        # budget is spent. Never fatal — degrades to "unknown".
+        if self.config.get("enable_deployment_verification", False):
+            try:
+                from web3guard.utils.deploy_verify import verify_target
+                vr = verify_target(target_path, target, self.config)
+                tr.metadata["deployment_verification"] = vr.to_metadata()
+                LOGGER.info("deployment verification: %s (%s)",
+                            vr.verdict, vr.detail)
+            except Exception as e:  # noqa: BLE001
+                LOGGER.warning("deployment verification failed: %s", e)
         if not adapters:
             tr.error = "no language adapter matched the target"
             return tr
@@ -909,11 +935,12 @@ class Scanner:
             return
         fork_hint = self._fork_hint() if self.config.get("fork_url") else ""
         max_attempts = int(self.config.get("max_exploit_attempts", 3))
+        repair_attempts = max(0, int(self.config.get("max_repair_attempts", 2)))
         template = adapter.exploit_user_template()
         system = self._build_exploit_system_prompt(adapter)
         last_err = ""
         previous_code = ""
-        for _attempt in range(1, max_attempts + 1):
+        for _attempt in range(1, max_attempts + repair_attempts + 1):
             try:
                 user = template.format(
                     category=finding.category,
@@ -926,7 +953,18 @@ class Scanner:
                     fork_hint=fork_hint,
                     oracle_hint="",
                 )
-                if previous_code and last_err:
+                if _attempt > max_attempts and previous_code and last_err:
+                    # Repair v2 (v3.3): dedicated repair rounds after the
+                    # base loop. The base loop already feeds failures
+                    # back; these rounds demand a root-cause diagnosis
+                    # first, forbid weakening the impact assertion, and
+                    # cap the failure-output tail so the model sees the
+                    # signal instead of noise.
+                    user += self._repair_prompt(
+                        previous_code, last_err,
+                        _attempt - max_attempts, repair_attempts,
+                    )
+                elif previous_code and last_err:
                     # Repair loop: feed the failing attempt back so the
                     # model fixes its own output instead of re-rolling an
                     # identical prompt (identical retries are a lottery,
@@ -944,7 +982,7 @@ class Scanner:
                     system,
                     user,
                     max_tokens=3500,
-                    temperature=0.3,
+                    temperature=0.3 if _attempt <= max_attempts else 0.5,
                     role="exploit",
                 )
             except Exception as e:  # noqa: BLE001
@@ -997,6 +1035,29 @@ class Scanner:
             last_err = out[-1500:]
         finding.status = f"POTENTIAL (PoC unconfirmed: {last_err[:200]})"
         finding.poc_code = code if 'code' in locals() else ""
+
+    @staticmethod
+    def _repair_prompt(previous_code: str, last_err: str,
+                       round_no: int, total_rounds: int) -> str:
+        """Diagnosis-first repair prompt for the v3.3 PoC repair loop."""
+        return (
+            f"\n\n---- REPAIR ROUND {round_no}/{total_rounds} ----\n"
+            "The previous attempt FAILED. Work like a debugger:\n"
+            "1. On the first line of your answer (outside the code block), "
+            "state the root cause of the failure in one sentence.\n"
+            "2. Then output the COMPLETE corrected test file.\n"
+            "Rules:\n"
+            "- Fix the reported failure; never weaken or remove the impact "
+            "assertion.\n"
+            "- If the same error repeats, change the approach instead of "
+            "repeating the fix.\n"
+            "- Keep imports and the test-runner's conventions intact.\n"
+            "\n---- PREVIOUS ATTEMPT (FAILED) ----\n"
+            f"{previous_code}\n"
+            "---- FAILURE OUTPUT (tail) ----\n"
+            f"{last_err[-2500:]}\n"
+            "---- END ----"
+        )
 
     @staticmethod
     def _fork_hint() -> str:
