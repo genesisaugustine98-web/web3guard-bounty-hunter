@@ -4,7 +4,7 @@
 
 If you find a security issue in **this scanner** (e.g., command injection
 via the `targets_config` input, prompt injection, sandbox escape), please
-email **agkoodanga@bugcrowsninja.com** (or contact on WhatsApp
+email **agkoodanga@gmail.com** (or contact on WhatsApp
 **+2349124352286**) with:
 
 - Description of the issue

@@ -279,8 +279,11 @@ def test_verify_match_via_artifacts(tmp_path):
     body = "6080" + "ab" * 40
     out = tmp_path / "out" / "A.sol"
     out.mkdir(parents=True)
+    # v3.4: Forge artifacts are read from deployedBytecode (runtime code,
+    # what eth_getCode returns) — comparing creation code misclassified
+    # every honest contract as divergent.
     (out / "A.json").write_text(json.dumps(
-        {"bytecode": {"object": body + "a264" + "ee" * 6}}))
+        {"deployedBytecode": {"object": body + "a264" + "ee" * 6}}))
     with mock.patch("web3guard.utils.deploy_verify.get_code",
                     return_value="0x" + body + "a264" + "ff" * 6):
         r = verify_target(tmp_path, addr, {})
@@ -292,11 +295,26 @@ def test_verify_divergent(tmp_path):
     out = tmp_path / "out" / "A.sol"
     out.mkdir(parents=True)
     (out / "A.json").write_text(json.dumps(
-        {"bytecode": {"object": "6080" + "ab" * 40}}))
+        {"deployedBytecode": {"object": "6080" + "ab" * 40}}))
     with mock.patch("web3guard.utils.deploy_verify.get_code",
                     return_value="0x" + "ff" * 42):
         r = verify_target(tmp_path, addr, {})
     assert r.verdict == "divergent"
+
+
+def test_verify_creation_code_is_not_runtime_evidence(tmp_path):
+    # v3.4: an artifact that only carries creation code (bytecode.object)
+    # must not satisfy the runtime comparison — a stale ``bytecode``-only
+    # fixture should degrade to "unknown", never "match".
+    addr = "0x" + "ab" * 20
+    out = tmp_path / "out" / "A.sol"
+    out.mkdir(parents=True)
+    (out / "A.json").write_text(json.dumps(
+        {"bytecode": {"object": "6080" + "ab" * 40}}))
+    with mock.patch("web3guard.utils.deploy_verify.get_code",
+                    return_value="0x" + "ab" * 40):
+        r = verify_target(tmp_path, addr, {})
+    assert r.verdict == "unknown"
 
 
 def test_verify_rpc_failure_degrades_to_unknown(tmp_path):
@@ -359,7 +377,10 @@ def test_dashboard_escapes_untrusted_strings():
 def _serve(workdir: Path, port: int):
     from web3guard.cli import _cmd_serve
 
-    args = mock.Mock(workdir=workdir, host="127.0.0.1", port=port)
+    # v3.4 hardening added bearer-token auth to mutating endpoints; the
+    # mock args must carry token=None (auth disabled) or a truthy Mock
+    # slips in and every POST 401s.
+    args = mock.Mock(workdir=workdir, host="127.0.0.1", port=port, token=None)
     t = threading.Thread(
         target=_cmd_serve, args=(args,), daemon=True)
     t.start()

@@ -226,6 +226,11 @@ class ScanJob:
     started: float = field(default_factory=time.time)
     cancelled: bool = False
     error: str | None = None
+    # v3.4: full-ops state — real cost + artifacts delivered to the chat.
+    cost_usd: float | None = None
+    findings_count: int = 0
+    confirmed_count: int = 0
+    report_dir: Path | None = None
 
     def progress_line(self) -> str:
         elapsed = time.time() - self.started
@@ -237,9 +242,54 @@ class ScanJob:
             idx = 0
         return " → ".join(bar_steps[: idx + 1]) + f"  ({elapsed:.0f}s)"
 
+    def metadata_path(self, severity: str) -> Path | None:
+        """The findings report file for ``severity`` from this job's scan.
+
+        v3.4 fixup: the severity-filter inline keyboard answers with
+        ``sev:<SEVERITY>``; this resolves the artifact to deliver —
+        the lowest severity bucket that covers ``severity`` (report
+        buckets are CRITICAL > HIGH > MEDIUM > LOW > INFO), read out
+        of the scan's own findings JSON. Returns ``None`` when the
+        scan produced no report or nothing at or above the severity.
+        """
+        if not self.report_dir:
+            return None
+        report = Path(self.report_dir) / "WEB3GUARD_FINDINGS.json"
+        if not report.is_file():
+            return None
+        try:
+            data = json.loads(report.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        order = ("INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL")
+        try:
+            floor = order.index(str(severity).upper())
+        except ValueError:
+            floor = 0
+        for sev in order[floor:]:
+            if any(
+                str(f.get("severity", "")).upper() == sev
+                for t in data.get("targets", [])
+                for f in t.get("findings", [])
+            ):
+                return report
+        return None
+
+
+_POC_SUFFIXES = {
+    "solidity": ".sol", "vyper": ".vy", "move": ".move", "cairo": ".cairo",
+    "clarity": ".clar", "func": ".fc", "rust-solana": ".rs", "ts-sdk": ".ts",
+}
+
 
 class TelegramBot:
-    """Long-polling Web3Guard console."""
+    """Long-polling Web3Guard operations console.
+
+    v3.4: full-pipeline scans run through the chat — AI analysis,
+    PoC generation, verification, dual-feed reports — with the
+    findings digest, the AI-drafted feed, the raw feed, and the PoC
+    files themselves all delivered back as chat documents.
+    """
 
     def __init__(
         self,
@@ -248,12 +298,16 @@ class TelegramBot:
         allowed_chats: set[int] | None = None,
         max_budget: int = 200_000,
         workdir: Path | None = None,
+        config_path: Path | None = None,
+        full_scan: bool = True,
     ) -> None:
         self.token = token
         self.allowed_chats = allowed_chats or set()
         self.max_budget = max_budget
         self.workdir = workdir or Path(tempfile.mkdtemp(prefix="web3guard-tg-"))
         self.workdir.mkdir(parents=True, exist_ok=True)
+        self.config_path = config_path
+        self.full_scan_default = full_scan
         self._jobs: dict[int, ScanJob] = {}
         self._recent: dict[int, deque[float]] = defaultdict(lambda: deque(maxlen=5))
         self._lock = threading.Lock()
@@ -318,6 +372,8 @@ class TelegramBot:
             self._cmd_cost(chat_id)
         elif cmd == "/cancel":
             self._cmd_cancel(chat_id)
+        elif cmd == "/report":
+            self._cmd_report(chat_id)
         elif cmd == "/languages":
             self._send(self._languages_text(), chat_id)
         else:
@@ -392,10 +448,13 @@ class TelegramBot:
         if not job:
             self._send("No scans yet in this session — $0.00 spent. 🎉", chat_id)
             return
-        cost = getattr(job, "cost_usd", None)
+        cost = job.cost_usd
+        if cost is None:
+            self._send("Scan still running — cost lands when the report does.", chat_id)
+            return
         self._send(
-            f"Session spend: ${cost:.4f}" if cost is not None
-            else "Scan still running — cost lands when the report does.", chat_id)
+            f"Session spend: ${cost:.4f} · findings: {job.findings_count} "
+            f"(confirmed: {job.confirmed_count})", chat_id)
 
     def _cmd_cancel(self, chat_id: int) -> None:
         job = self._jobs.get(chat_id)
@@ -404,6 +463,30 @@ class TelegramBot:
             self._send("Cancellation noted — the current scan will stop at the next stage.", chat_id)
         else:
             self._send("Nothing running for this chat.", chat_id)
+
+    def _cmd_report(self, chat_id: int) -> None:
+        """Re-send the artifacts (raw feed, drafted feed, reports) of the
+        last scan in this chat — useful after a Telegram hiccup."""
+        job = self._jobs.get(chat_id)
+        out_dir = job.report_dir if job else None
+        if not out_dir or not Path(out_dir).is_dir():
+            self._send("No stored report for this chat yet. Run /scan first.", chat_id)
+            return
+        sent = 0
+        for name, caption in (
+            ("raw_findings.json", "Raw findings feed (machine-readable)"),
+            ("ai_drafted_feed.md", "AI-drafted submission feed"),
+            ("WEB3GUARD_EXPLOIT_REPORT.txt", "Full report (text)"),
+        ):
+            path = Path(out_dir) / name
+            if path.is_file():
+                try:
+                    send_document(self.token, chat_id, path, caption)
+                    sent += 1
+                except TelegramError as e:
+                    LOGGER.debug("report re-send failed: %s", e)
+        if not sent:
+            self._send("Report directory exists but holds no artifacts.", chat_id)
 
     # -- document uploads ---------------------------------------------------
 
@@ -494,15 +577,13 @@ class TelegramBot:
                 self._send(f"❌ Could not fetch target: {html.escape(str(e))}", job.chat_id)
                 return
             self._progress(job, "discovery", note=f"local dir: {Path(target_dir).name}")
-            findings_count = self._run_offline_pass(job, Path(target_dir))
             if job.discovery_only:
+                findings_count = self._run_offline_pass(job, Path(target_dir))
                 self._progress(job, "report")
                 self._send(f"✅ Discovery-only scan complete — {findings_count} finding(s).", job.chat_id)
                 return
-            self._progress(job, "ai")
-            self._progress(job, "poc")
-            self._progress(job, "report")
-            self._send("✅ Scan complete. Full report above.", job.chat_id)
+            self._progress(job, "ai", note="full pipeline: analysis → PoC → verification")
+            self._run_full_scan(job, Path(target_dir))
         except ScanCancelled:
             self._send("🛑 Scan cancelled.", job.chat_id)
         except Exception as e:  # noqa: BLE001
@@ -510,30 +591,132 @@ class TelegramBot:
             job.error = str(e)
             self._send(f"❌ Scan failed: {html.escape(str(e))}", job.chat_id)
 
+    def _build_scanner_config(self, *, full: bool) -> dict:
+        """Config for bot-driven scans.
+
+        Full scans run the entire pipeline (AI analysis, PoC generation,
+        verification ensemble, dual feed). Discovery-only scans stay
+        offline. Both write the dual feed so the chat gets the same two
+        artifacts CI gets.
+        """
+        cfg: dict = {
+            "enable_discovery": True,
+            "enable_secret_scan": True,
+            "enable_exploit": False,
+            "enable_self_critique": False,
+        }
+        if full:
+            cfg.update({
+                "enable_ai_analysis": True,
+                "enable_exploit": True,
+                "enable_self_critique": True,
+                "enable_verification_ensemble": True,
+            })
+        else:
+            cfg["enable_ai_analysis"] = False
+        return cfg
+
+    def _run_full_scan(self, job: ScanJob, target_dir: Path) -> None:
+        """Run the full pipeline and deliver every artifact to the chat."""
+        from web3guard.scanner import Scanner
+
+        cfg = self._build_scanner_config(full=True)
+        scanner = Scanner(config=cfg, workdir=self.workdir)
+        result = scanner.scan([f"{target_dir}|{job.budget}"])
+        findings = list(result.all_findings)
+        job.findings_count = len(findings)
+        job.confirmed_count = len(result.confirmed_findings)
+        cost = result.cost_summary or {}
+        job.cost_usd = float(cost.get("total_cost_usd", 0.0))
+
+        self._progress(job, "poc", note=f"{len(findings)} finding(s), "
+                                        f"{job.confirmed_count} confirmed")
+        self._progress(job, "report")
+
+        # 1. HTML digest message (fast, always arrives).
+        text = render_findings_html(findings, target=job.target)
+        for chunk in split_for_telegram(text):
+            self._send(chunk, job.chat_id)
+
+        # 2. Dual feed + reports as documents.
+        out_dir = self.workdir / f"report-{int(time.time())}"
+        job.report_dir = out_dir
+        try:
+            written = scanner.build_report(
+                result, formats=("json", "txt"), out_dir=out_dir)
+            raw = out_dir / "raw_findings.json"
+            draft = out_dir / "ai_drafted_feed.md"
+            if raw.is_file():
+                send_document(self.token, job.chat_id, raw,
+                              caption="Raw findings feed (machine-readable)")
+            if draft.is_file():
+                send_document(self.token, job.chat_id, draft,
+                              caption="AI-drafted submission feed")
+            txt = written.get("txt")
+            if txt and Path(txt).is_file():
+                send_document(self.token, job.chat_id, Path(txt),
+                              caption="Full report (text)")
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("report delivery failed", exc_info=True)
+
+        # 3. Confirmed PoCs as source files, one document each.
+        self._deliver_pocs(job, findings)
+
+        self._send(
+            f"✅ Full scan complete — {len(findings)} finding(s), "
+            f"{job.confirmed_count} confirmed exploit(s). "
+            f"Cost: ${job.cost_usd:.4f}", job.chat_id)
+
+    def _deliver_pocs(self, job: ScanJob, findings: list) -> None:
+        """Send confirmed PoC files as chat documents (capped)."""
+        sent = 0
+        for f in findings:
+            if sent >= 10:
+                self._send("… further PoCs are in the report directory.", job.chat_id)
+                break
+            poc = str(getattr(f, "poc_code", "") or "")
+            if not poc.strip():
+                continue
+            status = str(getattr(f, "status", ""))
+            lang = str(getattr(f, "language", "solidity"))
+            suffix = _POC_SUFFIXES.get(lang, ".txt")
+            fp = str(getattr(f, "fingerprint", "poc") or "poc")[:12]
+            name = f"poc_{fp}{suffix}"
+            poc_dir = self.workdir / f"pocs-{int(time.time())}"
+            poc_dir.mkdir(parents=True, exist_ok=True)
+            poc_path = poc_dir / name
+            try:
+                poc_path.write_text(poc, encoding="utf-8")
+            except OSError:
+                continue
+            caption = f"PoC [{status}] {getattr(f, 'category', '')}"[:200]
+            try:
+                send_document(self.token, job.chat_id, poc_path, caption)
+                sent += 1
+            except TelegramError as e:
+                LOGGER.debug("poc delivery failed: %s", e)
+                break
+
     def _run_offline_pass(self, job: ScanJob, target_dir: Path) -> int:
         """Run the offline discovery/static pass and post the findings."""
 
         from web3guard.scanner import Scanner
 
-        cfg = {
-            "enable_ai_analysis": False,
-            "enable_discovery": True,
-            "enable_exploit": False,
-            "enable_secret_scan": True,
-        }
+        cfg = self._build_scanner_config(full=False)
         try:
             scanner = Scanner(config=cfg, workdir=self.workdir, zero_dollar=True)
         except TypeError:
             scanner = Scanner(config=cfg, workdir=self.workdir)
         result = scanner.scan([f"{target_dir}|{job.budget}"])
         findings = list(result.all_findings)
+        job.findings_count = len(findings)
         text = render_findings_html(findings, target=job.target)
         for chunk in split_for_telegram(text):
             self._send(chunk, job.chat_id)
         out_dir = self.workdir / f"report-{int(time.time())}"
         try:
             scanner.build_report(result, formats=("json", "txt"), out_dir=out_dir)
-            job._last_report_dir = out_dir
+            job.report_dir = out_dir
         except Exception:  # noqa: BLE001
             LOGGER.debug("report write failed", exc_info=True)
         return len(findings)
@@ -561,18 +744,25 @@ class TelegramBot:
         return (
             "🛡 <b>Web3Guard — autonomous exploit hunter</b>\n\n"
             "<b>Scan anything:</b>\n"
-            "• <code>/scan https://github.com/owner/repo</code> — any git host\n"
+            "• <code>/scan https://github.com/owner/repo</code> — any git host (FULL pipeline)\n"
             "• <code>/scan 0xabc…</code> — verified on-chain contract (11 chains)\n"
-            "• <code>/scan https://…/audit-target.zip</code> — archive or raw file\n"
-            "• <code>/scan ipfs://CID</code> — IPFS-published source\n"
+            "• <code>/scan ipfs:&lt;CID&gt;</code> — IPFS gateway source\n"
+            "• <code>/quick &lt;target&gt;</code> — discovery-only, no LLM, instant\n"
             "• upload a <code>.sol</code>/<code>.zip</code> file directly\n\n"
+            "<b>What you get back:</b>\n"
+            "• live progress through the pipeline stages\n"
+            "• HTML findings digest in the chat\n"
+            "• <code>raw_findings.json</code> (machine feed) as a document\n"
+            "• <code>ai_drafted_feed.md</code> (submission drafts) as a document\n"
+            "• confirmed PoC source files, one document each\n\n"
             "<b>Commands:</b>\n"
-            "/quick — discovery-only, no LLM, instant\n"
             "/status — this chat's last scan\n"
-            "/cost — session spend (free tier: $0)\n"
+            "/cost — session spend\n"
+            "/report — re-send the last scan's artifacts\n"
             "/cancel — stop the running scan\n"
-            "/languages — 21+ supported languages\n\n"
-            "🆓 Zero-dollar: free-tier LLMs, free Blockscout, no API keys."
+            "/languages — supported languages\n\n"
+            "🆓 Zero-dollar: free-tier LLMs, free Blockscout, no API keys.\n"
+            "⚠️ Scan only what you're authorized to (see SECURITY.md)."
         )
 
     def _languages_text(self) -> str:
@@ -685,7 +875,10 @@ def main(argv: list[str] | None = None) -> int:
     max_budget = int(os.environ.get("WEB3GUARD_MAX_BUDGET", "200000"))
 
     bot = TelegramBot(token, allowed_chats=allowed, max_budget=max_budget,
-                      workdir=args.workdir)
+                      workdir=args.workdir,
+                      config_path=(Path(os.environ["WEB3GUARD_CONFIG"])
+                                   if os.environ.get("WEB3GUARD_CONFIG") else None),
+                      full_scan=os.environ.get("WEB3GUARD_TG_QUICK_ONLY", "") != "1")
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     if args.once:

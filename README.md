@@ -431,7 +431,7 @@ See [SECURITY.md](SECURITY.md). The short version:
 
 ## Contact
 
-Developer: agkoodanga@bugcrowsninja.com · WhatsApp +2349124352286
+Developer: AG Koodanga · agkoodanga@gmail.com · WhatsApp +2349124352286
 
 ## License
 

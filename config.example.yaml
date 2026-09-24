@@ -77,9 +77,34 @@ rpc_timeout_seconds: 15
 #   base: "https://base.llamarpc.com"
 
 # Optional per-role model overrides (falls back to `model` above).
+# The 'ensemble' role is the v3.4 verification ensemble's second-opinion
+# model — point it at a DIFFERENT model family than `analysis` for a
+# genuinely independent check (multi-model false-positive suppression).
 # models:
 #   exploit: "deepseek-ai/deepseek-v4-flash-0731"
 #   analysis: "deepseek/deepseek-chat"
+#   ensemble: "meta/llama-3.3-70b-instruct"
+
+# ----- v3.4 verification ensemble (false-positive suppression) -----
+# A second model cross-examines every AI finding (uphold / downgrade /
+# overturn) before it reaches a report or a bounty queue. Runtime-
+# confirmed findings are skipped: a working PoC beats an opinion.
+enable_verification_ensemble: true
+ensemble_min_severity: MEDIUM        # review MEDIUM and above
+ensemble_max_findings: 32           # per-target cap on ensemble calls
+
+# ----- v3.4 authorized-scope enforcement (legal batch scanning) -----
+# When true, every target must be covered by `allow:` (your own
+# targets, or an approved bounty program) BEFORE any fetch. This is
+# what makes fleet-scale / ecosystem batch scanning legal by default:
+# scale comes from batch mode, not from skipping authorization.
+require_authorized_scope: false
+allow: []                            # e.g. ["github.com/acme", "acme.fi", "0xabc..."]
+
+# ----- v3.4 fleet capacity -----
+# `web3guard scan --targets-file batch.txt --parallel 4` scans many
+# authorized targets concurrently; disk preflight and retry policy
+# (web3guard/utils/resilience.py) keep long runs alive.
 
 # Dedicated diagnosis-first PoC repair rounds after the base
 # exploit attempts (0 disables). Adds extra attempts when the base

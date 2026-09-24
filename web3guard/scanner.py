@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from web3guard.ai import AIClient, AIProvider, CostTracker, OpenAICompatibleProvider
+from web3guard.ai.cost import CostCeilingExceeded
 from web3guard.findings_db import FindingRecord, FindingsDB
 from web3guard.languages import (
     LanguageAdapter,
@@ -61,6 +62,8 @@ from web3guard.security import (
     SandboxGuard,
     SandboxPolicy,
 )
+from web3guard.utils.bounty import ScopeAllowlist, ScopeDenied
+from web3guard.utils.resilience import disk_ok_or_raise
 from web3guard.utils.secrets import scan_path
 from web3guard.utils.vuln_catalog import get_catalog
 
@@ -381,8 +384,25 @@ class Scanner:
         self.findings_db = findings_db or FindingsDB(
             findings_path
         )
-        self.sandbox_guard = sandbox_guard or SandboxGuard(SandboxPolicy())
-        self.injection_guard = injection_guard or PromptInjectionGuard()
+        self.sandbox_guard = sandbox_guard or SandboxGuard(
+            SandboxPolicy.from_config(config))
+        # v3.4: honor the documented ``security.prompt_injection`` block.
+        sec_cfg = config.get("security") or {}
+        pi_cfg = sec_cfg.get("prompt_injection") if isinstance(sec_cfg, dict) else None
+        reject_threshold = None
+        if isinstance(pi_cfg, dict):
+            try:
+                candidate = int(pi_cfg.get("reject_threshold", 0) or 0)
+                if candidate > 0:
+                    reject_threshold = candidate
+            except (TypeError, ValueError):
+                LOGGER.warning("security.prompt_injection.reject_threshold is "
+                               "not an int; keeping default")
+        if reject_threshold is not None:
+            self.injection_guard = injection_guard or PromptInjectionGuard(
+                reject_threshold=reject_threshold)
+        else:
+            self.injection_guard = injection_guard or PromptInjectionGuard()
         self.ai_client = ai_client or self._build_ai_client()
         # Track run state
         self._start_ts: str = ""
@@ -472,6 +492,12 @@ class Scanner:
         Each target is a string of the form ``"<git-url>|<budget>"``,
         matching the original scanner's CLI grammar. ``<budget>`` is
         a number (token budget per chunk) or ``"max"`` for unlimited.
+
+        v3.4: every target passes the authorized-scope gate
+        (``allow:`` config + program scope; see
+        :mod:`web3guard.utils.bounty`) when
+        ``require_authorized_scope`` is enabled. Targets that fail
+        the gate are recorded as denied, never fetched.
         """
         self._start_ts = datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z")
         parsed = self._parse_targets(targets)
@@ -481,17 +507,64 @@ class Scanner:
             config=self._sanitize_config(),
         )
         for url, budget in parsed:
+            # v3.4 authorized-scope gate: refuse before any fetch.
+            if self.config.get("require_authorized_scope", False):
+                scope = ScopeAllowlist(
+                    self.config.get("allow") or [],
+                    require_authorized_scope=True,
+                    cache_dir=self.workdir / ".web3guard",
+                )
+                try:
+                    scope.require(url)
+                except ScopeDenied as e:
+                    LOGGER.warning("target denied by scope policy: %s", e)
+                    tr = TargetResult(
+                        target=url, language=TargetLanguage.UNKNOWN,
+                        error=f"scope denied: {e}",
+                    )
+                    tr.metadata["scope_denied"] = True
+                    result.targets.append(tr)
+                    continue
+            # v3.4 resilience: disk preflight before each target so a
+            # long batch degrades to a clean abort (prior results kept)
+            # instead of dying halfway with a cryptic ENOSPC.
+            try:
+                disk_ok_or_raise(self.workdir)
+            except RuntimeError as e:
+                result.metadata["disk_abort"] = str(e)
+                LOGGER.warning("disk floor reached, aborting batch: %s", e)
+                break
             LOGGER.info("scanning target: %s (budget=%s)", url, budget)
             t0 = time.monotonic()
-            tr = self._scan_one(url, budget, min_severity=min_severity)
+            try:
+                tr = self._scan_one(url, budget, min_severity=min_severity)
+            except CostCeilingExceeded as e:
+                # Graceful ceiling abort: keep every target and finding
+                # discovered before the ceiling tripped instead of
+                # throwing the whole scan away. Matches SECURITY.md's
+                # "aborts cleanly" promise.
+                LOGGER.warning("cost ceiling reached: %s", e)
+                result.metadata["cost_ceiling"] = str(e)
+                tr = TargetResult(
+                    target=url, language=TargetLanguage.UNKNOWN,
+                    error=f"aborted: cost ceiling exceeded ({e})",
+                )
+                tr.elapsed_seconds = time.monotonic() - t0
+                result.targets.append(tr)
+                break  # spending must stop; keep prior targets' results
             tr.elapsed_seconds = time.monotonic() - t0
             # Persist findings
             for f in tr.findings:
                 self.findings_db.upsert(FindingRecord.from_finding(f))
             result.targets.append(tr)
             if self.config.get("enable_dependency_scan", False):
-                dep_trs = self._scan_dependencies(
-                    url, budget, min_severity=min_severity)
+                try:
+                    dep_trs = self._scan_dependencies(
+                        url, budget, min_severity=min_severity)
+                except CostCeilingExceeded as e:
+                    LOGGER.warning("cost ceiling reached in dependency pass: %s", e)
+                    result.metadata["cost_ceiling"] = str(e)
+                    dep_trs = []
                 for dep_tr in dep_trs:
                     for f in dep_tr.findings:
                         self.findings_db.upsert(FindingRecord.from_finding(f))
@@ -666,6 +739,34 @@ class Scanner:
         # precision lever for hybrid scanners (GPTScan-style candidate
         # corroboration) — without it the two signal sources never meet.
         self._apply_consensus(tr.findings)
+        # v3.4 verification ensemble: a second model cross-examines the
+        # surviving findings to suppress false positives before anything
+        # reaches a report or a bounty queue. Runtime-confirmed findings
+        # are skipped (the PoC is stronger evidence than an opinion).
+        if (self.config.get("enable_verification_ensemble", True)
+                and self.config.get("enable_ai_analysis", True)
+                and tr.findings):
+            try:
+                from web3guard.ai.verification import VerificationEnsemble
+                ensemble = VerificationEnsemble(
+                    self.ai_client,
+                    min_severity=self.config.get("ensemble_min_severity", "MEDIUM"),
+                    max_findings=int(self.config.get("ensemble_max_findings", 32)),
+                )
+
+                def _code_of(finding: Finding) -> str:
+                    candidate = target_path / str(finding.file)
+                    path = candidate if candidate.is_file() else Path(str(finding.file))
+                    try:
+                        return path.read_text(errors="ignore")
+                    except OSError:
+                        return ""
+
+                reviewed = ensemble.apply(list(tr.findings), _code_of)
+                if reviewed:
+                    tr.metadata["ensemble_reviewed"] = reviewed
+            except Exception as e:  # noqa: BLE001
+                LOGGER.warning("verification ensemble failed: %s", e)
         # Sort findings by severity then confidence.
         severity_order = {"INFO": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
         tr.findings.sort(
@@ -1620,7 +1721,22 @@ class Scanner:
         formats: Sequence[str] | None = None,
         out_dir: Path | None = None,
     ) -> dict[str, Path]:
-        """Build a multi-format report. Returns ``{format: path}``."""
+        """Build a multi-format report. Returns ``{format: path}``.
+
+        v3.4: always writes the dual feed alongside the requested
+        formats — ``raw_findings.json`` (machine-readable findings,
+        exploit evidence, reproduction data — for the GitHub Actions
+        board) and ``ai_drafted_feed.md`` (human-readable AI-drafted
+        submission drafts — for the Telegram/digest side).
+        """
         fmt_list = list(formats or self.config.get("report_formats", ["txt", "json", "sarif", "md"]))
         builder = ReportBuilder(result, findings_db=self.findings_db)
-        return builder.write(out_dir or self.workdir, formats=fmt_list)
+        written = builder.write(out_dir or self.workdir, formats=fmt_list)
+        try:
+            from web3guard.reports.dual_feed import write_dual_feed
+            feed_dir = out_dir or (self.workdir / "reports")
+            feeds = write_dual_feed(result, feed_dir)
+            written.update(feeds)
+        except Exception as e:  # noqa: BLE001
+            LOGGER.warning("dual-feed write failed: %s", e)
+        return written

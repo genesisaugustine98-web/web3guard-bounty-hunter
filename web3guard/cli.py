@@ -20,7 +20,9 @@ import argparse
 import dataclasses
 import json
 import logging
+import os
 import sys
+import threading
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -90,6 +92,13 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Discover and scan the target's declared git "
                            "dependencies (submodules, npm git deps, Cargo / "
                            "Scarb git deps)")
+    scan.add_argument("--targets-file", type=Path, default=None,
+                      help="File with one target per line (same grammar as "
+                           "the positional targets; '#' comments allowed). "
+                           "Use for authorized batch/ fleet scanning.")
+    scan.add_argument("--parallel", type=int, default=1,
+                      help="Scan up to N targets concurrently (default 1). "
+                           "LLM rate limits still bound real throughput.")
 
     # ---- dashboard ------------------------------------------------------
     dash = sub.add_parser("dashboard", help="Show submission-history dashboard")
@@ -126,6 +135,24 @@ def build_parser() -> argparse.ArgumentParser:
     serve = sub.add_parser("serve", help="Run an HTTP server exposing scan endpoints")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8080)
+    serve.add_argument("--token", default=None,
+                       help="Require this bearer token on mutating endpoints "
+                            "(POST /scan, POST /mark). Also: WEB3GUARD_SERVE_TOKEN.")
+
+    # ---- bounties -------------------------------------------------------
+    bount = sub.add_parser(
+        "bounties", help="Discover public bug-bounty programs (free sources)")
+    bount.add_argument("--min-reward", type=float, default=0.0,
+                       help="Only show programs with max bounty >= this USD amount")
+    bount.add_argument("--json", action="store_true", dest="as_json",
+                       help="Emit JSON instead of a table")
+    bount.add_argument("--refresh", action="store_true",
+                       help="Refresh the program cache from the live source")
+
+    # ---- scope -----------------------------------------------------------
+    scope_p = sub.add_parser(
+        "scope", help="Check whether a target is inside the authorized scope")
+    scope_p.add_argument("target", help="Target string to check")
 
     # ---- price ----------------------------------------------------------
     sub.add_parser("price", help="Show the cost-pricing model")
@@ -235,6 +262,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_calibrate(args)
     if args.command == "scan":
         return _cmd_scan(args)
+    if args.command == "bounties":
+        return _cmd_bounties(args)
+    if args.command == "scope":
+        return _cmd_scope(args)
     parser.print_help()
     return 1
 
@@ -270,8 +301,80 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         cfg["default_seed"] = args.seed
     if args.scan_dependencies:
         cfg["enable_dependency_scan"] = True
+
+    # v3.4 batch mode: merge --targets-file lines into the target list.
+    targets = list(args.targets)
+    if args.targets_file is not None:
+        try:
+            lines = args.targets_file.read_text(encoding="utf-8").splitlines()
+        except OSError as e:
+            print(f"error: cannot read targets file: {e}", file=sys.stderr)
+            return 2
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            targets.append(line)
+    if not targets:
+        print("error: no targets given (positional or --targets-file)", file=sys.stderr)
+        return 2
+
+    parallel = max(1, int(args.parallel or 1))
     scanner = Scanner(config=cfg, workdir=args.workdir)
-    result = scanner.scan(args.targets, min_severity=args.min_severity)
+    if parallel > 1 and len(targets) > 1:
+        # Parallel fleet mode. Scanner instances are cheap; the LLM cache
+        # DB and findings DB are both SQLite-safe for concurrent writers.
+        # Rate limits bound real throughput; this mainly overlaps fetch /
+        # discovery / sandbox wall-clock with LLM waiting.
+        from concurrent.futures import ThreadPoolExecutor
+
+        # v3.4 resilience: one disk preflight before dispatching the
+        # fleet (per-chunk checks happen inside the scanner loop).
+        from web3guard.utils.resilience import disk_ok_or_raise
+        disk_ok_or_raise(args.workdir)
+
+        def _scan_subset(subset: list[str]) -> Any:
+            sub_scanner = Scanner(config=cfg, workdir=args.workdir)
+            return sub_scanner.scan(subset, min_severity=args.min_severity)
+
+        chunks = [targets[i::parallel] for i in range(parallel)]
+        chunks = [c for c in chunks if c]
+        results: list[Any] = []
+        errors: list[str] = []
+        with ThreadPoolExecutor(max_workers=len(chunks)) as pool:
+            futures = [pool.submit(_scan_subset, c) for c in chunks]
+            for i, fut in enumerate(futures):
+                try:
+                    results.append(fut.result())
+                except Exception as e:  # noqa: BLE001
+                    # v3.4 resilience: one chunk's crash must not lose
+                    # the other chunks' completed work.
+                    LOGGER.error("batch chunk %d failed: %s", i, e)
+                    errors.append(f"chunk {i}: {e}")
+        merged_targets = [t for r in results for t in r.targets]
+        from web3guard.scanner import ScanResult
+        result = ScanResult(
+            started_at=min((r.started_at for r in results), default=""),
+            finished_at=max((r.finished_at for r in results), default=""),
+            config=results[0].config if results else {},
+        )
+        result.targets = merged_targets
+        cost = {"total_cost_usd": 0.0, "calls": 0}
+        for r in results:
+            c = r.cost_summary or {}
+            cost["total_cost_usd"] += float(c.get("total_cost_usd", 0))
+            cost["calls"] += int(c.get("calls", 0))
+        result.cost_summary = cost
+        # v3.4 fixup: propagate per-chunk scan metadata (cost_ceiling,
+        # disk_abort, ...) — previously dropped by the merge.
+        for r in results:
+            for key, value in (r.metadata or {}).items():
+                result.metadata.setdefault(key, value)
+        if errors:
+            result.metadata["batch_chunk_errors"] = errors
+    else:
+        result = scanner.scan(targets, min_severity=args.min_severity)
+
     out_dir = args.out or (args.workdir / "reports")
     written = scanner.build_report(
         result,
@@ -284,9 +387,21 @@ def _cmd_scan(args: argparse.Namespace) -> int:
           f"({len(result.confirmed_findings)} confirmed)")
     cost = result.cost_summary or {}
     print(f"Cost: ${cost.get('total_cost_usd', 0):.4f}")
+    if result.metadata.get("cost_ceiling"):
+        print("Note: scan stopped early — cost ceiling reached. "
+              "Partial results were kept.")
+    if result.metadata.get("disk_abort"):
+        print("Note: scan stopped early — disk floor reached. "
+              "Partial results were kept.")
+    for chunk_err in result.metadata.get("batch_chunk_errors", []):
+        print(f"Note: {chunk_err} — other chunks completed and were kept.")
     print("Reports written:")
     for fmt, path in written.items():
         print(f"  - {fmt}: {path}")
+    denied = [t for t in result.targets if t.metadata.get("scope_denied")]
+    if denied:
+        print(f"Scope-denied targets (not scanned): {len(denied)} — "
+              "see config 'allow:' / 'require_authorized_scope'.")
     return 0
 
 
@@ -441,6 +556,55 @@ def _cmd_calibrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_bounties(args: argparse.Namespace) -> int:
+    """Discover public bug-bounty programs (free, keyless sources)."""
+    from web3guard.utils.bounty import ScopeAllowlist
+
+    wl = ScopeAllowlist([], require_authorized_scope=False,
+                        cache_dir=args.workdir / ".web3guard")
+    if args.refresh:
+        wl.programs(refresh=True)
+    programs = wl.discover_bounties(min_reward_usd=args.min_reward)
+    if args.as_json:
+        print(json.dumps(programs, indent=2))
+        return 0
+    if not programs:
+        print("No programs found (live fetch unavailable; static list empty).")
+        return 0
+    print(f"{'PROGRAM':<44.44} {'MAX BOUNTY':>12}  {'ASSETS':<18.18} URL")
+    for p in programs:
+        # discover_bounties returns dict cards (see BountyProgram.to_dict).
+        reward = f"${p['max_bounty_usd']:,.0f}" if p["max_bounty_usd"] else "-"
+        assets = ", ".join(p["asset_types"][:2]) or "-"
+        print(f"{p['name']:<44.44} {reward:>12}  {assets:<18.18} {p['url']}")
+    print(f"\n{len(programs)} program(s). Add program names or your own "
+          "targets to config 'allow:' to authorize scanning.")
+    return 0
+
+
+def _cmd_scope(args: argparse.Namespace) -> int:
+    """Check whether a target is inside the operator's authorized scope."""
+    from web3guard.utils.bounty import ScopeAllowlist
+
+    cfg = load_config(args.config)
+    wl = ScopeAllowlist(
+        cfg.get("allow") or [],
+        require_authorized_scope=bool(cfg.get("require_authorized_scope", False)),
+        cache_dir=args.workdir / ".web3guard",
+    )
+    if wl.is_authorized(args.target):
+        routes = wl.routes_for(args.target)
+        print(f"AUTHORIZED: {args.target}")
+        for p in routes:
+            print(f"  program: {p.name} ({p.url})")
+        return 0
+    print(f"DENIED: {args.target} is not in the authorized scope.")
+    print("Add it to config 'allow:' (your own targets / approved program "
+          "name), or set require_authorized_scope: false if you accept "
+          "the legal responsibility.")
+    return 1
+
+
 def _cmd_dashboard(args: argparse.Namespace) -> int:
     db_path = args.db or (args.workdir / ".web3guard/findings.db")
     db = FindingsDB(db_path)
@@ -527,6 +691,19 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     db = FindingsDB(args.workdir / ".web3guard/findings.db")
     cost_db_path = args.workdir / ".web3guard/cost.db"
 
+    # v3.4 hardening: optional bearer-token auth on mutating endpoints,
+    # a request-body cap, and a one-scan-at-a-time semaphore so five
+    # concurrent POST /scan calls cannot multiply the LLM bill.
+    token = args.token or os.environ.get("WEB3GUARD_SERVE_TOKEN", "")
+    max_body = 1 * 1024 * 1024  # 1 MiB is far beyond any legit payload
+    scan_slots = threading.Semaphore(1)
+
+    def _authorized(req) -> bool:
+        if not token:
+            return True  # auth disabled (loopback default; operator opted out)
+        header = req.headers.get("Authorization", "")
+        return header == f"Bearer {token}"
+
     def _cost_summary() -> dict[str, Any]:
         """Per-role cost rollup straight from the cost SQLite DB.
 
@@ -587,8 +764,14 @@ def _cmd_serve(args: argparse.Namespace) -> int:
                 self._json({"error": "not found"}, status=404)
 
         def do_POST(self):  # noqa: N802
+            if not _authorized(self):
+                self._json({"error": "unauthorized"}, status=401)
+                return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
+                if length > max_body:
+                    self._json({"error": "body too large"}, status=413)
+                    return
                 body = self.rfile.read(length).decode("utf-8")
                 payload = json.loads(body) if body else {}
             except Exception as e:  # noqa: BLE001
@@ -607,12 +790,16 @@ def _cmd_serve(args: argparse.Namespace) -> int:
                 )
                 self._json({"ok": True})
             elif parsed.path == "/scan":
-                # Deep-merge the payload config over the file config so a
-                # partial payload can never leave the Scanner with a
-                # missing ai_providers / invalid schema.
-                base_cfg = load_config(args.workdir / "config.yaml")
-                cfg = _deep_merge(base_cfg, payload.get("config") or {})
+                if not scan_slots.acquire(blocking=False):
+                    self._json({"error": "a scan is already running; retry later"},
+                               status=429)
+                    return
                 try:
+                    # Deep-merge the payload config over the file config so a
+                    # partial payload can never leave the Scanner with a
+                    # missing ai_providers / invalid schema.
+                    base_cfg = load_config(args.workdir / "config.yaml")
+                    cfg = _deep_merge(base_cfg, payload.get("config") or {})
                     scanner = Scanner(config=cfg, workdir=args.workdir)
                     result = scanner.scan(payload.get("targets", []))
                     written = scanner.build_report(result, out_dir=args.workdir / "reports")
@@ -625,6 +812,8 @@ def _cmd_serve(args: argparse.Namespace) -> int:
                 except Exception as e:  # noqa: BLE001
                     LOGGER.exception("scan request failed")
                     self._json({"error": f"scan failed: {e}"}, status=500)
+                finally:
+                    scan_slots.release()
             else:
                 self._json({"error": "not found"}, status=404)
 

@@ -22,6 +22,15 @@ from pathlib import Path
 
 LOGGER = logging.getLogger("web3guard.ai.cost")
 
+
+class CostCeilingExceeded(RuntimeError):
+    """Raised when a scan's accumulated LLM cost crosses ``max_cost_usd``.
+
+    The scanner catches this and returns partial results instead of
+    crashing, so findings discovered before the ceiling still land in
+    the report and DB.
+    """
+
 # ---------------------------------------------------------------------------
 # Default pricing (USD per 1M tokens, June 2026 rates).
 # Override per-model via the ``model_pricing`` config key.
@@ -151,7 +160,7 @@ class CostTracker:
                 conn.commit()
         total = self.total_cost()
         if total > self._max_cost_usd:
-            raise RuntimeError(
+            raise CostCeilingExceeded(
                 f"cost ceiling exceeded: ${total:.4f} > ${self._max_cost_usd:.4f} "
                 f"(raise max_cost_usd in config or set it to 0 to disable)"
             )

@@ -11,6 +11,7 @@ Covers:
 
 from __future__ import annotations
 
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -331,7 +332,11 @@ def test_bot_progress_raises_on_cancel():
 def test_bot_welcome_mentions_onchain():
     bot = TelegramBot("t")
     text = bot._welcome_text()
-    assert "0x" in text and "IPFS" in text.upper()
+    # v3.4 welcome card: on-chain shorthand appears as the 0x… example;
+    # HTML tags are stripped before matching so <code> cannot sneak in.
+    plain = re.sub(r"<[^>]+>", "", text)
+    assert "0x" in plain and "ipfs" in plain.lower()
+    assert "<b>" not in plain and "<code>" not in plain
 
 
 def test_bot_languages_card():

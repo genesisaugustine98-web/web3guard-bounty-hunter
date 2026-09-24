@@ -8,11 +8,11 @@ true`` is the headline vector), but a determined AI can still:
 
 - emit a Solidity ``0.8.x`` ``panic(code)`` to crash the test runner
   in a way that leaks environment variables through the panic message.
-- use inline Yul ``call(gas(), ...)"`` to escape the EVM sandbox and
+- use inline Yul ``call(gas(), ...)`` to escape the EVM sandbox and
   call the host syscall table (which forge does not isolate, even with
   ``--isolate``).
-- install a malicious ``foundry.toml`` hook (``[profile.default]\n\
-  fs_permissions = [{ access = "read-write", path = "./" }]``) that
+- install a malicious ``foundry.toml`` hook (``[profile.default]\\n``
+  ``fs_permissions = [{ access = "read-write", path = "./" }]``) that
   the AI can sneak in as part of the test PoC.
 - override the ``setUp`` cheatcode to run arbitrary code before any
   PoC-level checks fire.
@@ -37,8 +37,8 @@ move / aptos move) is wrapped with:
 4. A drop-privilege step: if the scanner is run as root, the
    subprocess is dropped to a non-root UID via ``setuid`` (best
    effort, ignored if not available).
-5. A revert-reason length cap: any revert message longer than 512
-   bytes is truncated in the report. This is the user-visible
+5. A revert-reason length cap: any revert message longer than the
+   policy cap is truncated in the report. This is the user-visible
    mitigation for the ``panic()`` data-exfiltration vector.
 
 These defenses are layered on top of the existing per-subprocess
@@ -50,6 +50,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -136,7 +137,10 @@ class SandboxPolicy:
     """Tunable policy for sandbox hardening.
 
     All fields have safe defaults; tighten them in ``config.yaml`` if you
-    want to be more aggressive.
+    want to be more aggressive. The ``from_config`` constructor maps the
+    documented ``sandbox:`` / ``security.sandbox:`` config keys onto this
+    policy so operators who tune the config actually get the behavior the
+    config promises.
     """
     max_cpu_seconds: int = 60            # RLIMIT_CPU (60s hard cap)
     max_address_space_bytes: int = 4 * 1024 * 1024 * 1024  # RLIMIT_AS = 4 GiB
@@ -153,6 +157,64 @@ class SandboxPolicy:
     force_tempdir: bool = True
     env_allowlist: frozenset[str] = SAFE_ENV_ALLOWLIST
     env_blocked_prefixes: tuple[str, ...] = BLOCKED_ENV_PREFIXES
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, object] | None) -> SandboxPolicy:
+        """Build a policy from the ``sandbox:`` config block.
+
+        Accepts either the top-level ``sandbox:`` block or
+        ``security.sandbox:``. Unknown keys are ignored; known keys are
+        coerced with type validation so a bad config value falls back to
+        the safe default instead of crashing a scan.
+        """
+        policy = cls()
+        if not config or not isinstance(config, dict):
+            return policy
+        sandbox_cfg: dict = {}
+        if isinstance(config.get("sandbox"), dict):
+            sandbox_cfg = dict(config["sandbox"])
+        security_cfg = config.get("security")
+        if isinstance(security_cfg, dict) and isinstance(security_cfg.get("sandbox"), dict):
+            # security.sandbox env lists apply when the top-level block
+            # does not name them (config.example.yaml documents them
+            # under security.sandbox).
+            sec_sandbox = security_cfg["sandbox"]
+            for key in ("env_allowlist", "env_blocked_prefixes"):
+                if key in sec_sandbox and key not in sandbox_cfg:
+                    sandbox_cfg[key] = sec_sandbox[key]
+
+        int_fields = {
+            "max_cpu_seconds": "max_cpu_seconds",
+            "max_address_space_bytes": "max_address_space_bytes",
+            "max_file_size_bytes": "max_file_size_bytes",
+            "max_open_files": "max_open_files",
+            "max_processes": "max_processes",
+            "max_revert_reason_bytes": "max_revert_reason_bytes",
+            "drop_privileges_to_uid": "drop_privileges_to_uid",
+        }
+        for cfg_key, attr in int_fields.items():
+            if cfg_key in sandbox_cfg:
+                try:
+                    val = int(sandbox_cfg[cfg_key])
+                    if val > 0:
+                        setattr(policy, attr, val)
+                except (TypeError, ValueError):
+                    LOGGER.warning("sandbox config %s=%r is not a positive "
+                                   "int; keeping default", cfg_key,
+                                   sandbox_cfg[cfg_key])
+        if "force_tempdir" in sandbox_cfg:
+            policy.force_tempdir = bool(sandbox_cfg["force_tempdir"])
+        if isinstance(sandbox_cfg.get("env_allowlist"), list):
+            allow = {str(k) for k in sandbox_cfg["env_allowlist"] if str(k)}
+            if allow:
+                # Operator-provided allowlist REPLACES the default one —
+                # an allowlist only stays safe if it is the source of truth.
+                policy.env_allowlist = frozenset(allow)
+        if isinstance(sandbox_cfg.get("env_blocked_prefixes"), list):
+            prefixes = tuple(str(p) for p in sandbox_cfg["env_blocked_prefixes"] if str(p))
+            if prefixes:
+                policy.env_blocked_prefixes = prefixes
+        return policy
 
 
 @dataclass
@@ -171,6 +233,10 @@ class SandboxGuard:
 
     def __init__(self, policy: SandboxPolicy | None = None) -> None:
         self._policy = policy or SandboxPolicy()
+
+    @property
+    def policy(self) -> SandboxPolicy:
+        return self._policy
 
     def prepare_subprocess(
         self,
@@ -348,9 +414,10 @@ def run_sandboxed(
     - its own process group, so a timeout kills the whole tree
       (forge/anchor spawn grandchildren that outlive a plain kill)
 
-    Every sandbox's ``_run`` routes through this function so the policy
-    is enforced uniformly; pass an existing ``guard`` to reuse its env
-    filtering (which carries the caller's ``extra_env``).
+    v3.4 fix: the timeout handler now signals the *child's* process group
+    (looked up from the live Popen handle), never the scanner's own group.
+    The previous implementation used ``os.killpg(0)``, which targets the
+    caller's group and killed the scanner itself on every timeout.
     """
     guard = guard or SandboxGuard(policy)
     report = guard.prepare_subprocess(command, cwd=cwd, extra_env=extra_env)
@@ -365,41 +432,75 @@ def run_sandboxed(
         guard.apply_resource_limits()
         guard.drop_privileges()
 
+    proc: subprocess.Popen | None = None
     try:
-        completed = subprocess.run(
+        proc = subprocess.Popen(
             report.command,
             cwd=report.cwd,
             env=report.env,
-            input=input_text,
-            capture_output=True,
+            stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
-            check=False,
             preexec_fn=_preexec if sys.platform != "win32" else None,
             start_new_session=new_session,
         )
+        try:
+            stdout, stderr = proc.communicate(input=input_text, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_process_tree(proc)
+            stdout, stderr = proc.communicate()
+            return (
+                124,
+                stdout or "",
+                f"timed out after {timeout}s\n{stderr or ''}",
+            )
         return (
-            completed.returncode,
-            guard.truncate_revert_reason(completed.stdout),
-            guard.truncate_revert_reason(completed.stderr),
+            proc.returncode,
+            guard.truncate_revert_reason(stdout or ""),
+            guard.truncate_revert_reason(stderr or ""),
         )
-    except subprocess.TimeoutExpired as e:
-        _kill_process_group()
-        stdout = e.stdout.decode("utf-8", errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-        stderr = e.stderr.decode("utf-8", errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
-        return (
-            124,
-            stdout,
-            f"timed out after {timeout}s\n{stderr}",
-        )
+    finally:
+        # Belt and suspenders: make sure no direct child is left reaped-less.
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
 
 
-def _kill_process_group() -> None:
-    """Best-effort kill of the whole process group (timed-out children)."""
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """Kill ``proc`` and its whole process group.
+
+    Signals the group the child was placed in by ``start_new_session`` —
+    looked up from the live handle, not group 0. Falls back to killing
+    just the child if the group lookup fails. Never touches the caller's
+    own process group.
+    """
     if sys.platform == "win32":
+        try:
+            proc.kill()
+        except OSError:
+            pass
         return
-    import signal
     try:
-        os.killpg(0, signal.SIGKILL)
+        pgid = os.getpgid(proc.pid)
     except (ProcessLookupError, PermissionError, OSError):
-        pass
+        pgid = None
+    if pgid is not None and pgid != os.getpgrp():
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                proc.kill()
+            except OSError:
+                pass
+    else:
+        try:
+            proc.kill()
+        except OSError:
+            pass

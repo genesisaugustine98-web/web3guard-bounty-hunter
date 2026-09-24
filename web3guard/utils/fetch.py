@@ -639,28 +639,49 @@ def _http_download(url: str, dest: Path, timeout: int = _HTTP_TIMEOUT) -> str | 
     raise FetchError(f"download failed for {url}: {last_err}")
 
 
+def _safe_member_target(dest_root: Path, member_name: str) -> Path:
+    """Resolve a member path and refuse anything outside ``dest_root``.
+
+    Catches absolute paths, ``..`` traversal, and drive-relative shapes.
+    """
+    target = (dest_root / member_name).resolve()
+    root_resolved = dest_root.resolve()
+    if root_resolved not in target.parents and target != root_resolved:
+        raise FetchError(f"archive member escapes extraction root: {member_name}")
+    return target
+
+
 def _extract_archive(archive: Path, dest_root: Path) -> Path:
     """Extract ``archive`` under ``dest_root`` and return the target dir.
+
+    v3.4 hardening: extraction is done *manually*, member by member —
+    ``extractall`` is never called. Link members (tar symlinks/hardlinks,
+    zip symlinks) are refused outright: they previously slipped past the
+    name-only guard and let a member path traverse outside the extraction
+    root through a pre-existing symlink target (verified exploit).
 
     Single-file gzip/bzip2/xz payloads (not tar) are transparently
     decompressed into ``payload`` — some release assets do that.
     """
     lower = archive.name.lower()
     dest_root.mkdir(parents=True, exist_ok=True)
-    root_resolved = dest_root.resolve()
-
-    def _guard(member_name: str) -> None:
-        target = (dest_root / member_name).resolve()
-        if root_resolved not in target.parents and target != root_resolved:
-            raise FetchError(f"archive member escapes extraction root: {member_name}")
 
     try:
         if lower.endswith(".zip") or _sniff_archive_ext(archive.open("rb").read(8) if archive.stat().st_size >= 8 else b"") == ".zip":
             with zipfile.ZipFile(archive) as zf:
-                # Zip-slip guard: refuse members that escape the extraction root.
-                for member in zf.namelist():
-                    _guard(member)
-                zf.extractall(dest_root)
+                for info in zf.infolist():
+                    # Refuse symlink members: a later file member written
+                    # through them would escape the extraction root.
+                    if (info.external_attr >> 16) & 0o170000 == 0o120000:
+                        raise FetchError(
+                            f"archive contains a symlink member: {info.filename}")
+                    target = _safe_member_target(dest_root, info.filename)
+                    if info.is_dir():
+                        target.mkdir(parents=True, exist_ok=True)
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(info) as src, target.open("wb") as out:
+                        shutil.copyfileobj(src, out)
         else:
             mode = "r:*"
             if lower.endswith(".tar.bz2"):
@@ -670,10 +691,27 @@ def _extract_archive(archive: Path, dest_root: Path) -> Path:
             elif lower.endswith((".tgz", ".tar.gz")):
                 mode = "r:gz"
             try:
-                with tarfile.open(archive, mode) as tf:  # noqa: S202 - guarded below
+                with tarfile.open(archive, mode) as tf:
                     for member in tf.getmembers():
-                        _guard(member.name)
-                    tf.extractall(dest_root)  # noqa: S202 - members vetted above
+                        _safe_member_target(dest_root, member.name)
+                        # Refuse link members entirely (symlink + hardlink):
+                        # a hardlink to /etc/passwd is as bad as a symlink.
+                        if member.issym() or member.islnk():
+                            raise FetchError(
+                                "archive contains a link member: "
+                                f"{member.name} -> {member.linkname}")
+                        target = dest_root / member.name
+                        if member.isdir():
+                            target.mkdir(parents=True, exist_ok=True)
+                            continue
+                        if not member.isreg():
+                            continue  # devices/fifos: ignore, never create
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        src = tf.extractfile(member)
+                        if src is None:  # pragma: no cover - isreg() is True
+                            continue
+                        with src, target.open("wb") as out:
+                            shutil.copyfileobj(src, out)
             except tarfile.ReadError:
                 # Not a tar container: try a bare compressed single file.
                 data = archive.read_bytes()

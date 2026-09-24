@@ -471,7 +471,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: web3guard-command-report-${{ github.run_id }}
-          path: reports/
+          path: |
+            reports/
+            reports_raw/
+            reports/raw_findings.json
+            reports/ai_drafted_feed.md
           if-no-files-found: warn
 
   scan:
@@ -599,13 +603,15 @@ jobs:
         run: |
           python -m web3guard.cli dashboard | tee web3guard-dashboard.txt || true
 
-      - name: Upload report artifacts
+      - name: Upload report artifacts (incl. dual feed)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: web3guard-report-${{ github.run_id }}
           path: |
             reports/
+            reports/raw_findings.json
+            reports/ai_drafted_feed.md
             web3guard-dashboard.txt
             .web3guard/findings.db
             .web3guard/cost.db

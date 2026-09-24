@@ -57,7 +57,10 @@ def test_scanner_runs_offline_and_writes_reports(tmp_path: Path) -> None:
     assert len(result.all_findings[0].fingerprint) == 32
     assert (tmp_path / "work" / ".web3guard" / "findings.db").exists()
     paths = scanner.build_report(result, out_dir=tmp_path / "reports")
-    assert set(paths) == {"txt", "json", "sarif", "md"}
+    # v3.4: build_report always emits the dual feed ("raw" + "draft")
+    # alongside the requested formats.
+    assert set(paths) >= {"txt", "json", "sarif", "md"}
+    assert "raw" in paths and "draft" in paths
     sarif = json.loads(paths["sarif"].read_text(encoding="utf-8"))
     assert sarif["version"] == "2.1.0"
     assert len(sarif["runs"][0]["results"]) == 1

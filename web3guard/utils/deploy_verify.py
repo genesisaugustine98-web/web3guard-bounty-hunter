@@ -248,18 +248,78 @@ def _find_deployed_address(target_path: Path, target: str) -> tuple[str, str] | 
     return None
 
 
-def _find_compiled_bytecode(target_path: Path) -> str:
-    """Best-effort runtime bytecode compiled from the local source.
+def _contract_name_for_address(target_path: Path, address: str) -> str | None:
+    """Find the contract name that ``address`` was deployed as.
 
-    Prefers a Forge build output (``out/*.sol/*.json`` -> ``bytecode``
-    -> ``object``); falls back to running nothing — we do not compile
-    here, we reuse artifacts the developer's build already produced.
+    Searches Forge broadcast artifacts (which record ``transactionType``
+    + ``contractName`` + ``contractAddress`` per deployment) and generic
+    deployment JSONs ({"<Name>": {"address": "0x.."}} or
+    {"address": .., "contractName": ..} shapes). Best effort by design.
+    """
+    addr_lower = address.lower()
+    skip = {"node_modules", ".git", "out", "cache", "lib"}
+    for path in sorted(target_path.rglob("*.json")):
+        if any(part in skip for part in path.parts):
+            continue
+        # Broadcast dirs only: anywhere else the address->name mapping is
+        # too speculative to trust for a verification verdict.
+        if "broadcast" not in path.parts and "deployments" not in path.parts:
+            continue
+        try:
+            data = json.loads(path.read_text(errors="ignore"))
+        except (OSError, ValueError):
+            continue
+        txs = data.get("transactions") if isinstance(data, dict) else None
+        if isinstance(txs, list):
+            for tx in txs:
+                if not isinstance(tx, dict):
+                    continue
+                if str(tx.get("contractAddress") or "").lower() != addr_lower:
+                    continue
+                name = str(tx.get("contractName") or "")
+                if name:
+                    return name
+                continue
+        if isinstance(data, dict):
+            if str(data.get("address") or "").lower() == addr_lower \
+                    and data.get("contractName"):
+                return str(data["contractName"])
+            for name, entry in data.items():
+                if isinstance(entry, dict) and \
+                        str(entry.get("address") or "").lower() == addr_lower:
+                    return str(name)
+    return None
+
+
+def _find_compiled_bytecode(target_path: Path, address: str | None = None) -> str:
+    """Best-effort *runtime* bytecode compiled from the local source.
+
+    v3.4 correctness fix: Forge artifacts carry two code fields —
+    ``bytecode`` (creation code: constructor + runtime) and
+    ``deployedBytecode`` (runtime code). ``eth_getCode`` returns runtime
+    code, so only ``deployedBytecode`` can classify as a ``match``; the
+    previous implementation compared creation code to runtime code and
+    misclassified every honest contract as ``divergent``.
+
+    When ``address`` is given and a broadcast artifact names the deploy,
+    only that contract's artifact is considered — this prevents the
+    "longest hex anywhere in out/" heuristic from comparing an unrelated
+    contract's code against the verified address (a possible false
+    ``match``).
     """
     out_dir = target_path / "out"
     if not out_dir.is_dir():
         return ""
+    named_contract: str | None = None
+    if address:
+        named_contract = _contract_name_for_address(target_path, address)
+
     best = ""
     for artifact in sorted(out_dir.rglob("*.json")):
+        if named_contract is not None:
+            # Bind to the deployed contract: out/<Name>.sol/<Name>.json
+            if artifact.stem != named_contract or artifact.parent.name != f"{named_contract}.sol":
+                continue
         try:
             data = json.loads(artifact.read_text(errors="ignore"))
         except (OSError, ValueError):
@@ -267,10 +327,14 @@ def _find_compiled_bytecode(target_path: Path) -> str:
         if not isinstance(data, dict):
             continue
         obj = (
-            data.get("bytecode", {}).get("object", "")
-            if isinstance(data.get("bytecode"), dict) else ""
+            data.get("deployedBytecode", {}).get("object", "")
+            if isinstance(data.get("deployedBytecode"), dict) else ""
         )
-        if isinstance(obj, str) and _EVM_RUNTIME_RE.match(obj) and len(obj) > len(best):
+        if not (isinstance(obj, str) and _EVM_RUNTIME_RE.match(obj)):
+            continue
+        if obj.lower().removeprefix("0x") in ("", "0x", "6080", "608060"):
+            continue  # empty / placeholder runtime: not evidence
+        if len(obj) > len(best):
             best = obj
     return best
 
@@ -313,11 +377,12 @@ def verify_target(
         return VerificationResult(address, chain, rpc_url, "not-deployed",
                                   detail="eth_getCode returned empty bytecode")
 
-    source_code = _find_compiled_bytecode(target_path)
+    source_code = _find_compiled_bytecode(target_path, address)
     if not source_code:
         return VerificationResult(
             address, chain, rpc_url, "unknown",
-            detail="no compiled bytecode artifacts (run forge build first)",
+            detail="no compiled runtime bytecode artifacts "
+                   "(run forge build first)",
         )
     verdict = classify_bytecode(source_code, deployed)
     detail = {
