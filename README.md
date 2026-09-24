@@ -429,6 +429,46 @@ See [SECURITY.md](SECURITY.md). The short version:
   Solidity panic data-exfiltration, but no scanner is bulletproof.
 - Never deploy exploits to mainnet without explicit authorization.
 
+## Changelog
+
+### v3.4.0 — verification ensemble, dual feed, fleet mode
+
+- **Verification ensemble**: a second model cross-examines every AI
+  finding (uphold / downgrade / overturn) before it reaches a report
+  or a bounty queue; runtime-confirmed findings skip the review.
+- **Dual feed on every report**: `raw_findings.json` (machine-readable,
+  for the Actions board) and `ai_drafted_feed.md` (human-readable
+  submission drafts), delivered in the CLI output, Telegram chat, and
+  CI artifacts.
+- **Bounty discovery + authorized-scope allowlist**: batch targets are
+  gated against `allow:` / approved programs *before* any fetch —
+  ecosystem-scale scanning that is legal by default. New
+  `web3guard bounties` and `web3guard scope` commands.
+- **Fleet mode**: `web3guard scan --targets-file batch.txt --parallel 4`;
+  chunk failures are contained, per-chunk metadata and costs merged.
+- **Resilience**: disk preflight in the scanner loop and batch dispatch
+  (clean abort, partial results kept), retry classification for long
+  batch runs.
+- **Graceful cost ceiling**: crossing `max_cost_usd` keeps every
+  finding discovered before the ceiling instead of discarding the scan.
+- **Serve hardening**: bearer-token auth on mutating endpoints, request
+  body cap, one-scan-at-a-time semaphore.
+- **Sandbox**: timeouts kill the child's process group (never the
+  caller's); archive extraction refuses link members; sandbox policy is
+  config-driven.
+- **Deploy verification**: compares `deployedBytecode` (runtime code,
+  what `eth_getCode` returns) instead of creation code, and binds
+  artifacts to the verified address.
+
+Earlier releases (see `git log` for details):
+
+- **v3.3** — config-driven models, chain-RPC deployment verification,
+  PoC repair v2, browser dashboard
+- **v3.2** — scan anything (on-chain, IPFS, any forge), god-level
+  Telegram console
+- **v3.1** — zero-dollar policy, consensus cross-validation, PoC
+  repair loop, extended languages
+
 ## Contact
 
 Developer: AG Koodanga · agkoodanga@gmail.com · WhatsApp +2349124352286
