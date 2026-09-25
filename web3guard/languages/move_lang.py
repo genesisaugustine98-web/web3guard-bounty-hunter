@@ -182,7 +182,7 @@ class MoveAdapter(LanguageAdapter):
         return _MOVE_EXPLOIT_TEMPLATE
 
     @property
-    def discovery_engines(self) -> list[DiscoveryEngine]:
+    def discovery_engines(self) -> tuple[DiscoveryEngine, ...]:
         return _MOVE_DISCOVERY_ENGINES
 
     @property

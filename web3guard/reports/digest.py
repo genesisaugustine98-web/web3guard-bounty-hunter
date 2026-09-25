@@ -93,7 +93,7 @@ def render_digest(data: dict, *, include_poc: bool = True, max_findings: int = 0
     confirmed = sum(
         1 for f in all_findings if str(f.get("status", "")).upper() == "CONFIRMED EXPLOIT"
     )
-    header = (
+    header: tuple[str, ...] = (
         f"Web3Guard findings ({_severity_counts(all_findings)})",
         f"Findings: {len(all_findings)}  Confirmed exploits: {confirmed}",
     )

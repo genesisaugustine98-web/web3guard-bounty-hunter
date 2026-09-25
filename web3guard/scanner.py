@@ -330,7 +330,7 @@ def load_config(path: Path | None) -> dict[str, Any]:
     loaded: dict[str, Any]
     if path.suffix.lower() in (".yaml", ".yml"):
         try:
-            import yaml  # type: ignore
+            import yaml
             loaded = yaml.safe_load(text) or {}
         except ImportError:
             # No yaml; fall back to JSON.
@@ -576,21 +576,25 @@ class Scanner:
 
     # ---- target handling -------------------------------------------------
 
-    def _parse_targets(self, targets: Iterable[str]) -> list[tuple[str, int]]:
+    def _parse_targets(
+        self, targets: Iterable[str | tuple[str, str | int]],
+    ) -> list[tuple[str, int]]:
         out: list[tuple[str, int]] = []
         for t in targets:
             if isinstance(t, tuple):
                 url, budget = t
-            elif "|" in str(t):
-                url, budget = str(t).split("|", 1)
             else:
-                url, budget = str(t), 200000
-            if not isinstance(budget, int):
+                t = str(t)
+                if "|" in t:
+                    url, budget = t.split("|", 1)
+                else:
+                    url, budget = t, 200000
+            if isinstance(budget, str):
                 try:
-                    budget = 0 if str(budget).strip().lower() == "max" else int(str(budget))
-                except (ValueError, AttributeError):
+                    budget = 0 if budget.strip().lower() == "max" else int(budget)
+                except ValueError:
                     budget = 200000
-            out.append((str(url).strip(), budget))
+            out.append((str(url).strip(), int(budget)))
         return out
 
     def _scan_one(
@@ -715,16 +719,16 @@ class Scanner:
             tr.chunks_analyzed += len(chunks_to_analyze)
             if self.config.get("enable_ai_analysis", True):
                 for ch in chunks_to_analyze:
-                    finding = self._analyze_chunk(
+                    analyzed = self._analyze_chunk(
                         adapter, ch, target_path, target, reachability=reachability
                     )
-                    if finding is None:
+                    if analyzed is None:
                         continue
-                    if finding.fingerprint in seen_fps:
+                    if analyzed.fingerprint in seen_fps:
                         continue
-                    seen_fps.add(finding.fingerprint)
-                    if self._severity_at_least(finding.severity, min_severity):
-                        tr.findings.append(finding)
+                    seen_fps.add(analyzed.fingerprint)
+                    if self._severity_at_least(analyzed.severity, min_severity):
+                        tr.findings.append(analyzed)
             # Optional post-scan passes (deterministic, offline).
             if self.config.get("enable_attack_sequence_brainstorm", True):
                 tr.attack_sequences[lang] = self._attack_sequences(adapter, target_path)
@@ -1235,21 +1239,6 @@ class Scanner:
             finding.metadata["self_critique"] = verdict
         else:
             finding.metadata["self_critique"] = verdict
-
-    def _economic_analyzer(self, finding: Finding) -> None:
-        """Estimate the attacker's required capital and expected profit.
-
-        For oracle-manipulation findings, the canonical attack is a
-        flash loan. The cost is therefore the flash-loan fee; the
-        profit is the drained funds. We do not yet have on-chain data
-        here, so this is a placeholder. Future versions will integrate
-        with a mainnet-fork RPC.
-        """
-        finding.cost_basis_usd = 0.0
-        finding.expected_profit_usd = 0.0
-        finding.metadata["economic"] = {
-            "note": "offline estimate; pass --fork-url for on-chain TVL data",
-        }
 
     def _run_secret_scan(self, target_path: Path) -> list[dict[str, Any]]:
         """Cheap regex-only secret scan (shared hardened patterns)."""

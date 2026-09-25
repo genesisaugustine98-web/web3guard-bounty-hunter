@@ -9,7 +9,16 @@ from web3guard.reachability.types import ReachabilityVerdict
 
 
 def _full_name(function: object) -> str:
-    return getattr(function, "full_name", None) or getattr(function, "name", "")
+    """Prefer Slither's qualified ``full_name``, falling back to ``name``.
+
+    Both attributes come from a third-party object, so values are
+    narrowed to ``str`` explicitly rather than trusted as one.
+    """
+    full = getattr(function, "full_name", None)
+    if isinstance(full, str) and full:
+        return full
+    name = getattr(function, "name", "")
+    return name if isinstance(name, str) else ""
 
 
 class SlitherBackend:

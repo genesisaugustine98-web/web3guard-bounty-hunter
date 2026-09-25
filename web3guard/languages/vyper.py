@@ -37,6 +37,7 @@ from web3guard.languages.base import (
     LanguageAdapter,
     RepoSummary,
     TargetLanguage,
+    TestRunner,
 )
 from web3guard.languages.solidity import _FOUNDRY_RUNNER
 
@@ -172,11 +173,11 @@ class VyperAdapter(LanguageAdapter):
         return _VYPER_EXPLOIT_TEMPLATE
 
     @property
-    def discovery_engines(self) -> list[DiscoveryEngine]:
+    def discovery_engines(self) -> tuple[DiscoveryEngine, ...]:
         return _VYPER_DISCOVERY_ENGINES
 
     @property
-    def test_runner(self) -> object:
+    def test_runner(self) -> TestRunner:
         return _FOUNDRY_RUNNER
 
 

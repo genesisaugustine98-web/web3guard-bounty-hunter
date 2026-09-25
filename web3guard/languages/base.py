@@ -232,7 +232,7 @@ class LanguageAdapter(abc.ABC):
 
     @property
     @abc.abstractmethod
-    def discovery_engines(self) -> list[DiscoveryEngine]:
+    def discovery_engines(self) -> tuple[DiscoveryEngine, ...]:
         """Discovery engines to run for this language."""
 
     @property

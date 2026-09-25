@@ -174,7 +174,7 @@ class FunCAdapter(LanguageAdapter):
         return _FUNC_EXPLOIT_TEMPLATE
 
     @property
-    def discovery_engines(self) -> list[DiscoveryEngine]:
+    def discovery_engines(self) -> tuple[DiscoveryEngine, ...]:
         return _FUNC_DISCOVERY_ENGINES
 
     @property

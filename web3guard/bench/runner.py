@@ -29,7 +29,7 @@ def run_benchmark(
     """
     if analyzer is None:
         from web3guard.discovery.static_analyzer import StaticAnalyzerEngine
-        analyzer = StaticAnalyzerEngine().run  # type: ignore[assignment]
+        analyzer = StaticAnalyzerEngine().run
 
     severity_order = {"INFO": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
     min_rank = severity_order.get(min_severity.upper(), 0)

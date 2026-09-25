@@ -762,9 +762,6 @@ def _detect_huff(content: str, rel: str) -> list[StaticIssue]:
 def _detect_yul(content: str, rel: str) -> list[StaticIssue]:
     content = _clean_code(content, "yul")
     issues: list[StaticIssue] = []
-    for name, body, start_line, _, _sig in _iter_braced_functions(content, "huff") \
-            if False else []:
-        _ = name, body, start_line  # pragma: no cover
     for m in re.finditer(r"\bfunction\s+([A-Za-z0-9_]+)\s*\(", content):
         name = m.group(1)
         brace = content.find("{", m.end())

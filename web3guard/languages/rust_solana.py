@@ -179,7 +179,7 @@ class RustSolanaAdapter(LanguageAdapter):
         return _RUST_SOLANA_EXPLOIT_TEMPLATE
 
     @property
-    def discovery_engines(self) -> list[DiscoveryEngine]:
+    def discovery_engines(self) -> tuple[DiscoveryEngine, ...]:
         return _RUST_SOLANA_DISCOVERY_ENGINES
 
     @property

@@ -107,7 +107,7 @@ def tg_call(token: str, method: str, payload: dict | None = None,
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = json.loads(resp.read().decode("utf-8", errors="replace"))
-    except urllib.error.HTTPError as e:  # type: ignore[attr-defined]
+    except urllib.error.HTTPError as e:
         detail = ""
         retry_after: float | None = None
         try:

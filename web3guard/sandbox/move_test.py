@@ -93,7 +93,7 @@ class MoveSandbox(GenericSandbox):
             else ["aptos", "move", "test", "--filter", "test_exploit"]
         from web3guard.sandbox.base import SandboxResult
         try:
-            rc_ok, out, err = self._run(test_cmd, cwd=sandbox_path, timeout=timeout)  # type: ignore[arg-type]
+            rc_ok, out, err = self._run(test_cmd, cwd=sandbox_path, timeout=timeout)
             return SandboxResult(ok=rc_ok, output=out + "\n" + err, error=err if not rc_ok else "", returncode=0 if rc_ok else 1)
         except Exception as e:  # noqa: BLE001
             return SandboxResult(ok=False, output=str(e), error=str(e), returncode=1)

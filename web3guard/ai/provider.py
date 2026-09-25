@@ -21,7 +21,14 @@ import logging
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # The OpenAI client library is an optional runtime dependency; the
+    # module-level import below sits inside a try block precisely so the
+    # scanner works without it. Importing it here (type-check time only)
+    # gives mypy the real type of ``openai.OpenAI`` without changing that.
+    from openai import OpenAI
 
 LOGGER = logging.getLogger("web3guard.ai.provider")
 
@@ -158,9 +165,9 @@ class OpenAICompatibleProvider(AIProvider):
         self._last_request_ts: float = 0.0
         # The OpenAI client library is optional; if it's not installed
         # we fall back to raw urllib.
-        self._client = None
+        self._client: OpenAI | None = None
         try:
-            import openai  # type: ignore
+            import openai
             self._client = openai.OpenAI(
                 base_url=self.base_url,
                 api_key="placeholder",  # we set it on each call from env
@@ -213,9 +220,15 @@ class OpenAICompatibleProvider(AIProvider):
 
     def _chat_openai(self, messages, model, max_tokens, temperature,
                      seed, response_format, api_key) -> ChatResponse:
+        client = self._client
+        if client is None:
+            # The library disappeared between construction and now; fall
+            # back to the stdlib transport rather than crash.
+            return self._chat_urllib(messages, model, max_tokens,
+                                     temperature, seed, response_format, api_key)
         start = time.monotonic()
         try:
-            self._client.api_key = api_key
+            client.api_key = api_key
             kwargs: dict[str, Any] = dict(
                 model=model,
                 messages=messages,
@@ -236,13 +249,13 @@ class OpenAICompatibleProvider(AIProvider):
                 # reads zero.
                 kwargs["stream_options"] = {"include_usage": True}
                 try:
-                    stream = self._client.chat.completions.create(**kwargs)
+                    stream = client.chat.completions.create(**kwargs)
                 except Exception as e:  # noqa: BLE001
                     # Some providers reject unknown stream options; retry
                     # once without them rather than failing the call.
                     if "stream_options" in str(e).lower() or "usage" in str(e).lower():
                         kwargs.pop("stream_options", None)
-                        stream = self._client.chat.completions.create(**kwargs)
+                        stream = client.chat.completions.create(**kwargs)
                     else:
                         raise
                 parts: list[str] = []
@@ -269,7 +282,7 @@ class OpenAICompatibleProvider(AIProvider):
                     completion_tokens = _estimate_tokens(content)
                     total_tokens = prompt_tokens + completion_tokens
             else:
-                completion = self._client.chat.completions.create(**kwargs)
+                completion = client.chat.completions.create(**kwargs)
                 choice = completion.choices[0]
                 usage = completion.usage
                 content = choice.message.content or ""
@@ -347,7 +360,7 @@ class OpenAICompatibleProvider(AIProvider):
     # ---- error mapping ---------------------------------------------------
 
     def _raise_for_openai_error(self, exc: Exception) -> None:
-        import openai  # type: ignore
+        import openai
         status = 0
         retryable = True
         if isinstance(exc, openai.RateLimitError):

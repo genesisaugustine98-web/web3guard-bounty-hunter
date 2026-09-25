@@ -67,7 +67,13 @@ class SimpleAdapter(LanguageAdapter):
 
     # --- engines + runner -------------------------------------------------
     discovery_engines: tuple[DiscoveryEngine, ...] = ()
-    test_runner: TestRunner  # required; set at class level
+    # Set by subclasses alongside the class definition.
+    _runner: TestRunner
+
+    @property
+    def test_runner(self) -> TestRunner:
+        """The test runner that backs PoC execution for this language."""
+        return self._runner
 
     def detect(self, target_path: Path) -> bool:
         if not target_path.is_dir():
@@ -197,15 +203,3 @@ class SimpleAdapter(LanguageAdapter):
     @property
     def discovery_engines_list(self) -> list[DiscoveryEngine]:
         return list(self.discovery_engines)
-
-    @property
-    def test_runner(self) -> TestRunner:  # type: ignore[override]
-        return self._runner
-
-    # Set by subclasses alongside the class definition.
-    _runner: TestRunner
-
-
-# Placeholder to keep dataclass-free inheritance simple: TestRunner on the
-# base is declared as a class annotation only.
-SimpleAdapter.test_runner = property(lambda self: self._runner)  # type: ignore[method-assign]

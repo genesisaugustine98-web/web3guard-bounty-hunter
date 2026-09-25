@@ -87,6 +87,7 @@ import tempfile
 import time
 import zipfile
 from pathlib import Path
+from typing import Any, Literal
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -217,6 +218,8 @@ def _assert_public_host(url: str) -> None:
         raise FetchError(f"cannot resolve host {host_lower!r}: {e}") from e
     for info in infos:
         addr = info[4][0]
+        if not isinstance(addr, str):
+            continue
         try:
             ip = ipaddress.ip_address(addr.split("%")[0])
         except ValueError:
@@ -447,8 +450,13 @@ def _parse_onchain_sources(payload: dict, language: str) -> dict[str, str]:
         except ValueError:
             parsed = None
         if isinstance(parsed, dict):
-            inner = parsed.get("sources") if isinstance(parsed.get("sources"), dict) else parsed
-            for path, item in inner.items():
+            # Standard Foundry / explorer JSON nests the contract map under
+            # ``sources``; some payloads inline it directly.
+            inner_sources = parsed.get("sources")
+            source_map: dict[Any, Any] = (
+                inner_sources if isinstance(inner_sources, dict) else parsed
+            )
+            for path, item in source_map.items():
                 content = item.get("content") if isinstance(item, dict) else item
                 if isinstance(content, str) and content.strip():
                     _add(str(path), content)
@@ -683,7 +691,9 @@ def _extract_archive(archive: Path, dest_root: Path) -> Path:
                     with zf.open(info) as src, target.open("wb") as out:
                         shutil.copyfileobj(src, out)
         else:
-            mode = "r:*"
+            # Literal-typed so the tarfile.open overload for stream modes
+            # ("r:*" et al.) type-checks without a cast.
+            mode: Literal["r:*", "r:bz2", "r:xz", "r:gz"] = "r:*"
             if lower.endswith(".tar.bz2"):
                 mode = "r:bz2"
             elif lower.endswith(".tar.xz"):
@@ -707,11 +717,11 @@ def _extract_archive(archive: Path, dest_root: Path) -> Path:
                         if not member.isreg():
                             continue  # devices/fifos: ignore, never create
                         target.parent.mkdir(parents=True, exist_ok=True)
-                        src = tf.extractfile(member)
-                        if src is None:  # pragma: no cover - isreg() is True
+                        member_src = tf.extractfile(member)
+                        if member_src is None:  # pragma: no cover - isreg() is True
                             continue
-                        with src, target.open("wb") as out:
-                            shutil.copyfileobj(src, out)
+                        with member_src, target.open("wb") as out:
+                            shutil.copyfileobj(member_src, out)
             except tarfile.ReadError:
                 # Not a tar container: try a bare compressed single file.
                 data = archive.read_bytes()

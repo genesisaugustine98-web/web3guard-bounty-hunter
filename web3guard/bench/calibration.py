@@ -15,6 +15,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from web3guard.ai.client import AIClient
+from web3guard.ai.cost import CostTracker
+from web3guard.ai.provider import ChatResponse
 from web3guard.bench.corpus import BenchmarkCorpus
 from web3guard.bench.metrics import BenchmarkReport
 from web3guard.bench.pipeline import make_reachability_analyzer
@@ -94,34 +97,44 @@ def calibrate_l1(
     })
 
 
-class _GoldenPocAI:
-    """Fixed-input client: vulnerable verdict, then a committed golden PoC."""
+class _GoldenPocAI(AIClient):
+    """Fixed-input client: vulnerable verdict, then a committed golden PoC.
+
+    Subclasses :class:`AIClient` so it satisfies the scanner's
+    ``ai_client`` parameter structurally: the overridden methods never
+    touch a provider, so ``__init__`` is bypassed on purpose.
+    """
 
     def __init__(self, poc: str, category: str) -> None:
         self._poc = poc
         self._category = category
+        self._cost = CostTracker()
 
-    def _response(self, content: str) -> Any:
-        return type("Resp", (), {"content": content})()
-
-    def chat(self, system: str, user: str, **kwargs: Any) -> Any:
+    def chat(self, system: str, user: str, **kwargs: Any) -> ChatResponse:
         import json
 
+        del system, user
         if kwargs.get("role", "analysis") == "exploit":
-            return self._response(f"```solidity\n{self._poc}\n```")
-        return self._response(json.dumps({
-            "status": "vulnerable",
-            "category": self._category,
-            "severity": "HIGH",
-            "confidence": 0.9,
-            "function": "withdraw",
-            "description": "golden calibration case",
-            "reasoning": "fixed input",
-            "line_hint": "1-50",
-        }))
+            return ChatResponse(
+                content=f"```solidity\n{self._poc}\n```",
+                model="golden-poc", provider="golden-poc",
+            )
+        return ChatResponse(
+            content=json.dumps({
+                "status": "vulnerable",
+                "category": self._category,
+                "severity": "HIGH",
+                "confidence": 0.9,
+                "function": "withdraw",
+                "description": "golden calibration case",
+                "reasoning": "fixed input",
+                "line_hint": "1-50",
+            }),
+            model="golden-poc", provider="golden-poc",
+        )
 
-    def cost_tracker(self) -> Any:
-        return type("Tracker", (), {"summary": lambda self: {"total_cost_usd": 0.0}})()
+    def cost_tracker(self) -> CostTracker:
+        return self._cost
 
 
 def _confusion(cases: Sequence[Any], outcomes: Sequence[bool]) -> dict[str, Any]:

@@ -200,9 +200,9 @@ class SolidityAdapter(LanguageAdapter):
                 cur_start = cur_end
                 cur_kinds = []
             cur_end = end
-            m = _SOLIDITY_DECL_RE.search(text[start:start + 200])
-            if m:
-                cur_kinds.append(m.group(2))
+            decl_match = _SOLIDITY_DECL_RE.search(text[start:start + 200])
+            if decl_match and decl_match.group(2) is not None:
+                cur_kinds.append(decl_match.group(2))
         if cur_end > cur_start:
             chunks.append(Chunk(
                 file=file_label,
@@ -328,7 +328,7 @@ class SolidityAdapter(LanguageAdapter):
     # ---- engines + runner ------------------------------------------------
 
     @property
-    def discovery_engines(self) -> list[DiscoveryEngine]:
+    def discovery_engines(self) -> tuple[DiscoveryEngine, ...]:
         return _SOLIDITY_DISCOVERY_ENGINES
 
     @property
@@ -392,7 +392,7 @@ Respond with a single ```solidity block containing the full test
 file. No prose, no explanation, no comments outside the test.
 """
 
-_SOLIDITY_DISCOVERY_ENGINES: list[DiscoveryEngine] = (
+_SOLIDITY_DISCOVERY_ENGINES: tuple[DiscoveryEngine, ...] = (
     DiscoveryEngine(
         name="slither",
         binary="slither",

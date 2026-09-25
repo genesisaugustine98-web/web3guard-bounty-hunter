@@ -507,10 +507,10 @@ def _cmd_bench(args: argparse.Namespace) -> int:
 
 def _cmd_calibrate(args: argparse.Namespace) -> int:
     from web3guard.bench import default_corpus, load_corpus
-    from web3guard.bench.calibration import CalibrationReport
+    from web3guard.bench.calibration import CalibrationReport, LayerResult
 
     layers = {x.strip().lower() for x in args.layers.split(",") if x.strip()}
-    results: dict[str, object] = {}
+    results: dict[str, LayerResult] = {}
 
     if "l1" in layers:
         from web3guard.bench.calibration import calibrate_l1
@@ -538,7 +538,7 @@ def _cmd_calibrate(args: argparse.Namespace) -> int:
             cases, cases_root=args.live_cases.parent,
             workdir=Path("bench/calibration/run"))
 
-    report = CalibrationReport(layers=results)  # type: ignore[arg-type]
+    report = CalibrationReport(layers=results)
     print(json.dumps(report.to_dict(), indent=2))
     if args.json_out:
         args.json_out.parent.mkdir(parents=True, exist_ok=True)
@@ -547,8 +547,8 @@ def _cmd_calibrate(args: argparse.Namespace) -> int:
         print(f"\nCalibration report written to {args.json_out}")
 
     if args.fail_on_regression and "l1" in results:
-        delta = results["l1"].data.get("precision_delta", 0.0)  # type: ignore[union-attr]
-        recall_delta = results["l1"].data.get("recall_delta", 0.0)  # type: ignore[union-attr]
+        delta = results["l1"].data.get("precision_delta", 0.0)
+        recall_delta = results["l1"].data.get("recall_delta", 0.0)
         if delta <= 0 or recall_delta < 0:
             print(f"\nL1 regression: precision_delta={delta} "
                   f"recall_delta={recall_delta}")

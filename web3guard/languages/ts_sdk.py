@@ -222,7 +222,7 @@ class TypeScriptSDKAdapter(LanguageAdapter):
         return _TS_SDK_EXPLOIT_TEMPLATE
 
     @property
-    def discovery_engines(self) -> list[DiscoveryEngine]:
+    def discovery_engines(self) -> tuple[DiscoveryEngine, ...]:
         return _TS_SDK_DISCOVERY_ENGINES
 
     @property
