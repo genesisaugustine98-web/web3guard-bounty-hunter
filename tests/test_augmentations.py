@@ -185,6 +185,48 @@ def test_uncontrolled_payout_ported_languages() -> None:
         assert found[0].function == "claim"
 
 
+def test_arithmetic_logic_flaw_detectors() -> None:
+    """Fee-basis mismatch and division-before-multiplication detectors:
+    both flaws fire, compensated WAD math and clean fixtures stay silent."""
+    engine = StaticAnalyzerEngine()
+
+    flawed_fee = (
+        "contract C { uint256 public constant FEE_BPS = 30; "
+        "function f(uint256 amount) external { "
+        "uint256 fee = amount * FEE_BPS / 1e18; } }")
+    hits = [r for r in engine.run_text(flawed_fee, "C.sol", "solidity")
+            if "Fee-basis mismatch" in r.title]
+    assert hits, "bps/WAD fee-basis mismatch not detected"
+
+    # Compensated bps math (WAD price x bps factor / 10000) is correct.
+    compensated = (
+        "contract C { uint256 public collateralFactorBps; "
+        "function borrow(uint256 amount) external { "
+        "uint256 price = getPrice(); "
+        "uint256 maxBorrow = collateral[msg.sender] * price * "
+        "collateralFactorBps / 1e18 / 10000; } }")
+    assert not [r for r in engine.run_text(compensated, "C.sol", "solidity")
+                if "Fee-basis mismatch" in r.title]
+
+    flawed_order = (
+        "contract C { mapping(address=>uint256) public shares; "
+        "function mint(uint256 assets) external { "
+        "uint256 s = assets / totalAssets * sharesTotal; "
+        "shares[msg.sender] += s; } }")
+    hits = [r for r in engine.run_text(flawed_order, "C.sol", "solidity")
+            if "Division before multiplication" in r.title]
+    assert hits, "div-before-mul rounding-order flaw not detected"
+
+    # Safe order (multiply first) is not flagged.
+    safe_order = (
+        "contract C { mapping(address=>uint256) public shares; "
+        "function mint(uint256 assets) external { "
+        "uint256 s = assets * sharesTotal / totalAssets; "
+        "shares[msg.sender] += s; } }")
+    assert not [r for r in engine.run_text(safe_order, "C.sol", "solidity")
+                if "Division before multiplication" in r.title]
+
+
 def test_static_analyzer_covers_all_languages() -> None:
     engine = StaticAnalyzerEngine()
     languages = {r.engine for r in engine.run(VULNERABLE)}

@@ -681,6 +681,44 @@ def _detect_solidity(content: str, rel: str) -> list[StaticIssue]:
         # 8b. Uncontrolled payout (shared core, see the helper).
         issues.extend(_detect_uncontrolled_payout_solidity(
             name, body, sig, rel, start_line))
+        # 8c. Fee-basis mismatch: a variable explicitly named as basis
+        # points (bps) multiplied into an amount and divided by a WAD-scale
+        # constant (1e18). WAD math is correct for WAD-denominated rates
+        # (Maker-style x*rate/1e18), so only *bps-named* variables trigger:
+        # the name declares 1e4 scale, the divisor declares 1e18.
+        # A following ``/ 10000`` compensates the bps scale (WAD price ×
+        # bps factor is legitimate), so a divisor followed by the bps
+        # conversion is NOT flagged (OracleManipulation-style math).
+        if re.search(
+                r"\b\w*(?i:bps|basis_?points)\w*\s*\*\s*[\w.]+\s*/\s*"
+                r"(?:1e18|10\s*\*\*\s*18|1_000_000_000_000_000_000)\b"
+                r"(?!\s*/\s*(?:10000|1e4|10\s*\*\*\s*4)\b)",
+                body) or re.search(
+                r"\b[\w.]+\s*\*\s*\w*(?i:bps|basis_?points)\w*\s*/\s*"
+                r"(?:1e18|10\s*\*\*\s*18|1_000_000_000_000_000_000)\b"
+                r"(?!\s*/\s*(?:10000|1e4|10\s*\*\*\s*4)\b)",
+                body):
+            issues.append(_issue(
+                rel, start_line, "arithmetic", "HIGH",
+                "Fee-basis mismatch (basis points divided by WAD)",
+                f"{name}() computes a fee/rate from a basis-points variable "
+                "but divides by 1e18 (WAD). Basis points are 1e4 scale, so "
+                "the effective fee is ~1e14x smaller than intended (or, "
+                "inverted, drains the pool). Align the divisor with the "
+                "rate's declared basis.",
+                function=name, confidence=0.7))
+        # 8d. Division-before-multiplication ordering: ``a / b * c`` loses
+        # precision in the division step; in share/asset accounting that
+        # rounding is systematically extractable (rounding-dust griefing /
+        # free share minting). ``a * c / b`` is the safe order.
+        if re.search(r"\b[\w.\[\]]+\s*/\s*[\w.\[\]]+\s*\*\s*[\w.\[\]]+", body):
+            issues.append(_issue(
+                rel, start_line, "arithmetic", "MEDIUM",
+                "Division before multiplication (rounding-order loss)",
+                f"{name}() divides before multiplying (a / b * c); the "
+                "division truncates first and the rounding loss is "
+                "extractable in token accounting. Multiply first: a * c / b.",
+                function=name, confidence=0.6))
         # 9. selfdestruct without guard.
         if re.search(r"selfdestruct|selfdestruct\(", body) and not guarded:
             issues.append(_issue(

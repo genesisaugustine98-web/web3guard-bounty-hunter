@@ -224,7 +224,8 @@
       "path": "test_contracts/vulnerable/UncontrolledPayout.sol",
       "language": "solidity",
       "vulnerabilities": [
-        "uncontrolled-payout"
+        "uncontrolled-payout",
+        "arithmetic"
       ]
     }
   ]
