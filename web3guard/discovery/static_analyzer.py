@@ -140,9 +140,14 @@ def _clean_code(text: str, lang: str) -> str:
     return text
 
 
-def _iter_python_functions(text: str) -> list[tuple[str, str, int]]:
-    """Approximate Python/Vyper function bodies (indentation-based)."""
-    out: list[tuple[str, str, int]] = []
+def _iter_python_functions(text: str) -> list[tuple[str, str, int, str]]:
+    """Approximate Python/Vyper function bodies (indentation-based).
+
+    Yields ``(name, body, start_line, decl)`` where ``decl`` is the
+    ``def name(params):`` header line, so callers can extract the
+    parameter list for argument-tracking detectors.
+    """
+    out: list[tuple[str, str, int, str]] = []
     lines = text.splitlines()
     i = 0
     while i < len(lines):
@@ -152,12 +157,13 @@ def _iter_python_functions(text: str) -> list[tuple[str, str, int]]:
             continue
         name = m.group(1)
         start_line = i + 1
+        decl = lines[i].strip()
         j = i + 1
         while j < len(lines):
             if lines[j].strip() and not lines[j][0].isspace():
                 break
             j += 1
-        out.append((name, "\n".join(lines[i:j]), start_line))
+        out.append((name, "\n".join(lines[i:j]), start_line, decl))
         i = j
     return out
 
@@ -204,6 +210,16 @@ _PAYOUT_AMOUNT_ARG_RES = (
     re.compile(
         r"\b(?:payable\s*\([^)]*\)|[\w.\[\]]+)\s*\.\s*"
         r"(?:transfer|send)\s*\(\s*([^,()]+?)\s*\)"),
+    # Rust/Anchor CPI: token::transfer(accounts, AMT) / token::mint_to(...)
+    # (double-colon path; the first argument may itself contain parens,
+    # so the amount is captured after the first top-level comma).
+    re.compile(
+        r"::\s*(?:transfer|mint_to)\s*\([^,]+,\s*([^,()]+?)\s*\)"),
+    # Move: coin::transfer<CoinType>(from, to, AMT) — 3-arg, amount last.
+    # Listed before the generic Rust shape and generic-shape-safe (the
+    # Rust regex cannot match past the <...> generics).
+    re.compile(
+        r"::\s*transfer\s*<[^>]*>\s*\([^,]+,\s*[^,]+,\s*([^,()]+?)\s*\)"),
 )
 # NB: ETH value forwarded along a low-level call (x.call{value: ...} and
 # the legacy x.call.value(...) form) is deliberately NOT a payout trigger:
@@ -215,7 +231,40 @@ _PAYOUT_LEDGER_RE = re.compile(
     r"owed|releas\w*|airdrop\w*|merkle\w*|deposit\w*|balance\w*|"
     r"share\w*|contribution\w*)\s*\["
 )
+# Ledger named without indexing (Cairo 1 ``self.claimable.read()``,
+# Clarity ``(var-get claimable)``, Rust struct fields).
+_PAYOUT_LEDGER_BARE_RE = re.compile(
+    r"\b(?:claim\w*|entitle\w*|allocat\w*|allot\w*|vest\w*|reward\w*|"
+    r"owed|releas\w*|airdrop\w*|merkle\w*|deposit\w*|balance\w*|"
+    r"share\w*|contribution\w*)\b"
+)
 _PAYOUT_IDENT_RE = re.compile(r"[A-Za-z_]\w*")
+
+# ---------------------------------------------------------------------------
+# Uncontrolled payout — shared core (ported per language below)
+# ---------------------------------------------------------------------------
+
+
+def _rust_fn_params(sig: str) -> set[str]:
+    """Parameter names from an Anchor-idiom fn signature.
+
+    ``pub fn claim(ctx: Context<Claim>, amount: u64)`` -> ``{"amount"}``.
+    Plain (non-Anchor) signatures keep first parameters too.
+    """
+    inner = sig.split("(", 1)[-1].rsplit(")", 1)[0]
+    names: set[str] = set()
+    for part in inner.split(","):
+        words = part.strip().replace(":", " ").split()
+        if not words:
+            continue
+        name = words[0].lstrip("&_").rstrip(":")
+        if name in ("ctx", "context") and len(words) == 2:
+            continue  # Anchor context account bundle
+        if name and name not in ("mut", "self"):
+            names.add(name)
+    return names
+
+
 # Authorization only: a claim/withdraw is *validated* by
 # require(ledger[msg.sender] > 0) — that is not an access guard and must
 # not suppress the uncontrolled-payout check. Only owner-style modifiers
@@ -245,7 +294,9 @@ def _param_names(sig: str) -> set[str]:
     }
     names: set[str] = set()
     for part in inner.split(","):
-        words = part.strip().split()
+        # Typed ``name: type`` style (Vyper / TS): keep the name side.
+        left = part.strip().split(":", 1)[0].strip()
+        words = left.split()
         if not words:
             continue
         last = re.sub(r"\[[^\]]*\]$", "", words[-1])
@@ -322,6 +373,147 @@ def _issue(file: str, line: int, category: str, severity: str, title: str,
 # ---------------------------------------------------------------------------
 # Detectors
 # ---------------------------------------------------------------------------
+
+
+def _detect_uncontrolled_payout_solidity(
+    name: str, body: str, sig: str, rel: str, start_line: int,
+) -> list[StaticIssue]:
+    """Solidity payout shapes: ERC20 transfer/safeTransfer (2-arg) and
+    native payable(x).transfer/send (1-arg). Low-level call{value:}
+    forwarding is deliberately out of scope (trusted plumbing)."""
+    issues: list[StaticIssue] = []
+    if _AUTH_GUARD_RE.search(sig + body) or not _PAYOUT_LEDGER_RE.search(sig + body):
+        return issues
+    params = _param_names(sig)
+    for amount_re in _PAYOUT_AMOUNT_ARG_RES:
+        m = amount_re.search(body)
+        if m is None:
+            continue
+        arg = m.group(1)
+        user_idents = set(_PAYOUT_IDENT_RE.findall(arg))
+        user_idents -= {"msg", "sender", "value", "balance", "this"}
+        user_idents &= params
+        if not user_idents:
+            continue
+        if not _payout_amount_is_unbounded(body, user_idents):
+            continue
+        issues.append(_issue(
+            rel, start_line, "uncontrolled-payout", "HIGH",
+            "Uncontrolled payout amount (ledger bypass)",
+            f"{name}() transfers a caller-supplied amount while "
+            "reading an entitlement ledger; unless the amount is "
+            "derived from the ledger this can pay out more than "
+            "the caller is owed.",
+            function=name, confidence=0.75))
+        break
+    return issues
+
+
+def _detect_uncontrolled_payout_python(
+    name: str, body: str, decl: str, rel: str, start_line: int,
+    *, ledger_re: re.Pattern[str] = _PAYOUT_LEDGER_RE,
+) -> list[StaticIssue]:
+    """Vyper payout shapes: ``token.transfer(receiver, amt)`` and raw_call.
+    Vyper transfers revert on failure; return values are not the issue —
+    only the amount argument is tracked."""
+    issues: list[StaticIssue] = []
+    if _AUTH_GUARD_RE.search(decl + body) or not ledger_re.search(decl + body):
+        return issues
+    params = _param_names(decl)
+    for amount_re in _PAYOUT_AMOUNT_ARG_RES:
+        m = amount_re.search(body)
+        if m is None:
+            continue
+        arg = m.group(1)
+        user_idents = set(_PAYOUT_IDENT_RE.findall(arg))
+        user_idents -= {"msg", "sender", "value", "balance", "this"}
+        user_idents &= params
+        if not user_idents:
+            continue
+        if not _payout_amount_is_unbounded(body, user_idents):
+            continue
+        issues.append(_issue(
+            rel, start_line, "uncontrolled-payout", "HIGH",
+            "Uncontrolled payout amount (ledger bypass)",
+            f"{name}() transfers a caller-supplied amount while "
+            "reading an entitlement ledger; unless the amount is "
+            "derived from the ledger this can pay out more than "
+            "the caller is owed.",
+            function=name, confidence=0.75))
+        break
+    return issues
+
+
+def _detect_uncontrolled_payout_rust(
+    name: str, body: str, sig: str, rel: str, start_line: int,
+) -> list[StaticIssue]:
+    """Rust/Anchor payout shapes: ``token.transfer(...)`` /
+    ``token.mint_to(...)`` / ``**lamports.set_mut(...)`` where the amount
+    expression references a caller-supplied parameter and an account
+    (PDA) holds claim/vest/reward state."""
+    issues: list[StaticIssue] = []
+    if _AUTH_GUARD_RE.search(sig + body):
+        return issues
+    if not re.search(
+            r"\b(?:claim|entitle\w*|allocat\w*|vest\w*|reward\w*|owed|"
+            r"airdrop\w*|merkle\w*|deposit\w*|share\w*)\b", sig + body):
+        return issues
+    params = _rust_fn_params(sig)
+    for amount_re in _PAYOUT_AMOUNT_ARG_RES:
+        m = amount_re.search(body)
+        if m is None:
+            continue
+        arg = m.group(1)
+        user_idents = set(_PAYOUT_IDENT_RE.findall(arg))
+        user_idents -= {"msg", "sender", "value", "balance", "this", "ctx"}
+        user_idents &= params
+        if not user_idents:
+            continue
+        if not _payout_amount_is_unbounded(body, user_idents):
+            continue
+        issues.append(_issue(
+            rel, start_line, "uncontrolled-payout", "HIGH",
+            "Uncontrolled payout amount (ledger bypass)",
+            f"{name}() transfers/mints a caller-supplied amount while "
+            "reading claim state; unless the amount is derived from "
+            "on-chain records this can pay out more than the caller is "
+            "owed.",
+            function=name, confidence=0.7))
+        break
+    return issues
+
+
+def _detect_uncontrolled_payout_ts(
+    name: str, body: str, decl: str, rel: str, start_line: int,
+) -> list[StaticIssue]:
+    """TypeScript SDK payout shape: ``token.transfer(recipient, amt)``
+    where ``amt`` is a user-supplied option/param and a claim/ledger
+    structure gates the call."""
+    issues: list[StaticIssue] = []
+    if _AUTH_GUARD_RE.search(decl + body) or not _PAYOUT_LEDGER_RE.search(decl + body):
+        return issues
+    params = _param_names(decl)
+    for amount_re in _PAYOUT_AMOUNT_ARG_RES:
+        m = amount_re.search(body)
+        if m is None:
+            continue
+        arg = m.group(1)
+        user_idents = set(_PAYOUT_IDENT_RE.findall(arg))
+        user_idents -= {"msg", "sender", "value", "balance", "this"}
+        user_idents &= params
+        if not user_idents:
+            continue
+        if not _payout_amount_is_unbounded(body, user_idents):
+            continue
+        issues.append(_issue(
+            rel, start_line, "uncontrolled-payout", "HIGH",
+            "Uncontrolled payout amount (client-side ledger bypass)",
+            f"{name}() transfers a caller-supplied amount while "
+            "reading claim records; the on-chain program must derive "
+            "the amount itself — client-side checks are not security.",
+            function=name, confidence=0.7))
+        break
+    return issues
 
 
 def _detect_solidity(content: str, rel: str) -> list[StaticIssue]:
@@ -486,36 +678,9 @@ def _detect_solidity(content: str, rel: str) -> list[StaticIssue]:
                 "initialize() lacks an initializer/guard, so anyone can "
                 "re-initialize or initialize before the deployer does.",
                 function=name, confidence=0.85))
-        # 8b. Uncontrolled payout: an external transfer whose amount comes
-        # from a caller-supplied parameter while the same function reads an
-        # entitlement ledger and no clamp exists on the parameter. "Pay what
-        # the caller asks" instead of "pay what the ledger owes" is a
-        # recurring business-logic flaw (drains airdrops, claim faucets,
-        # vesting wallets) that the shape-based detectors above cannot see.
-        if not _AUTH_GUARD_RE.search(sig + body) \
-                and _PAYOUT_LEDGER_RE.search(sig + body):
-            params = _param_names(sig)
-            for amount_re in _PAYOUT_AMOUNT_ARG_RES:
-                m = amount_re.search(body)
-                if m is None:
-                    continue
-                arg = m.group(1)
-                user_idents = set(_PAYOUT_IDENT_RE.findall(arg))
-                user_idents -= {"msg", "sender", "value", "balance", "this"}
-                user_idents &= params
-                if not user_idents:
-                    continue
-                if not _payout_amount_is_unbounded(body, user_idents):
-                    continue
-                issues.append(_issue(
-                    rel, start_line, "uncontrolled-payout", "HIGH",
-                    "Uncontrolled payout amount (ledger bypass)",
-                    f"{name}() transfers a caller-supplied amount while "
-                    "reading an entitlement ledger; unless the amount is "
-                    "derived from the ledger this can pay out more than "
-                    "the caller is owed.",
-                    function=name, confidence=0.75))
-                break
+        # 8b. Uncontrolled payout (shared core, see the helper).
+        issues.extend(_detect_uncontrolled_payout_solidity(
+            name, body, sig, rel, start_line))
         # 9. selfdestruct without guard.
         if re.search(r"selfdestruct|selfdestruct\(", body) and not guarded:
             issues.append(_issue(
@@ -581,10 +746,14 @@ def _detect_solidity(content: str, rel: str) -> list[StaticIssue]:
     return issues
 
 
+# Vyper transfers revert on failure by design; the return-value check
+# below is kept for non-standard tokens only.
 def _detect_vyper(content: str, rel: str) -> list[StaticIssue]:
     content = _clean_code(content, "vyper")
     issues: list[StaticIssue] = []
-    for name, body, start_line in _iter_python_functions(content):
+    for name, body, start_line, decl in _iter_python_functions(content):
+        issues.extend(_detect_uncontrolled_payout_python(
+            name, body, decl, rel, start_line))
         lines = body.splitlines()
         for i, ln in enumerate(lines):
             if re.search(r"raw_call\s*\(", ln):
@@ -618,7 +787,9 @@ def _detect_vyper(content: str, rel: str) -> list[StaticIssue]:
 def _detect_move(content: str, rel: str) -> list[StaticIssue]:
     content = _clean_code(content, "move")
     issues: list[StaticIssue] = []
-    for name, body, start_line, _, _sig in _iter_braced_functions(content, "move"):
+    for name, body, start_line, _, sig in _iter_braced_functions(content, "move"):
+        issues.extend(_detect_uncontrolled_payout_python(
+            name, body, sig, rel, start_line))
         if re.search(r"borrow_global\s*<|borrow_global_mut\s*<", body) and \
                 not re.search(r"acquires\s+\w+", body):
             issues.append(_issue(
@@ -648,6 +819,14 @@ def _detect_move(content: str, rel: str) -> list[StaticIssue]:
 def _detect_cairo(content: str, rel: str) -> list[StaticIssue]:
     content = _clean_code(content, "cairo")
     issues: list[StaticIssue] = []
+    for name, body, start_line, _, sig in _iter_braced_functions(content, "cairo"):
+        # Cairo 1 (Starknet): ERC20 dispatcher .transfer(recipient, amt)
+        # matches the shared ERC20 amount shape; ledger state is read via
+        # ``self.<ledger>.read()`` (no indexing), hence the bare regex.
+        # Legacy Cairo 0 lacks the idioms and yields nothing (harmless).
+        issues.extend(_detect_uncontrolled_payout_python(
+            name, body, sig, rel, start_line,
+            ledger_re=_PAYOUT_LEDGER_BARE_RE))
     for m in re.finditer(r"get_caller_address\s*\(\s*\)", content):
         line = content[: m.start()].count("\n") + 1
         if re.search(r"get_execution_info\s*\(\s*\)\.caller_addr", content):
@@ -676,6 +855,36 @@ def _detect_cairo(content: str, rel: str) -> list[StaticIssue]:
 def _detect_clarity(content: str, rel: str) -> list[StaticIssue]:
     content = _clean_code(content, "clarity")
     issues: list[StaticIssue] = []
+    # Uncontrolled payout: (ft-transfer? token recipient AMT) inside a
+    # define-public whose (define-data-var ledger ...) gate lacks a bound
+    # on AMT and whose owner is not compared.
+    for m in re.finditer(r"\(define-public\s+\(([^\n]{0,120})", content):
+        decl = m.group(1)
+        line = content[: m.start()].count("\n") + 1
+        # Clarity params are ``(name type)`` — name first, unlike the
+        # Solidity ``type name`` order _param_names expects.
+        params = set(re.findall(r"\(([\w-]+)\s+", decl))
+        body_end = min(len(content), m.start() + 2400)
+        body = content[m.start():body_end]
+        ledger = re.search(
+            r"\b(?:claim\w*|entitle\w*|allocat\w*|vest\w*|reward\w*|"
+            r"airdrop\w*|merkle\w*|balance\w*|share\w*)", body)
+        amt = re.search(r"\(ft-transfer\?\s+\S+\s+\S+\s+([\w-]+)", body)
+        if not (ledger and amt and not _AUTH_GUARD_RE.search(body)):
+            continue
+        if amt.group(1) not in params:
+            continue  # amount is not caller-supplied
+        if re.search(rf"\b{re.escape(amt.group(1))}\b\s*(?:[-+*/])?=", body) \
+                or re.search(r"\bmin\b|\bmax\b", body):
+            continue
+        issues.append(_issue(
+            rel, line, "uncontrolled-payout", "HIGH",
+            "Uncontrolled payout amount (ledger bypass)",
+            "define-public transfers a caller-supplied ft amount while "
+            "reading claim state; derive the amount from the ledger, not "
+            "from the caller.",
+            function=decl.split(" ")[0] if decl else "",
+            confidence=0.7))
     for m in re.finditer(r"\(asserts!\s*\(is-eq\s+tx-sender", content):
         line = content[: m.start()].count("\n") + 1
         issues.append(_issue(
@@ -741,7 +950,9 @@ def _detect_func(content: str, rel: str) -> list[StaticIssue]:
 def _detect_rust_solana(content: str, rel: str) -> list[StaticIssue]:
     content = _clean_code(content, "rust")
     issues: list[StaticIssue] = []
-    for name, body, start_line, _, _sig in _iter_braced_functions(content, "rust"):
+    for name, body, start_line, _, sig in _iter_braced_functions(content, "rust"):
+        issues.extend(_detect_uncontrolled_payout_rust(
+            name, body, sig, rel, start_line))
         if name not in ("initialize", "init"):
             continue
         guarded = re.search(
@@ -786,6 +997,45 @@ def _detect_rust_solana(content: str, rel: str) -> list[StaticIssue]:
     return issues
 
 
+def _iter_ts_functions(text: str) -> list[tuple[str, str, int, str]]:
+    """Yield ``(name, body, start_line, decl)`` for TS/JS functions,
+    methods, and arrow-function consts, with the signature line as
+    ``decl`` for parameter extraction."""
+    out: list[tuple[str, str, int, str]] = []
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        m = re.match(
+            r"^\s*(?:export\s+)?(?:async\s+)?(?:function\s+([A-Za-z_$][\w$]*)"
+            r"|(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?)"
+            r"(?:(\w+)\s*\()?\s*\(?([^)]*)\)?",
+            lines[i],
+        )
+        if not m:
+            i += 1
+            continue
+        name = m.group(1) or m.group(2) or m.group(3) or "anonymous"
+        decl = lines[i].strip()
+        start_line = i + 1
+        depth = 0
+        j = i
+        body_start = -1
+        while j < len(lines):
+            if body_start == -1 and "{" in lines[j]:
+                body_start = j
+            if body_start != -1:
+                depth += lines[j].count("{") - lines[j].count("}")
+                if depth <= 0 and j > body_start:
+                    break
+            j += 1
+        if body_start == -1:
+            i += 1
+            continue
+        out.append((name, "\n".join(lines[body_start:j + 1]), start_line, decl))
+        i = j + 1
+    return out
+
+
 def _in_line_comment(content: str, start: int) -> bool:
     """True if ``start`` sits after a ``//`` on the same line."""
     line_start = content.rfind("\n", 0, start) + 1
@@ -795,6 +1045,9 @@ def _in_line_comment(content: str, start: int) -> bool:
 def _detect_ts_sdk(content: str, rel: str) -> list[StaticIssue]:
     content = _clean_code(content, "ts")
     issues: list[StaticIssue] = []
+    for name, body, start_line, decl in _iter_ts_functions(content):
+        issues.extend(_detect_uncontrolled_payout_ts(
+            name, body, decl, rel, start_line))
     for m in re.finditer(r"(?:amountOutMin|minOut|slippage|minimumOut|"
                          r"minAmountOut)\s*[:=]\s*(0|0n|0x0)\b", content):
         if _in_line_comment(content, m.start()):

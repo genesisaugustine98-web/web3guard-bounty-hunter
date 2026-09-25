@@ -134,6 +134,57 @@ contract C {
     assert found == {("uncontrolled-payout", "bad")}
 
 
+def test_uncontrolled_payout_ported_languages() -> None:
+    """The uncontrolled-payout logic check fires on every language with a
+    token-transfer idiom (Solidity, Vyper, Rust/Solana, Move, Cairo 1,
+    Clarity, TypeScript SDK)."""
+    engine = StaticAnalyzerEngine()
+    cases = {
+        "solidity": (
+            "contract C { mapping(address=>uint256) public claimable; "
+            "IERC20 t; function claim(uint256 amount) external { "
+            "require(claimable[msg.sender] > 0); "
+            "t.transfer(msg.sender, amount); "
+            "delete claimable[msg.sender]; } }", "C.sol"),
+        "vyper": (
+            "@external\ndef claim(amount: uint256):\n"
+            "    assert self.claimable[msg.sender] > 0\n"
+            "    self.token.transfer(msg.sender, amount)\n"
+            "    self.claimable[msg.sender] = 0", "C.vy"),
+        "rust-solana": (
+            "pub fn claim(ctx: Context<Claim>, amount: u64) -> Result<()> {\n"
+            "    let claim = &mut ctx.accounts.claim_state;\n"
+            "    if claim.vested > 0 {\n"
+            "        token::transfer(ctx.accounts.into(), amount)?;\n"
+            "    }\n    Ok(())\n}", "C.rs"),
+        "move": (
+            "module m::vault { public fun claim<CoinType>(account: &signer, "
+            "amount: u64) { let addr = signer::address_of(account); "
+            "if balances[addr] > 0 { coin::transfer<CoinType>(vault, addr, "
+            "amount); }; } }", "C.move"),
+        "cairo": (
+            "mod vault {\n    fn claim(ref self: ContractState, "
+            "amount: u256) {\n        if self.claimable.read() > 0 {\n"
+            "            self.ierc20.transfer(recipient, amount);\n"
+            "        }\n    }\n}", "C.cairo"),
+        "clarity": (
+            "(define-data-var claimable uint 0)\n"
+            "(define-public (claim (amount uint))\n  (begin\n"
+            "    (asserts! (> (var-get claimable) 0) err-not-entitled)\n"
+            "    (try! (ft-transfer? token tx-sender amount))\n"
+            "    (ok true)))", "C.clar"),
+        "ts-sdk": (
+            "async function claim(amountIn: number) {\n"
+            "  if (claimable[signer] > 0) { "
+            "await token.transfer(signer, amountIn); }\n}", "C.ts"),
+    }
+    for lang, (src, rel) in cases.items():
+        found = [r for r in engine.run_text(src, rel, lang)
+                 if r.category == "uncontrolled-payout"]
+        assert found, f"uncontrolled-payout not detected for {lang}"
+        assert found[0].function == "claim"
+
+
 def test_static_analyzer_covers_all_languages() -> None:
     engine = StaticAnalyzerEngine()
     languages = {r.engine for r in engine.run(VULNERABLE)}
