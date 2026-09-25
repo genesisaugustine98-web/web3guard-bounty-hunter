@@ -102,7 +102,10 @@ def _iter_braced_functions(text: str, lang: str) -> list[tuple[str, str, int, in
             continue  # prototype / interface declaration
         start_line = text[: m.start()].count("\n") + 1
         end = _brace_body(text, brace)
-        out.append((name, text[brace:end], start_line, brace, stmt))
+        # decl = the full match (name + parameter list where the regex
+        # consumes it) plus the modifier/returns tail up to the brace, so
+        # callers see the complete signature for guard detection.
+        out.append((name, text[brace:end], start_line, brace, m.group(0) + stmt))
     return out
 
 
@@ -183,6 +186,102 @@ _GUARD_RE = re.compile(
     r"has_one\s*=\s*owner|signer\s*::|Signer<|is_signer|"
     r"#[^\n]*Signer<"
 )
+# NB (uncontrolled-payout): an external token/ETH transfer whose amount
+# argument references a caller-supplied parameter, while the same function
+# touches an entitlement ledger (claimable/vested/allocations/... mapping)
+# and no bound or clamp on the parameter exists. "Pay what the caller asks"
+# instead of "pay what the ledger owes" is a recurring high-severity
+# business-logic flaw that no other detector shape covers. Only the amount
+# argument is inspected; the recipient argument is intentionally free-form.
+_PAYOUT_AMOUNT_ARG_RES = (
+    # ERC20-style: <token>.transfer(recipient, AMOUNT) / safeTransfer
+    re.compile(
+        r"\b[\w.\[\]]+\s*\.\s*(?:safeTransfer|transfer)\s*"
+        r"\(\s*[\w.]+\s*,\s*([^,()]+?)\s*\)"),
+    # native ETH transfer, pre-0.5 and modern: recipient.transfer(AMOUNT)
+    # / .send(AMOUNT) (single-argument form, optionally behind payable();
+    # the two-argument ERC20 shape cannot match this regex).
+    re.compile(
+        r"\b(?:payable\s*\([^)]*\)|[\w.\[\]]+)\s*\.\s*"
+        r"(?:transfer|send)\s*\(\s*([^,()]+?)\s*\)"),
+)
+# NB: ETH value forwarded along a low-level call (x.call{value: ...} and
+# the legacy x.call.value(...) form) is deliberately NOT a payout trigger:
+# raw forwarding helpers (Address.sendValue, withdrawal plumbing) are
+# trusted paths, and the legacy .call.value variant is still exempted via
+# the low-level-call check in the detector body.
+_PAYOUT_LEDGER_RE = re.compile(
+    r"\b(?:claim\w*|entitle\w*|allocat\w*|allot\w*|vest\w*|reward\w*|"
+    r"owed|releas\w*|airdrop\w*|merkle\w*|deposit\w*|balance\w*|"
+    r"share\w*|contribution\w*)\s*\["
+)
+_PAYOUT_IDENT_RE = re.compile(r"[A-Za-z_]\w*")
+# Authorization only: a claim/withdraw is *validated* by
+# require(ledger[msg.sender] > 0) — that is not an access guard and must
+# not suppress the uncontrolled-payout check. Only owner-style modifiers
+# or ownership comparisons count here.
+_AUTH_GUARD_RE = re.compile(
+    r"only[A-Za-z][A-Za-z0-9_]*\b|"
+    r"require\s*\([^;]{0,80}\bmsg\.sender\s*==|"
+    r"assert\s*\([^;]{0,80}\bmsg\.sender\s*==|"
+    r"require\s*\([^;]{0,80}==\s*msg\.sender"
+)
+
+
+def _param_names(sig: str) -> set[str]:
+    """Extract parameter *names* from a function signature.
+
+    ``function claim(uint256 amount, address to)`` -> ``{"amount", "to"}``.
+    Handles typed declarations (``uint256`` etc.), data locations
+    (``memory``/``calldata``/``storage``), ``indexed``, array suffixes,
+    and unnamed parameters (which contribute nothing).
+    """
+    inner = sig.split("(", 1)[-1].rsplit(")", 1)[0]
+    type_words = {
+        "uint", "uint256", "uint128", "uint64", "uint32", "uint8",
+        "int", "int256", "int128", "int64", "int32", "int8",
+        "address", "bool", "bytes", "bytes32", "bytes20", "string",
+        "mapping", "memory", "calldata", "storage", "payable", "indexed",
+    }
+    names: set[str] = set()
+    for part in inner.split(","):
+        words = part.strip().split()
+        if not words:
+            continue
+        last = re.sub(r"\[[^\]]*\]$", "", words[-1])
+        if re.fullmatch(r"[A-Za-z_$][\w$]*", last) and last not in type_words:
+            names.add(last)
+    return names
+
+
+def _payout_amount_is_unbounded(body: str, idents: set[str]) -> bool:
+    """True when none of ``idents`` is visibly bounded in ``body``.
+
+    A bound is any of:
+    - an ordering comparison against a non-literal operand
+      (``require(ledger[msg.sender] >= amount)`` or
+      ``if (amount > bal) revert``) — comparing against a *literal*
+      (``require(amount > 0)``) does not bound the payout,
+    - an in-function clamp assignment keeping the same name
+      (``amount = ...`` / ``amount -= ...``),
+    - a min()/max() clamp call anywhere in the function (conservative:
+      may be unrelated to the amount, which errs toward suppression).
+    """
+    literal_re = re.compile(r"\d+|0[xX][0-9a-fA-F]+")
+    for ident in idents:
+        esc = re.escape(ident)
+        if re.search(rf"\b{esc}\b\s*(?:[-+*/]|<<|>>)?=", body):
+            return False
+        for cm in re.finditer(
+                r"([\w.\[\]]+)\s*(<=|>=|<|>)\s*([\w.\[\]]+)", body):
+            left, _op, right = cm.groups()
+            if ident in (left, right):
+                other = right if left == ident else left
+                if not literal_re.fullmatch(other):
+                    return False
+        if re.search(r"\bmin\s*\(|\bmax\s*\(|\bMath\.min|\bMath\.max", body):
+            return False
+    return True
 _PRIVILEGED_FN = re.compile(
     r"^(?:set|update|change|upgrade|authorize|transfer_?owner|add_?to_?whitelist|"
     r"remove_?from_?whitelist|pause|unpause|kill|steal|rescue|sweep|withdraw_?all|"
@@ -387,6 +486,36 @@ def _detect_solidity(content: str, rel: str) -> list[StaticIssue]:
                 "initialize() lacks an initializer/guard, so anyone can "
                 "re-initialize or initialize before the deployer does.",
                 function=name, confidence=0.85))
+        # 8b. Uncontrolled payout: an external transfer whose amount comes
+        # from a caller-supplied parameter while the same function reads an
+        # entitlement ledger and no clamp exists on the parameter. "Pay what
+        # the caller asks" instead of "pay what the ledger owes" is a
+        # recurring business-logic flaw (drains airdrops, claim faucets,
+        # vesting wallets) that the shape-based detectors above cannot see.
+        if not _AUTH_GUARD_RE.search(sig + body) \
+                and _PAYOUT_LEDGER_RE.search(sig + body):
+            params = _param_names(sig)
+            for amount_re in _PAYOUT_AMOUNT_ARG_RES:
+                m = amount_re.search(body)
+                if m is None:
+                    continue
+                arg = m.group(1)
+                user_idents = set(_PAYOUT_IDENT_RE.findall(arg))
+                user_idents -= {"msg", "sender", "value", "balance", "this"}
+                user_idents &= params
+                if not user_idents:
+                    continue
+                if not _payout_amount_is_unbounded(body, user_idents):
+                    continue
+                issues.append(_issue(
+                    rel, start_line, "uncontrolled-payout", "HIGH",
+                    "Uncontrolled payout amount (ledger bypass)",
+                    f"{name}() transfers a caller-supplied amount while "
+                    "reading an entitlement ledger; unless the amount is "
+                    "derived from the ledger this can pay out more than "
+                    "the caller is owed.",
+                    function=name, confidence=0.75))
+                break
         # 9. selfdestruct without guard.
         if re.search(r"selfdestruct|selfdestruct\(", body) and not guarded:
             issues.append(_issue(
@@ -1226,4 +1355,39 @@ class StaticAnalyzerEngine(DiscoveryEngineBase):
                     confidence=issue.confidence,
                     raw={"static": True, "notes": issue.extra},
                 ))
+        return results
+
+    def run_text(self, content: str, rel_path: str = "snippet.sol",
+                 language: str = "solidity") -> list[DiscoveryResult]:
+        """Run the language detector over an in-memory source string.
+
+        Same result shape as :meth:`run`; useful for targeted checks and
+        tests without materializing a file tree. ``language`` is a
+        ``TargetLanguage`` member name, case-insensitive with ``-`` or
+        ``_`` separators (``"solidity"``, ``"Rust-Solana"``, ...).
+        """
+        member = getattr(
+            TargetLanguage,
+            language.upper().replace("-", "_"),
+            None,
+        )
+        detector = _DETECTORS.get(member) if member is not None else None
+        if detector is None:
+            return []
+        results: list[DiscoveryResult] = []
+        for issue in detector(content, rel_path):
+            results.append(DiscoveryResult(
+                engine=self.name,
+                target="<text>",
+                file=issue.file,
+                line=issue.line,
+                function=issue.function,
+                category=issue.category,
+                severity=issue.severity,
+                title=issue.title,
+                description=issue.description,
+                swc_id=issue.swc_id,
+                confidence=issue.confidence,
+                raw={"static": True, "notes": issue.extra},
+            ))
         return results

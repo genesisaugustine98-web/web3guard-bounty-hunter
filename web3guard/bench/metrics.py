@@ -43,6 +43,7 @@ VALID_CATEGORIES = frozenset({
     "slippage",
     "tx-origin",
     "unchecked-external-call",
+    "uncontrolled-payout",
     "unlimited-approval",
     "unprotected-init",
 })

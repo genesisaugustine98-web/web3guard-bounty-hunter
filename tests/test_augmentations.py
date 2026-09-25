@@ -87,6 +87,53 @@ def test_static_analyzer_no_false_positives_on_clean() -> None:
     assert engine.run(CLEAN) == []
 
 
+def test_uncontrolled_payout_detector() -> None:
+    """Caller-supplied payout amounts against an entitlement ledger are
+    flagged; ledger-bounded / clamped / authorized payouts are not."""
+    from web3guard.discovery.static_analyzer import (
+        _param_names,
+        _payout_amount_is_unbounded,
+    )
+
+    engine = StaticAnalyzerEngine()
+    hits = {(r.file, r.function) for r in engine.run(VULNERABLE)
+            if r.category == "uncontrolled-payout"}
+    assert ("UncontrolledPayout.sol", "claim") in hits
+    assert ("UncontrolledPayout.sol", "claimWithFee") in hits
+
+    # --- helper semantics -------------------------------------------------
+    # Ledger bound on the paid parameter suppresses (SafeVault-style).
+    assert not _payout_amount_is_unbounded(
+        "require(ledger[msg.sender] >= amount);", {"amount"})
+    # A literal-only validation (amount > 0) does NOT bound the payout.
+    assert _payout_amount_is_unbounded("require(amount > 0);", {"amount"})
+    # In-function clamp keeps the payout safe.
+    assert not _payout_amount_is_unbounded("amount = amount / 2;", {"amount"})
+    # Typed parameter declarations parse to bare names.
+    assert _param_names("function claim(uint256 amount, address to) external") \
+        == {"amount", "to"}
+
+    # --- end-to-end suppression paths -------------------------------------
+    src = """
+pragma solidity ^0.8.0;
+contract C {
+    mapping(address => uint256) public vesting;
+    IERC20 t;
+    // ledger-bounded: safe
+    function ok1(uint256 amount) external { require(vesting[msg.sender] >= amount); t.transfer(msg.sender, amount); }
+    // owner-only path: trusted, not flagged
+    function ok2(uint256 amount) external onlyOwner { t.transfer(msg.sender, amount); }
+    // raw forwarding helper: low-level call is out of scope
+    function ok3(address to, uint256 amount) external { (bool s,) = to.call{value: amount}(""); require(s); }
+    // FLAW: pays the parameter, ledger is a gate only (validation != auth)
+    function bad(uint256 amount) external { require(vesting[msg.sender] > 0); t.transfer(msg.sender, amount); delete vesting[msg.sender]; }
+}
+"""
+    found = {(r.category, r.function) for r in engine.run_text(src, "C.sol")
+             if r.category == "uncontrolled-payout"}
+    assert found == {("uncontrolled-payout", "bad")}
+
+
 def test_static_analyzer_covers_all_languages() -> None:
     engine = StaticAnalyzerEngine()
     languages = {r.engine for r in engine.run(VULNERABLE)}

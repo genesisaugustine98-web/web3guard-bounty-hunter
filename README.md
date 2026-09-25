@@ -57,6 +57,17 @@ harness exists.
 ## Key features (this edition)
 
 - **Multi-language** — eight language adapters, all in one scanner.
+- **Business-logic payout flaw detection**: the static engine now
+  flags *uncontrolled payouts* — an external token/ETH transfer of a
+  caller-supplied amount while the function reads an entitlement
+  ledger (claimable / vesting / allocations / …) with no ledger bound
+  on the amount and no authorization guard. "Pay what the caller
+  asks" instead of "pay what the ledger owes" is one of the most
+  frequently paid bounty classes; validation-only ledgers
+  (`require(ledger[msg.sender] > 0)`) do not suppress it, while
+  ledger-bounded withdrawals (`require(ledger[msg.sender] >= amount)`)
+  stay silent. Tuned to zero false positives on OpenZeppelin Contracts
+  and the historical DAO source.
 - **Multi-provider AI** with **circuit breaker**: NIM primary, OpenRouter /
   Groq / DeepSeek-direct as automatic fallbacks. If a provider returns
   5 errors, the scanner opens the circuit and falls through.
@@ -430,6 +441,25 @@ See [SECURITY.md](SECURITY.md). The short version:
 - Never deploy exploits to mainnet without explicit authorization.
 
 ## Changelog
+
+### Unreleased
+
+- **New static category `uncontrolled-payout`** (SWC-105 family,
+  business logic): detects caller-supplied transfer amounts against an
+  entitlement ledger when no bound/clamp/authorization protects the
+  amount. Covers ERC20 `transfer`/`safeTransfer` and native
+  `payable(x).transfer/send` shapes; suppresses on ledger comparisons
+  against the amount, in-function clamps, `min()`/`max()` clamps, and
+  authorization guards — while correctly *not* suppressing on
+  validation-only requires. Verified: flags the airdrop-drain and
+  fee-decimal flaw classes; zero findings on OpenZeppelin Contracts,
+  the pre-fix DAO source (its bugs are reentrancy, not payout), and
+  the clean-fixture corpus.
+- `_iter_braced_functions` now returns the **full declaration text**
+  (name + parameters + modifiers) so all detectors see the complete
+  signature for guard detection.
+- `StaticAnalyzerEngine.run_text()` — run any detector over an
+  in-memory source string (targeted checks, tests).
 
 ### v3.4.0 — verification ensemble, dual feed, fleet mode
 
