@@ -291,6 +291,12 @@ def _looks_like_git_url(url: str) -> bool:
         return False
     if url.endswith(_GIT_SUFFIX):
         return True
+    # A downloadable artifact on a forge host (e.g.
+    # github.com/o/r/archive/refs/heads/main.tar.gz or a release asset)
+    # is not a cloneable repo and must reach the archive/single-file
+    # transports instead of git clone.
+    if _looks_like_archive(url) or _looks_like_single_file(url):
+        return False
     host = (parsed.hostname or "").lower()
     if host in _KNOWN_FORGE_HOSTS:
         return True

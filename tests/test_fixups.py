@@ -311,6 +311,26 @@ def test_fetch_single_file(tmp_path):
         fetch_target("https://nonexistent.invalid/repo.tar.gz")
 
 
+def test_git_url_classification_excludes_forge_artifacts():
+    """Archive/release/raw-file URLs on forge hosts must not be treated
+    as cloneable git repos.
+
+    Regression: ``https://github.com/o/r/archive/refs/heads/main.tar.gz``
+    used to be routed to ``git clone`` (which 404s) because every URL on
+    a known forge host was classified as a git URL.
+    """
+    from web3guard.utils.fetch import _looks_like_git_url
+
+    assert _looks_like_git_url("https://github.com/slockit/DAO")
+    assert _looks_like_git_url("https://github.com/slockit/DAO.git")
+    assert not _looks_like_git_url(
+        "https://github.com/slockit/DAO/archive/refs/heads/master.tar.gz")
+    assert not _looks_like_git_url(
+        "https://github.com/o/r/releases/download/v1.0/bundle.zip")
+    assert not _looks_like_git_url(
+        "https://raw.githubusercontent.com/o/r/main/Vault.sol")
+
+
 def test_fetch_local_path_roundtrip(tmp_path):
     d = tmp_path / "local"
     d.mkdir()
