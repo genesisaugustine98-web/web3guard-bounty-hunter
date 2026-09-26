@@ -33,7 +33,16 @@
  *   DEFAULT_MIN_SEV   optional, default LOW
  */
 
-const RATE_LIMIT = { max: 5, windowMs: 60_000 };
+import {
+  SAFE_LIMITS,
+  Web3GuardFreeGuard,
+  reserveFreeCapacity,
+  scanReservations,
+} from "./cloudflare_free_guard.js";
+
+export { Web3GuardFreeGuard };
+
+export const RATE_LIMIT = { max: 5, windowMs: 60_000 };
 const rateBuckets = new Map(); // chatId -> [timestamps]
 
 export default {
@@ -42,7 +51,39 @@ export default {
 
     // Liveness for the CF dashboard / uptime checks.
     if (url.pathname === "/healthz" || request.method === "GET") {
-      return json({ ok: true, service: "web3guard-trigger", version: 2 });
+      return json({ ok: true, service: "web3guard-trigger", version: 3, free_mode: true });
+    }
+
+    if (url.pathname === "/api/scan" && request.method === "POST") {
+      const turnstile = await requireTurnstile(request, env);
+      if (!turnstile.ok) return json(turnstile, 403);
+      const keyCheck = requireWebApiKey(request, env);
+      if (!keyCheck.ok) return json(keyCheck, 401);
+      let body;
+      try { body = await request.json(); }
+      catch { return json({ ok: false, error: "invalid JSON" }, 400); }
+      const target = String(body?.target || "").trim();
+      if (!validTarget(target)) return json({ ok: false, error: "unsupported target" }, 400);
+      const parsed = parseBudget(body?.budget, env);
+      if (parsed.error) return json({ ok: false, error: parsed.error }, 400);
+      const payload = {
+        request_id: crypto.randomUUID(),
+        target,
+        budget: String(body?.discovery_only ? Math.min(parsed.budget, 50000) : parsed.budget),
+        chat_id: "",
+        min_severity: normalizeSeverity(body?.min_severity || env.DEFAULT_MIN_SEV || "LOW"),
+        discovery_only: Boolean(body?.discovery_only),
+        source: "web",
+      };
+      const ok = await dispatchScan(env, payload);
+      return json({ ok, queued: Boolean(env.SCAN_QUEUE), request_id: payload.request_id, target },
+        ok ? 200 : 503);
+    }
+
+    if (url.pathname === "/api/usage" && request.method === "GET") {
+      const keyCheck = requireWebApiKey(request, env);
+      if (!keyCheck.ok) return json(keyCheck, 401);
+      return usageSnapshot(env);
     }
 
     if (request.method !== "POST" || url.pathname !== "/webhook") {
@@ -94,6 +135,22 @@ export default {
       await sendTelegram(env, chatId, replyText, replyKeyboard);
     }
     return json({ ok: true });
+  },
+
+  async queue(batch, env, ctx) {
+    for (const message of batch.messages) {
+      const payload = message.body || {};
+      try {
+        const ok = await dispatchGithubRepositoryEvent(env, payload);
+        if (!ok) throw new Error("GitHub repository_dispatch failed");
+        await recordAuditStatus(env, payload.request_id, "dispatched", null, ctx);
+        if (typeof message.ack === "function") message.ack();
+      } catch (error) {
+        await recordAuditStatus(env, payload.request_id, "queue_error", String(error), ctx);
+        if (typeof message.retry === "function") message.retry();
+        else throw error;
+      }
+    }
   },
 };
 
@@ -174,7 +231,7 @@ async function handleCommand(env, chatId, text) {
         ]),
       };
     }
-    const ok = await dispatchScan(GITHUB_TOKEN, GITHUB_REPO, {
+    const ok = await dispatchScan(env, {
       target,
       budget: String(budget),
       chat_id: chatId,
@@ -259,6 +316,78 @@ async function handleCallback(env, chatId, callback) {
 // Target validation (mirror of the Python pipeline's supported shapes)
 // ---------------------------------------------------------------------------
 
+function normalizeSeverity(value) {
+  const v = String(value || "LOW").toUpperCase();
+  return ["INFO","LOW","MEDIUM","HIGH","CRITICAL"].includes(v) ? v : "LOW";
+}
+
+async function requireTurnstile(request, env) {
+  const secret = env.TURNSTILE_SECRET || "";
+  const required = String(env.REQUIRE_TURNSTILE || "0") === "1";
+  if (!secret) return required ? { ok:false, error:"turnstile_not_configured" } : { ok:true, skipped:true };
+  const token = request.headers.get("cf-turnstile-response") || "";
+  if (!token) return { ok:false, error:"turnstile_required" };
+  try {
+    const form = new URLSearchParams({ secret, response: token });
+    const ip = request.headers.get("CF-Connecting-IP");
+    if (ip) form.set("remoteip", ip);
+    const response = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+      method:"POST",
+      headers:{"content-type":"application/x-www-form-urlencoded"},
+      body:form.toString(),
+    });
+    const data = await response.json();
+    return data?.success ? { ok:true } : { ok:false, error:"turnstile_failed" };
+  } catch {
+    return { ok:false, error:"turnstile_unavailable" };
+  }
+}
+
+function requireWebApiKey(request, env) {
+  const configured = env.WEB_API_KEY || "";
+  if (!configured) {
+    return String(env.REQUIRE_WEB_API_KEY || "0") === "1"
+      ? { ok:false, error:"web_api_key_not_configured" }
+      : { ok:true, skipped:true };
+  }
+  return request.headers.get("x-web3guard-api-key") === configured
+    ? { ok:true }
+    : { ok:false, error:"invalid_api_key" };
+}
+
+function freeCapFailure(result) {
+  if (result?.failures?.some((x) => x.metric === "rate_limit"))
+    return { text:"⏳ Rate limit: 5 scans / minute per chat. Try again shortly." };
+  return { text:"🛑 Free-mode capacity guard stopped this request before creating billable usage." };
+}
+
+function freeCapResponse(result) {
+  return json({ ok:false, error:"free_cap_reached", failures:result?.failures || [] },429);
+}
+
+function scanUiHtml(env) {
+  const siteKey = escapeHtml(env.TURNSTILE_SITE_KEY || "");
+  const widget = siteKey
+    ? '<div class="cf-turnstile" data-sitekey="' + siteKey + '"></div>'
+    : '<p class="note">Turnstile is not configured.</p>';
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Web3Guard</title>
+<style>body{font:16px system-ui;max-width:760px;margin:40px auto;padding:0 18px}input,select,button{font:inherit;padding:10px;margin:6px 0;width:100%;box-sizing:border-box}button{cursor:pointer}.note{color:#666}.out{white-space:pre-wrap;margin-top:20px}</style>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script></head>
+<body><h1>Web3Guard</h1><p>Free-mode scan control plane.</p>
+<form id="scan"><input name="target" required placeholder="Target URL, IPFS path, owner/repo, or 0x address">
+<input name="budget" value="max" placeholder="Budget"><select name="min_severity"><option>LOW</option><option>MEDIUM</option><option>HIGH</option><option>CRITICAL</option><option>INFO</option></select>
+<label><input type="checkbox" name="discovery_only"> discovery-only</label>${widget}<button>Queue scan</button></form>
+<div class="out" id="out"></div><script>
+document.querySelector("#scan").addEventListener("submit",async e=>{
+e.preventDefault();const f=new FormData(e.currentTarget);
+const token=document.querySelector('[name="cf-turnstile-response"]')?.value||"";
+const r=await fetch("/api/scan",{method:"POST",headers:{"content-type":"application/json",...(token?{"cf-turnstile-response":token}:{})},
+body:JSON.stringify({target:f.get("target"),budget:f.get("budget"),min_severity:f.get("min_severity"),discovery_only:f.get("discovery_only")==="on"})});
+document.querySelector("#out").textContent=await r.text();});
+</script></body></html>`;
+}
+
 function validTarget(target) {
   if (/^0x[a-fA-F0-9]{40}$/.test(target)) return true; // on-chain address
   if (/^(gh|gl|bb|cb|sr):/.test(target)) return true; // shorthand
@@ -288,7 +417,35 @@ function parseBudget(raw, env) {
 // GitHub + Telegram transports
 // ---------------------------------------------------------------------------
 
-async function dispatchScan(token, repo, payload) {
+async function dispatchScan(env, payload) {
+  const admission = await admitScan(env, payload.chat_id || "web");
+  if (!admission.ok) {
+    await recordAudit(env, payload, "blocked", admission.error);
+    return false;
+  }
+  if (env.SCAN_QUEUE) {
+    try {
+      await recordAudit(env, payload, "queued", null);
+      await env.SCAN_QUEUE.send(payload);
+      return true;
+    } catch (error) {
+      await recordAuditStatus(env, payload.request_id, "queue_error", String(error));
+      return false;
+    }
+  }
+  if (String(env.REQUIRE_QUEUE || "0") === "1") {
+    await recordAudit(env, payload, "queue_missing", "SCAN_QUEUE binding is required");
+    return false;
+  }
+  const ok = await dispatchGithubRepositoryEvent(env, payload);
+  await recordAuditStatus(env, payload.request_id, ok ? "dispatched" : "dispatch_error", ok ? null : "GitHub dispatch failed");
+  return ok;
+}
+
+async function dispatchGithubRepositoryEvent(env, payload) {
+  const token = env.GITHUB_TOKEN || "";
+  const repo = env.GITHUB_REPO || "";
+  if (!token || !repo) return false;
   const res = await fetch(`https://api.github.com/repos/${repo}/dispatches`, {
     method: "POST",
     headers: {
@@ -300,6 +457,65 @@ async function dispatchScan(token, repo, payload) {
     body: JSON.stringify({ event_type: "scan-request", client_payload: payload }),
   });
   return res.ok;
+}
+
+async function admitScan(env, chatId) {
+  return reserveFreeCapacity(env, {
+    reservations: scanReservations(env, Boolean(env.SCAN_QUEUE)),
+    rate: { key: String(chatId || "anonymous").slice(0, 256), limit: RATE_LIMIT.max, windowMs: RATE_LIMIT.windowMs },
+  });
+}
+
+async function recordAudit(env, payload, status, error, ctx) {
+  const work = async () => {
+    if (!env.AUDIT_DB) return;
+    try {
+      await env.AUDIT_DB.prepare(
+        `INSERT OR IGNORE INTO scan_audit
+         (id, created_at, chat_id, source, target, budget, min_severity, discovery_only, status, error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        payload.request_id || crypto.randomUUID(),
+        new Date().toISOString(),
+        String(payload.chat_id || ""),
+        String(payload.source || "unknown"),
+        String(payload.target || ""),
+        Number.parseInt(String(payload.budget || "0"), 10) || 0,
+        normalizeSeverity(payload.min_severity || "LOW"),
+        payload.discovery_only ? 1 : 0,
+        status,
+        error ? String(error).slice(0, 1000) : null,
+      ).run();
+    } catch {
+      // Best effort.
+    }
+  };
+  if (ctx?.waitUntil) ctx.waitUntil(work()); else await work();
+}
+
+async function recordAuditStatus(env, requestId, status, error, ctx) {
+  if (!requestId || !env.AUDIT_DB) return;
+  const work = async () => {
+    try {
+      await env.AUDIT_DB.prepare(
+        "UPDATE scan_audit SET status = ?, error = ? WHERE id = ?"
+      ).bind(status, error ? String(error).slice(0, 1000) : null, requestId).run();
+    } catch {
+      // Best effort.
+    }
+  };
+  if (ctx?.waitUntil) ctx.waitUntil(work()); else await work();
+}
+
+function usageSnapshot(env) {
+  if (!env.FREE_GUARD) return json({ ok: true, degraded: true, free_guard: "unbound" });
+  const id = env.FREE_GUARD.idFromName("global");
+  const stub = env.FREE_GUARD.get(id);
+  return stub.fetch("https://web3guard-free-guard/admit", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ reservations: [] }),
+  });
 }
 
 async function githubStatus(token, repo) {
