@@ -23,6 +23,8 @@ Design rules:
 
 from __future__ import annotations
 
+from typing import Any
+
 from web3guard.storage.base import (
     BackendInfo,
     StorageBackend,

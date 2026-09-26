@@ -63,8 +63,15 @@ def free_bytes(path: Path) -> int:
         return 0
 
 
-def disk_preflight(workdir: Path, floor: int = DEFAULT_DISK_FLOOR_BYTES) -> bool:
-    """True when ``workdir``'s filesystem has at least ``floor`` free bytes."""
+def disk_preflight(workdir: Path, floor: int | None = None) -> bool:
+    """True when ``workdir``'s filesystem has at least the floor free.
+
+    ``floor=None`` (the default) derives the floor from the volume via
+    :func:`disk_floor_for`, so small volumes (CI tmpfs, containers) are
+    not held to the fixed 512 MiB default.
+    """
+    if floor is None:
+        floor = disk_floor_for(workdir)
     free = free_bytes(workdir)
     ok = free == 0 or free >= floor  # 0 == unknown: do not block
     if not ok:

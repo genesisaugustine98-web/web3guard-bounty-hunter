@@ -59,7 +59,7 @@ class StorageBackend(ABC):
         except Exception as e:  # noqa: BLE001
             return BackendInfo(kind=self.kind, ok=False, detail=str(e)[:300])
 
-    def close(self) -> None:
+    def close(self) -> None:  # noqa: B027  # optional hook; backends may rely on the no-op
         """Release connections. Default: nothing to release."""
 
     # ---- dialect helpers -------------------------------------------------

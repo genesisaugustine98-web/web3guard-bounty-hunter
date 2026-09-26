@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from web3guard.ai import AIClient, AIProvider, CostTracker, OpenAICompatibleProvider
-from web3guard.ai.budget import BudgetController
+from web3guard.ai.budget import BudgetController, BudgetExhausted
 from web3guard.ai.cost import CostCeilingExceeded
 from web3guard.findings_db import FindingRecord, FindingsDB
 from web3guard.graph import IncrementalAnalyzer
@@ -447,7 +447,7 @@ class Scanner:
                 local=__import__("web3guard.storage.sqlite_backend",
                                  fromlist=["SqliteBackend"]).SqliteBackend(
                                      ":memory:"))
-        self.state = self.store.state  # type: ignore[attr-defined]  # StateStore
+        self.state = self.store.state  # StateStore
         # v3.5: global budget control (durable daily/monthly horizons).
         budget_cfg = self.config.get("budget") or {}
         self.budget = BudgetController(
@@ -551,16 +551,25 @@ class Scanner:
     # ---- main entry point ------------------------------------------------
 
     def _scope_for(self) -> ScopeAllowlist:
-        """One memoized ScopeAllowlist per Scanner (v3.4 built one per target)."""
-        if self._scope is None:
-            self._scope = ScopeAllowlist(
+        """One memoized ScopeAllowlist per Scanner (v3.4 built one per target).
+
+        Falls back to building one on the fly when the memo slot is
+        missing (narrowly-constructed Scanner instances in tests/tools).
+        """
+        try:
+            scope = self._scope
+        except AttributeError:
+            scope = None
+        if scope is None:
+            scope = ScopeAllowlist(
                 self.config.get("allow") or [],
                 require_authorized_scope=bool(
                     self.config.get("require_authorized_scope", False)),
                 deny=list(self.config.get("deny") or []),
                 cache_dir=self.workdir / ".web3guard",
             )
-        return self._scope
+            self._scope = scope
+        return scope
 
     def scan(
         self,
@@ -589,17 +598,24 @@ class Scanner:
         self._scan_id = hashlib.sha256(
             f"{self._start_ts}|{sorted(targets)}".encode()).hexdigest()[:16]
         # v3.5 budget preflight: refuse to start when already exhausted.
+        # The preflight is skipped when no budget controller is attached
+        # (e.g. narrowly-constructed Scanner instances in tests/tools).
         try:
-            self.budget.preflight()
-        except BudgetExhausted as e:
-            LOGGER.warning("budget preflight refused scan: %s", e)
-            result = ScanResult(
-                started_at=self._start_ts,
-                finished_at=self._start_ts,
-                config=self._sanitize_config(),
-            )
-            result.metadata["budget_exhausted"] = str(e)
-            return result
+            budget_ctl = self.budget
+        except AttributeError:
+            budget_ctl = None
+        if budget_ctl is not None:
+            try:
+                budget_ctl.preflight()
+            except BudgetExhausted as e:
+                LOGGER.warning("budget preflight refused scan: %s", e)
+                result = ScanResult(
+                    started_at=self._start_ts,
+                    finished_at=self._start_ts,
+                    config=self._sanitize_config(),
+                )
+                result.metadata["budget_exhausted"] = str(e)
+                return result
         parsed = self._parse_targets(targets)
         result = ScanResult(
             started_at=self._start_ts,
@@ -844,6 +860,14 @@ class Scanner:
                 LOGGER.warning("adapter %s discover_files failed: %s", lang, e)
                 files = []
             files = self._ordered_files(files, target_path, plan)
+            if dirty_files is not None:
+                # Incremental mode: skip chunks from clean files so only
+                # changed code (plus its transitive importers) is
+                # re-analyzed. Unmatched paths (symlinks, generated
+                # chunks) fall through to the full path.
+                if not incremental_first_scan:
+                    files = [fp for fp in files
+                             if self._rel_under(target_path, fp) in dirty_files]
             tr.files_analyzed += len(files)
             LOGGER.info("adapter %s found %d files", lang, len(files))
             # Per-chunk analysis.
@@ -1465,6 +1489,18 @@ class Scanner:
             "analyzed first"
         )
         return plan
+
+    @staticmethod
+    def _rel_under(target_path: Path, fp: Path) -> str:
+        """Slash-normalized path of ``fp`` relative to ``target_path``.
+
+        Mirrors :meth:`IncrementalAnalyzer.build_graph`'s keying so the
+        incremental dirty set and adapter-discovered files always match.
+        """
+        try:
+            return str(fp.relative_to(target_path)).replace("\\\\", "/")
+        except ValueError:  # noqa: PERF203
+            return str(fp)
 
     def _ordered_files(
         self,

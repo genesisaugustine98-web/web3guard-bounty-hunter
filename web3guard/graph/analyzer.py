@@ -190,12 +190,12 @@ class IncrementalAnalyzer:
         if first_scan:
             dirty = set(g.nodes)
         else:
+            assert prev is not None  # narrows Optional for type checkers
             for rel, node in g.nodes.items():
                 prev_hash = (prev.nodes.get(rel) or {}).get("hash")
                 if prev_hash is None or prev_hash != node["hash"]:
                     dirty.add(rel)
                     changed.append(rel)
-            removed = sorted(r for r in prev.nodes if r not in g.nodes)
             dirty = self._propagate(g, dirty)
         self._save_graph(target, g)
         return {

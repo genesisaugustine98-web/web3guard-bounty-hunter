@@ -102,7 +102,7 @@ def accelerator() -> Any:
         _SELECTED = PythonAccelerator()
         return _SELECTED
     try:
-        import web3guard_accel as mod  # type: ignore[import-not-found]
+        import web3guard_accel as mod
         _SELECTED = RustAccelerator(mod)
         LOGGER.info("rust acceleration active (%s)", getattr(mod, "__version__", "?"))
     except ImportError:
