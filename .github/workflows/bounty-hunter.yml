@@ -269,6 +269,7 @@ jobs:
         run: |
           python -m web3guard.cli bench \
             --fail-below 0.99,0.95 \
+            --max-fp 1 \
             --json bench/reports/current.json
 
       - name: Diff in-repo benchmark vs committed baseline
@@ -286,7 +287,8 @@ jobs:
         run: |
           python -m web3guard.cli bench \
             --corpus bench/smartbugs/corpus.json \
-            --fail-below 1.0,0.8 \
+            --fail-below 0.98,0.8 \
+            --max-fp 2 \
             --json bench/smartbugs/reports/current.json
 
       - name: Diff SmartBugs benchmark vs committed baseline

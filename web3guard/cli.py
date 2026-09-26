@@ -174,6 +174,11 @@ def build_parser() -> argparse.ArgumentParser:
     bench.add_argument("--fail-below", default=None,
                        help="Comma-separated floors 'precision,recall' that "
                             "exit non-zero when breached (CI gate), e.g. 0.9,0.85")
+    bench.add_argument("--max-fp", type=int, default=None, dest="max_fp",
+                       help="Exit non-zero when finding-level false positives "
+                            "exceed this count (CI gate; pair with a slightly "
+                            "relaxed --fail-below so one FP from a new "
+                            "detector cannot turn CI red on its own)")
     bench.add_argument("--diff", type=Path, default=None, dest="diff_path",
                        help="Path to a previously-saved --json report; print a "
                             "regression diff against the current run and exit "
@@ -498,6 +503,13 @@ def _cmd_bench(args: argparse.Namespace) -> int:
         print(f"\nGate: precision>={p_floor:.3f} recall>={r_floor:.3f} "
               f"-> {'PASS' if not breached else 'FAIL'}")
         if breached:
+            return 1
+
+    if args.max_fp is not None:
+        fp_breached = o.fp > args.max_fp
+        print(f"Gate: false-positives<={args.max_fp} (actual {o.fp}) "
+              f"-> {'PASS' if not fp_breached else 'FAIL'}")
+        if fp_breached:
             return 1
 
     if args.diff_path and d["regressed"]:

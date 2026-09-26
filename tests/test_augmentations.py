@@ -744,6 +744,7 @@ def test_bench_cli_writes_json_and_gates(tmp_path: Path) -> None:
         json_out = json_path
         fail_below = None
         diff_path = None
+        max_fp = None
         validate = False
 
     assert _cmd_bench(Args()) == 0
@@ -756,6 +757,7 @@ def test_bench_cli_writes_json_and_gates(tmp_path: Path) -> None:
         json_out = None
         fail_below = "1.5,1.5"  # impossible floor -> must fail the gate
         diff_path = None
+        max_fp = None
         validate = False
 
     assert _cmd_bench(FailingArgs()) == 1
@@ -772,6 +774,7 @@ def test_bench_cli_diff_passes_when_identical(tmp_path: Path) -> None:
         json_out = report_path
         fail_below = None
         diff_path = None
+        max_fp = None
         validate = False
 
     assert _cmd_bench(FirstArgs()) == 0
@@ -782,6 +785,7 @@ def test_bench_cli_diff_passes_when_identical(tmp_path: Path) -> None:
         json_out = None
         fail_below = None
         diff_path = report_path
+        max_fp = None
         validate = False
 
     assert _cmd_bench(DiffArgs()) == 0
