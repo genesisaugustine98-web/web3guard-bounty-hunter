@@ -301,7 +301,7 @@ async function handleCallback(env, chatId, callback) {
     const targetBudget = rest.slice(0, sevIdx);
     const severity = rest.slice(sevIdx + 1);
     const [t, b] = targetBudget.split("|");
-    const ok = await dispatchScan(GITHUB_TOKEN, GITHUB_REPO, {
+    const ok = await dispatchScan(env, {
       target: t,
       budget: b || "200000",
       chat_id: chatId,
