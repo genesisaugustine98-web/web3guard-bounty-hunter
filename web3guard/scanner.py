@@ -427,11 +427,20 @@ class Scanner:
         try:
             self.store = DurableStore.from_config(self.workdir, self.config)
         except StorageError as e:
-            LOGGER.warning("durable storage init failed; in-memory fallback: %s", e)
+            storage_cfg = self.config.get("storage") or {}
+            remote_required = (
+                isinstance(storage_cfg, dict)
+                and str(storage_cfg.get("remote", "auto")).lower() == "required"
+            )
+            if remote_required:
+                raise
+            LOGGER.warning(
+                "durable storage init failed; preserving file-backed local store: %s", e
+            )
             self.store = DurableStore(
                 local=__import__("web3guard.storage.sqlite_backend",
                                  fromlist=["SqliteBackend"]).SqliteBackend(
-                                     ":memory:"))
+                                     self.storage_router.durable_db_path))
         self.state = self.store.state
         try:
             self.store.recover()
