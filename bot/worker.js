@@ -50,8 +50,13 @@ export default {
     const url = new URL(request.url);
 
     // Liveness for the CF dashboard / uptime checks.
-    if (url.pathname === "/healthz" || request.method === "GET") {
+    if (url.pathname === "/healthz") {
       return json({ ok: true, service: "web3guard-trigger", version: 3, free_mode: true });
+    }
+    if (url.pathname === "/" && request.method === "GET") {
+      return new Response(scanUiHtml(env), {
+        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+      });
     }
 
     if (url.pathname === "/api/scan" && request.method === "POST") {
@@ -268,7 +273,7 @@ async function handleCallback(env, chatId, callback) {
     if (!rateLimitOk(chatId)) {
       return { text: "⏳ Rate limit hit — try again in a minute." };
     }
-    const ok = await dispatchScan(GITHUB_TOKEN, GITHUB_REPO, {
+    const ok = await dispatchScan(env, {
       target,
       budget: budget || String(env.MAX_BUDGET || 200000),
       chat_id: chatId,
@@ -315,6 +320,15 @@ async function handleCallback(env, chatId, callback) {
 // ---------------------------------------------------------------------------
 // Target validation (mirror of the Python pipeline's supported shapes)
 // ---------------------------------------------------------------------------
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
 
 function normalizeSeverity(value) {
   const v = String(value || "LOW").toUpperCase();
