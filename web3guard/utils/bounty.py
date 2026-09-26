@@ -109,10 +109,12 @@ class ScopeAllowlist:
         self,
         allow: list[str] | tuple[str, ...] = (),
         *,
+        deny: list[str] | tuple[str, ...] = (),
         require_authorized_scope: bool = True,
         cache_dir: Path | None = None,
     ) -> None:
         self._allow = [a.strip().lower().rstrip("/") for a in allow if str(a).strip()]
+        self._deny = [d.strip().lower().rstrip("/") for d in deny if str(d).strip()]
         self._require = bool(require_authorized_scope)
         self._cache_dir = cache_dir or Path.cwd() / ".web3guard"
         self._programs: list[BountyProgram] | None = None
@@ -227,13 +229,24 @@ class ScopeAllowlist:
     def is_authorized(self, target: str) -> bool:
         """True when ``target`` is covered by the operator's scope.
 
-        Order: explicit allow entries -> program address scope. When
+        Order: explicit deny entries (always refuse, deny wins over
+        allow) -> explicit allow entries -> program address scope. When
         ``require_authorized_scope`` is false, everything is authorized
-        (operator took the responsibility explicitly).
+        (operator took the responsibility explicitly) except denied
+        targets.
         """
+        t = str(target).strip().lower().rstrip("/")
+        for d in self._deny:
+            if not d:
+                continue
+            if t == d or t.startswith(d + "/") or t.startswith(d + ":"):
+                return False
+            if t.startswith("http") and d in t:
+                return False
+            if t.endswith(d) or d in t.split("/"):
+                return False
         if not self._require:
             return True
-        t = str(target).strip().lower().rstrip("/")
         if not t:
             return False
         for a in self._allow:

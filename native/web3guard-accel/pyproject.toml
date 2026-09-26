@@ -1,0 +1,15 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "web3guard-accel"
+version = "0.1.0"
+description = "Selective Rust acceleration for Web3Guard (optional native extension)"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+
+[tool.maturin]
+# The extension module is the crate's cdylib named web3guard_accel.
+manifest-path = "Cargo.toml"
+include = [{ path = "src/*", format = "sdist" }]

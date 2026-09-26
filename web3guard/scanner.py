@@ -42,8 +42,10 @@ from pathlib import Path
 from typing import Any
 
 from web3guard.ai import AIClient, AIProvider, CostTracker, OpenAICompatibleProvider
+from web3guard.ai.budget import BudgetController
 from web3guard.ai.cost import CostCeilingExceeded
 from web3guard.findings_db import FindingRecord, FindingsDB
+from web3guard.graph import IncrementalAnalyzer
 from web3guard.languages import (
     LanguageAdapter,
     LanguageRegistry,
@@ -51,6 +53,8 @@ from web3guard.languages import (
     default_registry,
     detect_target_language,
 )
+from web3guard.memory import SecurityMemory
+from web3guard.planning import AdaptivePlanner
 from web3guard.reachability import ReachabilityAnalyzer, ReachabilityVerdict
 from web3guard.reports import ReportBuilder
 from web3guard.sandbox.differential import (
@@ -62,6 +66,8 @@ from web3guard.security import (
     SandboxGuard,
     SandboxPolicy,
 )
+from web3guard.storage import DurableStore
+from web3guard.storage.durable import StorageError
 from web3guard.utils.bounty import ScopeAllowlist, ScopeDenied
 from web3guard.utils.resilience import disk_ok_or_raise
 from web3guard.utils.secrets import scan_path
@@ -309,6 +315,33 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "rust-solana": {"enabled": True},
         "ts-sdk":      {"enabled": True},
     },
+    # v3.5: durable storage, budgets, adaptive planning, incremental
+    # analysis. All degrade gracefully when unset.
+    "storage": {
+        "remote": "auto",                     # auto | off
+        "retention": {},                      # see storage.durable.DEFAULT_RETENTION
+    },
+    "budget": {
+        "global_limit_usd": 0.0,              # per-process (0 = off)
+        "daily_limit_usd": 0.0,               # durable across restarts
+        "monthly_limit_usd": 0.0,
+        "warning_frac": 0.8,
+        "on_exhausted": "abort",              # abort | downgrade
+    },
+    "routing": {
+        "enabled": False,                     # opt-in adaptive routing
+        "max_cost_per_call_usd": 0.0,
+        "candidates": [],                     # [{name, provider, role, quality, pricing}]
+    },
+    "planning": {
+        "adaptive": True,                     # budget/memory-shaped analysis queue
+    },
+    "incremental": {
+        "enabled": False,                     # graph-based rescan skipping
+    },
+    "memory": {
+        "enabled": True,                      # durable evidence reuse
+    },
 }
 
 
@@ -404,9 +437,45 @@ class Scanner:
         else:
             self.injection_guard = injection_guard or PromptInjectionGuard()
         self.ai_client = ai_client or self._build_ai_client()
+        # v3.5: durable storage — local SQLite first, optional Supabase/
+        # Postgres replication with an outbox for missed writes.
+        try:
+            self.store = DurableStore.from_config(self.workdir, self.config)
+        except StorageError as e:
+            LOGGER.warning("durable storage init failed; in-memory fallback: %s", e)
+            self.store = DurableStore(
+                local=__import__("web3guard.storage.sqlite_backend",
+                                 fromlist=["SqliteBackend"]).SqliteBackend(
+                                     ":memory:"))
+        self.state = self.store.state  # type: ignore[attr-defined]  # StateStore
+        # v3.5: global budget control (durable daily/monthly horizons).
+        budget_cfg = self.config.get("budget") or {}
+        self.budget = BudgetController(
+            self.store,
+            global_limit_usd=float(budget_cfg.get("global_limit_usd", 0.0)),
+            daily_limit_usd=float(budget_cfg.get("daily_limit_usd", 0.0)),
+            monthly_limit_usd=float(budget_cfg.get("monthly_limit_usd", 0.0)),
+            warning_frac=float(budget_cfg.get("warning_frac", 0.8)),
+            on_exhausted=str(budget_cfg.get("on_exhausted", "abort")),
+        )
+        # v3.5: evidence/security memory.
+        mem_cfg = self.config.get("memory") or {}
+        self.security_memory = (SecurityMemory(self.store)
+                                if mem_cfg.get("enabled", True) else None)
+        # v3.5: adaptive planner + incremental analyzer.
+        self.planner = AdaptivePlanner(
+            budget=self.budget, memory=self.security_memory)
+        self._incremental = IncrementalAnalyzer(store=self.store)
+        # Recover cleanly after an unclean shutdown (checkpoint + sync).
+        try:
+            self.store.recover()
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("storage recovery pass failed", exc_info=True)
         # Track run state
         self._start_ts: str = ""
         self._end_ts: str = ""
+        self._scan_id: str = ""
+        self._scope: ScopeAllowlist | None = None
 
     # ---- factory ---------------------------------------------------------
 
@@ -481,6 +550,18 @@ class Scanner:
 
     # ---- main entry point ------------------------------------------------
 
+    def _scope_for(self) -> ScopeAllowlist:
+        """One memoized ScopeAllowlist per Scanner (v3.4 built one per target)."""
+        if self._scope is None:
+            self._scope = ScopeAllowlist(
+                self.config.get("allow") or [],
+                require_authorized_scope=bool(
+                    self.config.get("require_authorized_scope", False)),
+                deny=list(self.config.get("deny") or []),
+                cache_dir=self.workdir / ".web3guard",
+            )
+        return self._scope
+
     def scan(
         self,
         targets: Sequence[str],
@@ -498,22 +579,37 @@ class Scanner:
         :mod:`web3guard.utils.bounty`) when
         ``require_authorized_scope`` is enabled. Targets that fail
         the gate are recorded as denied, never fetched.
+
+        v3.5: a durable budget preflight runs before the first target —
+        when the global/daily/monthly budget is already exhausted, the
+        scan is refused up front instead of burning one target's worth
+        of tokens before the first per-call check trips.
         """
         self._start_ts = datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z")
+        self._scan_id = hashlib.sha256(
+            f"{self._start_ts}|{sorted(targets)}".encode()).hexdigest()[:16]
+        # v3.5 budget preflight: refuse to start when already exhausted.
+        try:
+            self.budget.preflight()
+        except BudgetExhausted as e:
+            LOGGER.warning("budget preflight refused scan: %s", e)
+            result = ScanResult(
+                started_at=self._start_ts,
+                finished_at=self._start_ts,
+                config=self._sanitize_config(),
+            )
+            result.metadata["budget_exhausted"] = str(e)
+            return result
         parsed = self._parse_targets(targets)
         result = ScanResult(
             started_at=self._start_ts,
             finished_at="",
             config=self._sanitize_config(),
         )
+        scope = self._scope_for()
         for url, budget in parsed:
             # v3.4 authorized-scope gate: refuse before any fetch.
             if self.config.get("require_authorized_scope", False):
-                scope = ScopeAllowlist(
-                    self.config.get("allow") or [],
-                    require_authorized_scope=True,
-                    cache_dir=self.workdir / ".web3guard",
-                )
                 try:
                     scope.require(url)
                 except ScopeDenied as e:
@@ -553,9 +649,11 @@ class Scanner:
                 result.targets.append(tr)
                 break  # spending must stop; keep prior targets' results
             tr.elapsed_seconds = time.monotonic() - t0
-            # Persist findings
+            # Persist findings (lifecycle DB + durable replica + memory).
             for f in tr.findings:
-                self.findings_db.upsert(FindingRecord.from_finding(f))
+                rec = FindingRecord.from_finding(f)
+                self.findings_db.upsert(rec)
+                self.store.record_finding(rec)
             result.targets.append(tr)
             if self.config.get("enable_dependency_scan", False):
                 try:
@@ -567,12 +665,41 @@ class Scanner:
                     dep_trs = []
                 for dep_tr in dep_trs:
                     for f in dep_tr.findings:
-                        self.findings_db.upsert(FindingRecord.from_finding(f))
+                        rec = FindingRecord.from_finding(f)
+                        self.findings_db.upsert(rec)
+                        self.store.record_finding(rec)
                 result.targets.extend(dep_trs)
         self._end_ts = datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z")
         result.finished_at = self._end_ts
         result.cost_summary = self.ai_client.cost_tracker().summary()
+        self._finalize_run(result)
         return result
+
+    def _finalize_run(self, result: ScanResult) -> None:
+        """v3.5 post-run bookkeeping: evidence memory, run history, sync."""
+        try:
+            if self.security_memory is not None:
+                result.metadata["memory"] = self.security_memory.learn_from_result(
+                    result.targets)
+            cost = float((result.cost_summary or {}).get("total_cost_usd", 0.0))
+            self.store.write_scan_run(
+                started_at=result.started_at,
+                finished_at=result.finished_at,
+                targets=len(result.targets),
+                findings=len(result.all_findings),
+                confirmed=len(result.confirmed_findings),
+                cost_usd=cost,
+                status="ceiling" if result.metadata.get("cost_ceiling") else "ok",
+                metadata={
+                    "scan_id": self._scan_id,
+                    "budget": self.budget.summary(),
+                },
+            )
+            sync = self.store.sync()
+            if sync.get("replayed") or sync.get("failed"):
+                result.metadata["storage_sync"] = sync
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("run finalization failed", exc_info=True)
 
     # ---- target handling -------------------------------------------------
 
@@ -656,11 +783,32 @@ class Scanner:
 
         # Optional research planning: deterministically score files by
         # structural risk so the analysis budget is spent on the
-        # highest-risk files first.
+        # highest-risk files first. v3.5: the adaptive planner re-shapes
+        # the chunk queue with budget state, evidence memory priors, and
+        # the incremental dirty set.
         plan: dict[str, Any] = {}
         if self.config.get("use_ai_planning", True):
             plan = self._plan_target(adapters, target_path)
             tr.research_plan = plan
+        # v3.5 incremental analysis: compute the re-analysis set once per
+        # target when enabled. Clean files contribute no chunks.
+        dirty_files: set[str] | None = None
+        incremental_first_scan = True
+        if (self.config.get("incremental") or {}).get("enabled", False):
+            try:
+                all_files: list[Path] = []
+                for adapter in adapters:
+                    all_files.extend(self._iter_user_files(adapter, target_path))
+                dirty = self._incremental.compute_dirty(
+                    target_path, all_files, target=target)
+                dirty_files = set(dirty["files"])
+                incremental_first_scan = dirty["first_scan"]
+                tr.metadata["incremental"] = {
+                    k: v for k, v in dirty.items() if k != "files"
+                }
+            except Exception as e:  # noqa: BLE001
+                LOGGER.warning("incremental analysis failed; full scan: %s", e)
+                dirty_files = None
 
         # Run every matching adapter (not just the primary one) so
         # mixed-language repos get full coverage. Findings are merged
