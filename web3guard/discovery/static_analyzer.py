@@ -711,7 +711,13 @@ def _detect_solidity(content: str, rel: str) -> list[StaticIssue]:
         # precision in the division step; in share/asset accounting that
         # rounding is systematically extractable (rounding-dust griefing /
         # free share minting). ``a * c / b`` is the safe order.
-        if re.search(r"\b[\w.\[\]]+\s*/\s*[\w.\[\]]+\s*\*\s*[\w.\[\]]+", body):
+        # A literal scale constant as the divisor (``x / 100 * pct``,
+        # ``x / 1e18 * rate``) is percent/unit conversion, not share
+        # accounting — flagging it produced the Rubixi false positive, so
+        # only named-quantity divisors (state vars, params) trigger.
+        if re.search(
+                r"\b[\w.\[\]]+\s*/\s*(?!\d)[\w.\[\]]+\s*\*\s*[\w.\[\]]+",
+                body):
             issues.append(_issue(
                 rel, start_line, "arithmetic", "MEDIUM",
                 "Division before multiplication (rounding-order loss)",

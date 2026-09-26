@@ -226,6 +226,16 @@ def test_arithmetic_logic_flaw_detectors() -> None:
     assert not [r for r in engine.run_text(safe_order, "C.sol", "solidity")
                 if "Division before multiplication" in r.title]
 
+    # Literal scale divisors are percent/unit conversion, not share
+    # accounting (Rubixi false positive): x / 100 * pct must not flag.
+    pct_idiom = (
+        "contract C { uint256 public collectedFees; address payable creator; "
+        "function collectPercentOfFees(uint _pcent) public { "
+        "uint feesToCollect = collectedFees / 100 * _pcent; "
+        "creator.send(feesToCollect); collectedFees -= feesToCollect; } }")
+    assert not [r for r in engine.run_text(pct_idiom, "C.sol", "solidity")
+                if "Division before multiplication" in r.title]
+
 
 def test_static_analyzer_covers_all_languages() -> None:
     engine = StaticAnalyzerEngine()
