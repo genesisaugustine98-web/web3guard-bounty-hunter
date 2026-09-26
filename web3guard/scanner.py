@@ -66,7 +66,7 @@ from web3guard.security import (
     SandboxGuard,
     SandboxPolicy,
 )
-from web3guard.storage import DurableStore
+from web3guard.storage import DurableStore, StorageRouter
 from web3guard.storage.durable import StorageError
 from web3guard.utils.bounty import ScopeAllowlist, ScopeDenied
 from web3guard.utils.resilience import disk_ok_or_raise
@@ -318,8 +318,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # v3.5: durable storage, budgets, adaptive planning, incremental
     # analysis. All degrade gracefully when unset.
     "storage": {
-        "remote": "auto",                     # auto | off
-        "retention": {},                      # see storage.durable.DEFAULT_RETENTION
+        "remote": "auto",                     # auto | off | required
+        "paths": {
+            "findings_db_path": ".web3guard/findings.db",
+            "cost_db_path": ".web3guard/cost.db",
+            "cache_path": ".web3guard/llm_cache.db",
+            "durable_db_path": ".web3guard/durable.db",
+            "reports_dir": "reports",
+        },
+        "retention": {},                       # see storage.durable.DEFAULT_RETENTION
     },
     "budget": {
         "global_limit_usd": 0.0,              # per-process (0 = off)
@@ -411,12 +418,35 @@ class Scanner:
         self.registry = registry or default_registry
         self.workdir = workdir or Path.cwd()
         self.workdir.mkdir(parents=True, exist_ok=True)
-        findings_path = Path(self.config.get("findings_db_path", ".web3guard/findings.db"))
-        if not findings_path.is_absolute():
-            findings_path = self.workdir / findings_path
+        self.storage_router = StorageRouter.from_config(self.workdir, self.config)
         self.findings_db = findings_db or FindingsDB(
-            findings_path
+            self.storage_router.findings_db_path
         )
+        # Durable state is initialized before the AI client so cost events
+        # can always be mirrored into the durable budget ledger.
+        try:
+            self.store = DurableStore.from_config(self.workdir, self.config)
+        except StorageError as e:
+            storage_cfg = self.config.get("storage") or {}
+            remote_required = (
+                isinstance(storage_cfg, dict)
+                and str(storage_cfg.get("remote", "auto")).lower() == "required"
+            )
+            if remote_required:
+                raise
+            LOGGER.warning(
+                "durable storage init failed; preserving file-backed local store: %s", e
+            )
+            self.store = DurableStore(
+                local=__import__("web3guard.storage.sqlite_backend",
+                                 fromlist=["SqliteBackend"]).SqliteBackend(
+                                     self.storage_router.durable_db_path))
+        self.state = self.store.state
+        try:
+            self.store.recover()
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("storage recovery pass failed", exc_info=True)
+
         self.sandbox_guard = sandbox_guard or SandboxGuard(
             SandboxPolicy.from_config(config))
         # v3.4: honor the documented ``security.prompt_injection`` block.
@@ -437,17 +467,6 @@ class Scanner:
         else:
             self.injection_guard = injection_guard or PromptInjectionGuard()
         self.ai_client = ai_client or self._build_ai_client()
-        # v3.5: durable storage — local SQLite first, optional Supabase/
-        # Postgres replication with an outbox for missed writes.
-        try:
-            self.store = DurableStore.from_config(self.workdir, self.config)
-        except StorageError as e:
-            LOGGER.warning("durable storage init failed; in-memory fallback: %s", e)
-            self.store = DurableStore(
-                local=__import__("web3guard.storage.sqlite_backend",
-                                 fromlist=["SqliteBackend"]).SqliteBackend(
-                                     ":memory:"))
-        self.state = self.store.state  # StateStore
         # v3.5: global budget control (durable daily/monthly horizons).
         budget_cfg = self.config.get("budget") or {}
         self.budget = BudgetController(
@@ -466,11 +485,6 @@ class Scanner:
         self.planner = AdaptivePlanner(
             budget=self.budget, memory=self.security_memory)
         self._incremental = IncrementalAnalyzer(store=self.store)
-        # Recover cleanly after an unclean shutdown (checkpoint + sync).
-        try:
-            self.store.recover()
-        except Exception:  # noqa: BLE001
-            LOGGER.debug("storage recovery pass failed", exc_info=True)
         # Track run state
         self._start_ts: str = ""
         self._end_ts: str = ""
@@ -528,14 +542,18 @@ class Scanner:
             if isinstance(m, str) and m
         } or None
         # Cost tracker with persistence
-        cost_path = self.workdir / self.config.get("cost_db_path", ".web3guard/cost.db")
+        cost_path = self.storage_router.cost_db_path
         cost_path.parent.mkdir(parents=True, exist_ok=True)
         cost = CostTracker(
             max_cost_usd=float(self.config.get("max_cost_usd", 50.0)),
             persist_path=cost_path,
+            on_record=lambda **record: self.store.write_cost_record(
+                scan_id=self._scan_id,
+                **record,
+            ),
         )
         # LLM cache
-        cache_path = self.workdir / self.config.get("cache_path", ".web3guard/llm_cache.db")
+        cache_path = self.storage_router.cache_path
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         return AIClient(
             providers=providers,

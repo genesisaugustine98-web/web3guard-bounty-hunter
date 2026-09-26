@@ -63,18 +63,18 @@ class StateStore:
         })
 
     def delete(self, key: str) -> None:
-        self._store.local.execute(
-            "DELETE FROM state_kv WHERE k = ?", (self._full_key(key),))
+        """Delete a key locally and replicate the deletion."""
+        self._store.delete("state_kv", "k", self._full_key(key))
 
     # -- events ---------------------------------------------------------------
 
     def record_event(self, kind: str, key: str = "",
                      payload: dict[str, Any] | None = None) -> None:
-        """Append an audit event (rate-limit hits, dispatches, errors)."""
-        self._store.local.execute(
-            "INSERT INTO state_events (ts, kind, key, payload) VALUES (?, ?, ?, ?)",
-            (time.time(), kind, key,
-             json.dumps(payload or {}, default=str)),
+        """Append an audit event and replicate it to the remote backend."""
+        self._store.record_state_event(
+            kind=kind,
+            key=key,
+            payload=payload or {},
         )
 
     def recent_events(self, kind: str | None = None,

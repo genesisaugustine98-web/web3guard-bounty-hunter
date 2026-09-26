@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -81,6 +81,7 @@ class CostTracker:
         pricing: Mapping[str, Mapping[str, float]] | None = None,
         max_cost_usd: float = 50.0,
         persist_path: Path | None = None,
+        on_record: Callable[..., None] | None = None,
     ) -> None:
         self._pricing: dict[str, dict[str, float]] = {
             k: dict(v) for k, v in (pricing or DEFAULT_PRICING).items()
@@ -88,6 +89,7 @@ class CostTracker:
         self._max_cost_usd = max_cost_usd
         self._records: list[CostRecord] = []
         self._persist_path = persist_path
+        self._on_record = on_record
         if persist_path is not None:
             self._init_db(persist_path)
 
@@ -149,7 +151,9 @@ class CostTracker:
         )
         self._records.append(rec)
         if self._persist_path is not None:
-            with closing(sqlite3.connect(str(self._persist_path))) as conn:
+            with closing(sqlite3.connect(str(self._persist_path), timeout=30.0)) as conn:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA busy_timeout=10000")
                 conn.execute(
                     "INSERT INTO cost_records (timestamp, provider, model, "
                     "prompt_tokens, completion_tokens, cost_usd, role) "
@@ -158,6 +162,20 @@ class CostTracker:
                      rec.prompt_tokens, rec.completion_tokens, rec.cost_usd, rec.role),
                 )
                 conn.commit()
+        if self._on_record is not None:
+            try:
+                self._on_record(
+                    timestamp=rec.timestamp,
+                    provider=rec.provider,
+                    model=rec.model,
+                    prompt_tokens=rec.prompt_tokens,
+                    completion_tokens=rec.completion_tokens,
+                    cost_usd=rec.cost_usd,
+                    role=rec.role,
+                )
+            except Exception as e:  # noqa: BLE001
+                LOGGER.error("durable cost ledger write failed: %s", e)
+                raise RuntimeError("durable cost ledger write failed") from e
         total = self.total_cost()
         if total > self._max_cost_usd:
             raise CostCeilingExceeded(

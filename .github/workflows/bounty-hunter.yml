@@ -12,12 +12,21 @@ name: Web3Guard Bounty Hunter
       - main
   workflow_dispatch:
     inputs:
+      target_url:
+        description: "Single target: URL, IPFS path, owner/repo shorthand, or 0x address"
+        required: false
+        type: string
+        default: ""
+      budget:
+        description: "Token budget for the single target (max or positive integer)"
+        required: false
+        type: string
+        default: "max"
       targets_config:
         description: "Targets, one per line: <git-url>|<budget> (max or number)"
-        required: true
+        required: false
         type: string
-        default: |
-          https://github.com/your-target/repo-A|max
+        default: ""
       min_severity:
         description: "Minimum severity to report (INFO | LOW | MEDIUM | HIGH | CRITICAL)"
         required: false
@@ -567,6 +576,8 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          TARGET_URL: ${{ inputs.target_url || '' }}
+          SINGLE_BUDGET: ${{ inputs.budget || 'max' }}
           TARGETS_CONFIG: ${{ inputs.targets_config || vars.WEB3GUARD_TARGETS_CONFIG || '' }}
           MIN_SEVERITY: ${{ inputs.min_severity || 'LOW' }}
           FORK_URL: ${{ inputs.fork_url || '' }}
@@ -575,9 +586,22 @@ jobs:
         run: |
           set -e
           mkdir -p .web3guard
-          printf '%s\n' "$TARGETS_CONFIG" > .web3guard/targets.txt
+          if [ -n "$TARGET_URL" ]; then
+            case "$TARGET_URL" in
+              *'|'*) echo "::error::target_url cannot contain |"; exit 1 ;;
+            esac
+            case "$SINGLE_BUDGET" in
+              max) ;;
+              ''|*[!0-9]*) echo "::error::budget must be 'max' or a positive integer"; exit 1 ;;
+              0) echo "::error::budget must be greater than zero"; exit 1 ;;
+            esac
+            printf '%s|%s\n' "$TARGET_URL" "$SINGLE_BUDGET" > .web3guard/targets.txt
+            echo "Manual single-target scan selected: $TARGET_URL"
+          else
+            printf '%s\n' "$TARGETS_CONFIG" > .web3guard/targets.txt
+          fi
           if ! grep -q '[^[:space:]]' .web3guard/targets.txt; then
-            echo "::warning::No targets configured; set WEB3GUARD_TARGETS_CONFIG for scheduled runs."
+            echo "::warning::No target configured. Use target_url + budget for a single manual scan, targets_config for advanced multi-target runs, or WEB3GUARD_TARGETS_CONFIG for schedules."
             exit 0
           fi
 
