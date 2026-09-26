@@ -1,6 +1,14 @@
 name = "web3guard-trigger"
 main = "bot/worker.js"
-compatibility_date = "2024-01-01"
+compatibility_date = "2026-09-25"
+
+[[durable_objects.bindings]]
+name = "FREE_GUARD"
+class_name = "Web3GuardFreeGuard"
+
+[[migrations]]
+tag = "v1-free-guard"
+new_sqlite_classes = ["Web3GuardFreeGuard"]
 
 # Non-secret vars. Secrets (GITHUB_TOKEN, TELEGRAM_BOT_TOKEN) must be set in
 # the Cloudflare dashboard under Settings -> Variables and Secrets.
@@ -9,3 +17,12 @@ GITHUB_REPO = "genesisaugustine98-web/web3guard-bounty-hunter"
 ALLOWED_CHAT_IDS = "6983105537"
 MAX_BUDGET = "200000"
 DEFAULT_MIN_SEV = "LOW"
+
+
+# Free-mode application caps / fail-closed switches.
+REQUIRE_FREE_GUARD = "1"
+REQUIRE_QUEUE = "1"
+REQUIRE_TURNSTILE = "1"
+REQUIRE_WEB_API_KEY = "0"
+ENABLE_R2_ARCHIVE = "0"
+MAX_SCANS_PER_DAY = "1000"
