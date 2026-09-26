@@ -469,11 +469,6 @@ class Scanner:
         self.planner = AdaptivePlanner(
             budget=self.budget, memory=self.security_memory)
         self._incremental = IncrementalAnalyzer(store=self.store)
-        # Recover cleanly after an unclean shutdown (checkpoint + sync).
-        try:
-            self.store.recover()
-        except Exception:  # noqa: BLE001
-            LOGGER.debug("storage recovery pass failed", exc_info=True)
         # Track run state
         self._start_ts: str = ""
         self._end_ts: str = ""
