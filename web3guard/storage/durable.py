@@ -35,6 +35,7 @@ from typing import Any
 
 from web3guard.storage.base import StorageBackend, StorageError
 from web3guard.storage.sqlite_backend import SqliteBackend
+from web3guard.storage.routing import StorageRouter
 
 LOGGER = logging.getLogger("web3guard.storage")
 
@@ -116,33 +117,29 @@ class DurableStore:
         Config keys (all optional, under ``storage:``)::
 
             storage:
-              findings_db_path: .web3guard/findings.db
+              durable_db_path: .web3guard/durable.db
               remote: auto            # auto | off
               retention:
                 cost_records_days: 180
         """
-        st = config.get("storage") if isinstance(config.get("storage"), dict) else {}
-        db_rel = (st or {}).get("findings_db_path") or config.get(
-            "findings_db_path", ".web3guard/findings.db")
-        db_path = Path(db_rel)
-        if not db_path.is_absolute():
-            db_path = Path(workdir) / db_path
-        local = SqliteBackend(db_path)
+        router = StorageRouter.from_config(Path(workdir), config)
+        local = SqliteBackend(router.durable_db_path)
         remote = None
-        mode = str((st or {}).get("remote", "auto")).lower()
-        if mode != "off":
+        if router.remote_configured and router.remote_mode != "off":
             import os
-            dsn = (
-                os.environ.get("SUPABASE_DB_URL")
-                or os.environ.get("POSTGRES_DSN") or ""
-            ).strip()
+            dsn = (os.environ.get(router.remote_dsn_env or "") or "").strip()
             if dsn:
                 from web3guard.storage.postgres_backend import PostgresBackend
                 try:
                     remote = PostgresBackend(dsn)
                 except StorageError as e:
+                    if router.remote_required:
+                        raise
                     LOGGER.warning("remote storage unavailable, local-only: %s", e)
-        retention_cfg = (st or {}).get("retention") or {}
+        retention_cfg = (
+            (config.get("storage") or {}).get("retention")
+            if isinstance(config.get("storage"), dict) else {}
+        ) or {}
         return cls(local=local, remote=remote, retention=dict(retention_cfg))
 
     # ------------------------------------------------------------------
