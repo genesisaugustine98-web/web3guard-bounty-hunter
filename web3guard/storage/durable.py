@@ -140,7 +140,26 @@ class DurableStore:
             (config.get("storage") or {}).get("retention")
             if isinstance(config.get("storage"), dict) else {}
         ) or {}
-        return cls(local=local, remote=remote, retention=dict(retention_cfg))
+        store = cls(local=local, remote=remote, retention=dict(retention_cfg))
+        if router.remote_required:
+            if store.remote is None:
+                raise StorageError(
+                    "storage.remote=required but the remote backend could not be initialized"
+                )
+            remote_health = store.remote.health()
+            if not remote_health.ok:
+                raise StorageError(
+                    "storage.remote=required but the remote backend is unhealthy: "
+                    + remote_health.detail
+                )
+            try:
+                store.remote.query_all("SELECT 1 FROM scan_runs LIMIT 1")
+            except Exception as e:  # noqa: BLE001
+                raise StorageError(
+                    "storage.remote=required but the remote schema is unavailable: "
+                    + str(e)[:300]
+                ) from e
+        return store
 
     # ------------------------------------------------------------------
     # Schema
