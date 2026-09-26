@@ -531,6 +531,7 @@ class Scanner:
         cost = CostTracker(
             max_cost_usd=float(self.config.get("max_cost_usd", 50.0)),
             persist_path=cost_path,
+            on_record=self.store.write_cost_record,
         )
         # LLM cache
         cache_path = self.storage_router.cache_path
