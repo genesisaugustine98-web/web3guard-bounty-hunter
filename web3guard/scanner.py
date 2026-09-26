@@ -415,6 +415,22 @@ class Scanner:
         self.findings_db = findings_db or FindingsDB(
             self.storage_router.findings_db_path
         )
+        # Durable state is initialized before the AI client so cost events
+        # can always be mirrored into the durable budget ledger.
+        try:
+            self.store = DurableStore.from_config(self.workdir, self.config)
+        except StorageError as e:
+            LOGGER.warning("durable storage init failed; in-memory fallback: %s", e)
+            self.store = DurableStore(
+                local=__import__("web3guard.storage.sqlite_backend",
+                                 fromlist=["SqliteBackend"]).SqliteBackend(
+                                     ":memory:"))
+        self.state = self.store.state
+        try:
+            self.store.recover()
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("storage recovery pass failed", exc_info=True)
+
         self.sandbox_guard = sandbox_guard or SandboxGuard(
             SandboxPolicy.from_config(config))
         # v3.4: honor the documented ``security.prompt_injection`` block.
@@ -435,17 +451,6 @@ class Scanner:
         else:
             self.injection_guard = injection_guard or PromptInjectionGuard()
         self.ai_client = ai_client or self._build_ai_client()
-        # v3.5: durable storage — local SQLite first, optional Supabase/
-        # Postgres replication with an outbox for missed writes.
-        try:
-            self.store = DurableStore.from_config(self.workdir, self.config)
-        except StorageError as e:
-            LOGGER.warning("durable storage init failed; in-memory fallback: %s", e)
-            self.store = DurableStore(
-                local=__import__("web3guard.storage.sqlite_backend",
-                                 fromlist=["SqliteBackend"]).SqliteBackend(
-                                     ":memory:"))
-        self.state = self.store.state  # StateStore
         # v3.5: global budget control (durable daily/monthly horizons).
         budget_cfg = self.config.get("budget") or {}
         self.budget = BudgetController(
