@@ -66,7 +66,7 @@ from web3guard.security import (
     SandboxGuard,
     SandboxPolicy,
 )
-from web3guard.storage import DurableStore
+from web3guard.storage import DurableStore, StorageRouter
 from web3guard.storage.durable import StorageError
 from web3guard.utils.bounty import ScopeAllowlist, ScopeDenied
 from web3guard.utils.resilience import disk_ok_or_raise
@@ -411,11 +411,9 @@ class Scanner:
         self.registry = registry or default_registry
         self.workdir = workdir or Path.cwd()
         self.workdir.mkdir(parents=True, exist_ok=True)
-        findings_path = Path(self.config.get("findings_db_path", ".web3guard/findings.db"))
-        if not findings_path.is_absolute():
-            findings_path = self.workdir / findings_path
+        self.storage_router = StorageRouter.from_config(self.workdir, self.config)
         self.findings_db = findings_db or FindingsDB(
-            findings_path
+            self.storage_router.findings_db_path
         )
         self.sandbox_guard = sandbox_guard or SandboxGuard(
             SandboxPolicy.from_config(config))
@@ -528,14 +526,14 @@ class Scanner:
             if isinstance(m, str) and m
         } or None
         # Cost tracker with persistence
-        cost_path = self.workdir / self.config.get("cost_db_path", ".web3guard/cost.db")
+        cost_path = self.storage_router.cost_db_path
         cost_path.parent.mkdir(parents=True, exist_ok=True)
         cost = CostTracker(
             max_cost_usd=float(self.config.get("max_cost_usd", 50.0)),
             persist_path=cost_path,
         )
         # LLM cache
-        cache_path = self.workdir / self.config.get("cache_path", ".web3guard/llm_cache.db")
+        cache_path = self.storage_router.cache_path
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         return AIClient(
             providers=providers,
