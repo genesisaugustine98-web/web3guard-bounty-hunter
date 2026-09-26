@@ -318,8 +318,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # v3.5: durable storage, budgets, adaptive planning, incremental
     # analysis. All degrade gracefully when unset.
     "storage": {
-        "remote": "auto",                     # auto | off
-        "retention": {},                      # see storage.durable.DEFAULT_RETENTION
+        "remote": "auto",                     # auto | off | required
+        "paths": {
+            "findings_db_path": ".web3guard/findings.db",
+            "cost_db_path": ".web3guard/cost.db",
+            "cache_path": ".web3guard/llm_cache.db",
+            "durable_db_path": ".web3guard/durable.db",
+            "reports_dir": "reports",
+        },
+        "retention": {},                       # see storage.durable.DEFAULT_RETENTION
     },
     "budget": {
         "global_limit_usd": 0.0,              # per-process (0 = off)
