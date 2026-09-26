@@ -33,11 +33,13 @@ from web3guard.storage.base import (
 )
 from web3guard.storage.durable import DurableStore
 from web3guard.storage.sqlite_backend import SqliteBackend
+from web3guard.storage.routing import StorageRouter
 
 __all__ = [
     "BackendInfo",
     "DurableStore",
     "SqliteBackend",
+    "StorageRouter",
     "StorageBackend",
     "StorageError",
     "UnavailableBackendError",
