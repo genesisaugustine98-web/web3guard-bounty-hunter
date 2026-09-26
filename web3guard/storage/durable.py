@@ -546,6 +546,19 @@ class DurableStore:
             "metadata": metadata or {},
         })
 
+    def record_state_event(
+        self, *, kind: str, key: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """Append a namespaced state event through the durable write router."""
+        self.write("state_events", "id", {
+            "id": int(time.time_ns()),
+            "ts": time.time(),
+            "kind": kind,
+            "key": key,
+            "payload": payload or {},
+        })
+
     def record_finding(self, record: Any) -> None:
         """Mirror a :class:`~web3guard.findings_db.FindingRecord` durably.
 
