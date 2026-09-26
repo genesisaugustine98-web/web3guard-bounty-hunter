@@ -88,6 +88,7 @@ export function scanReservations(env,includeQueue=false){
     {metric:"worker_requests",units:1,limit:SAFE_LIMITS.workersRequestsPerDay},
     {metric:"do_requests",units:1,limit:SAFE_LIMITS.durableObjectRequestsPerDay},
     {metric:"scan_dispatches",units:1,limit:Math.min(configured,SAFE_LIMITS.scanDispatchesPerDay)},
+    ...(env.AUDIT_DB ? [{metric:"d1_writes",units:1,limit:SAFE_LIMITS.d1WritesPerDay}] : []),
   ];
   if(includeQueue)reservations.push({metric:"queue_ops_reserved",units:QUEUE_OP_RESERVATION_PER_SCAN,limit:SAFE_LIMITS.queueOpsPerDay});
   return reservations;
