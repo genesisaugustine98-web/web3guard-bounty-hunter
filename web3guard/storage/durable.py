@@ -317,6 +317,28 @@ class DurableStore:
         self.local.execute(sql, values)
         self._replicate(table, row_key, dict(zip(cols, values, strict=True)))
 
+    def delete(self, table: str, row_key: str, row_value: Any) -> None:
+        """Delete a local row and replicate the deletion when configured."""
+        self.local.execute(
+            f"DELETE FROM {table} WHERE {row_key} = ?",
+            (row_value,),
+        )
+        if self.remote is None:
+            return
+        try:
+            self.remote.execute(
+                f"DELETE FROM {table} WHERE {row_key} = ?",
+                (row_value,),
+            )
+        except Exception as e:  # noqa: BLE001
+            self._enqueue_outbox(
+                table,
+                row_key,
+                {row_key: row_value},
+                str(e),
+                op="delete",
+            )
+
     def _replicate(self, table: str, row_key: str, values: dict[str, Any]) -> None:
         if self.remote is None:
             return
@@ -334,12 +356,13 @@ class DurableStore:
             self._enqueue_outbox(table, row_key, values, str(e))
 
     def _enqueue_outbox(self, table: str, row_key: str,
-                        values: dict[str, Any], error: str) -> None:
+                        values: dict[str, Any], error: str,
+                        *, op: str = "upsert") -> None:
         try:
             self.local.execute(
                 "INSERT INTO outbox (ts, table_name, op, row_key, payload, attempts, last_error)"
-                " VALUES (?, ?, 'upsert', ?, ?, 0, ?)",
-                (time.time(), table, row_key,
+                " VALUES (?, ?, ?, ?, ?, 0, ?)",
+                (time.time(), table, op, row_key,
                  json.dumps({k: v for k, v in values.items()}, default=str),
                  error[:500]),
             )
@@ -370,7 +393,7 @@ class DurableStore:
         if self.remote is None:
             return {"replayed": 0, "failed": 0, "dropped": 0}
         rows = self.local.query_all(
-            "SELECT id, table_name, row_key, payload, attempts, ts FROM outbox"
+            "SELECT id, table_name, op, row_key, payload, attempts, ts FROM outbox"
             " ORDER BY id ASC LIMIT ?", (limit,))
         replayed = failed = dropped = 0
         for row in rows:
@@ -492,27 +515,36 @@ class DurableStore:
         prompt_tokens: int, completion_tokens: int, cost_usd: float,
         role: str = "analysis", scan_id: str = "",
     ) -> None:
-        """Insert one cost record (the durable ledger budgets read from)."""
-        self.local.execute(
-            "INSERT INTO cost_records (timestamp, provider, model, "
-            "prompt_tokens, completion_tokens, cost_usd, role, scan_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (timestamp, provider, model, prompt_tokens, completion_tokens,
-             cost_usd, role, scan_id),
-        )
+        """Record cost in local durable ledger and remote replica."""
+        self.write("cost_records", "id", {
+            "id": int(time.time_ns()),
+            "timestamp": timestamp,
+            "provider": provider,
+            "model": model,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "cost_usd": cost_usd,
+            "role": role,
+            "scan_id": scan_id,
+        })
 
     def write_scan_run(
         self, *, started_at: str, finished_at: str, targets: int,
         findings: int, confirmed: int, cost_usd: float,
         status: str = "ok", metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Record a finished scan (dashboard/serve history + audit)."""
-        self.local.execute(
-            "INSERT INTO scan_runs (started_at, finished_at, targets, findings, "
-            "confirmed, cost_usd, status, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (started_at, finished_at, targets, findings, confirmed,
-             cost_usd, status, json.dumps(metadata or {}, default=str)),
-        )
+        """Record scan history in local durable ledger and remote replica."""
+        self.write("scan_runs", "id", {
+            "id": int(time.time_ns()),
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "targets": targets,
+            "findings": findings,
+            "confirmed": confirmed,
+            "cost_usd": cost_usd,
+            "status": status,
+            "metadata": metadata or {},
+        })
 
     def record_finding(self, record: Any) -> None:
         """Mirror a :class:`~web3guard.findings_db.FindingRecord` durably.
