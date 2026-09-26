@@ -26,6 +26,34 @@ LOGGER = logging.getLogger("web3guard.resilience")
 
 DEFAULT_DISK_FLOOR_BYTES = 512 * 1024 * 1024  # 512 MiB
 
+# Fraction of the volume's total capacity above which the default floor
+# no longer makes sense. On a 512 MiB tmpfs, refusing to run with 300
+# MiB free protects nothing — 60% of the disk is sitting right there —
+# while a 20 GiB root volume gets the full 512 MiB floor.
+_TMPFS_FLOOR_FRACTION = 0.6
+
+
+def disk_floor_for(path: Path, floor: int = DEFAULT_DISK_FLOOR_BYTES) -> int:
+    """Effective disk floor for ``path``.
+
+    The fixed floor assumes a large disk; on small volumes (CI tmpfs,
+    containers) it would refuse to ever run. Scale the floor down to
+    ``_TMPFS_FLOOR_FRACTION`` of a volume that is smaller than the
+    floor itself, and never require more than half the free space of
+    any volume so the preflight can only fire when space is genuinely
+    tight.
+    """
+    try:
+        usage = shutil.disk_usage(str(path))
+    except OSError:
+        return floor
+    effective = floor
+    if 0 < usage.total < floor:
+        effective = min(effective, int(usage.total * _TMPFS_FLOOR_FRACTION))
+    if usage.free > 0:
+        effective = min(effective, usage.free // 2)
+    return max(1, effective)
+
 
 def free_bytes(path: Path) -> int:
     """Free bytes on the filesystem holding ``path`` (0 if unknown)."""
@@ -46,8 +74,15 @@ def disk_preflight(workdir: Path, floor: int = DEFAULT_DISK_FLOOR_BYTES) -> bool
     return ok
 
 
-def disk_ok_or_raise(workdir: Path, floor: int = DEFAULT_DISK_FLOOR_BYTES) -> None:
-    """Raise :class:`RuntimeError` when free space is under the floor."""
+def disk_ok_or_raise(workdir: Path, floor: int | None = None) -> None:
+    """Raise :class:`RuntimeError` when free space is under the floor.
+
+    ``floor=None`` (the scanner's default) derives the floor from the
+    volume via :func:`disk_floor_for` — a fixed 512 MiB floor is only
+    meaningful on volumes large enough for it to protect something.
+    """
+    if floor is None:
+        floor = disk_floor_for(workdir)
     free = free_bytes(workdir)
     if free and free < floor:
         raise RuntimeError(
