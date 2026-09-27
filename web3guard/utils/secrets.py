@@ -54,7 +54,7 @@ SECRET_PATTERNS: dict[str, re.Pattern[str]] = {
     "openai_key": re.compile(r"sk-[A-Za-z0-9]{20,}"),
     "stripe_secret": re.compile(r"(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{20,}"),
     "stripe_webhook_secret": re.compile(r"whsec_[A-Za-z0-9]{20,}"),
-    "telegram_bot_token": re.compile(r"\\b\\d{8,12}:[A-Za-z0-9_-]{35}\\b"),
+    "telegram_bot_token": re.compile(r"\b\d{8,12}:[A-Za-z0-9_-]{35}\b"),
     "google_api_key": re.compile(r"AIza[0-9A-Za-z_-]{35}"),
     "mnemonic": _MNEMONIC_RE,
 }
