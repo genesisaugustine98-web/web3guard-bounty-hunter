@@ -1,47 +1,3 @@
-"""
-Base types for the discovery engine system.
-
-Every static / dynamic analysis tool that runs before the LLM pass
-is wrapped in a :class:`DiscoveryEngineBase` subclass. The
-scanner core invokes them via the
-:func:`run_discovery_phase` orchestrator.
-"""
-
-from __future__ import annotations
-
-import abc
-import logging
-import subprocess
-import sys
-import tempfile
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
-
-from web3guard.languages.base import TargetLanguage
-from web3guard.security import SandboxGuard, SandboxPolicy
-
-LOGGER = logging.getLogger("web3guard.discovery.base")
-
-
-def temp_report_path(target_path: Path, name: str) -> Path:
-    """Return a report-output path that lives *outside* the scanned repo.
-
-    Several CLI tools (aderyn, gitleaks, semgrep, mythril, echidna)
-    write their findings to a JSON report file. The original engines
-    wrote those into ``target_path / "<name>_report.json"``, silently
-    polluting the repository being scanned (and sometimes being re-
-    scanned on the next run). This helper puts the report in a fresh
-    OS temp directory instead.
-    """
-    d = Path(tempfile.mkdtemp(prefix=f"web3guard-{name}-"))
-    return d / f"{name}_report.json"
-
-
-@dataclass
-class DiscoveryResult:
-    """A single finding from a discovery engine.
-
     The format is normalized across engines; each engine subclass
     is responsible for translating its own output into this shape.
     """
@@ -60,7 +16,26 @@ class DiscoveryResult:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
-def safe_run_subprocess(\n    cmd: list[str],\n    *,\n    cwd: Path,\n    timeout: int,\n    env_extra: dict[str, str] | None = None,\n    policy: SandboxPolicy | None = None,\n) -> tuple[int, str, str]:\n    """Run a discovery subprocess through the same hardened runner as PoCs."""\n    from web3guard.security.sandbox_guard import run_sandboxed\n    try:\n        return run_sandboxed(\n            cmd, cwd=cwd, timeout=timeout, extra_env=env_extra, policy=policy,\n        )\n    except FileNotFoundError as e:\n        return 127, "", f"command not found: {e}"\n    except Exception as e:  # noqa: BLE001\n        LOGGER.warning("discovery sandbox wrapper failed: %s", e)\n        return 1, "", str(e)\n
+def safe_run_subprocess(
+    cmd: list[str],
+    *,
+    cwd: Path,
+    timeout: int,
+    env_extra: dict[str, str] | None = None,
+    policy: SandboxPolicy | None = None,
+) -> tuple[int, str, str]:
+    """Run a discovery subprocess through the same hardened runner as PoCs."""
+    from web3guard.security.sandbox_guard import run_sandboxed
+    try:
+        return run_sandboxed(
+            cmd, cwd=cwd, timeout=timeout, extra_env=env_extra, policy=policy,
+        )
+    except FileNotFoundError as e:
+        return 127, "", f"command not found: {e}"
+    except Exception as e:  # noqa: BLE001
+        LOGGER.warning("discovery sandbox wrapper failed: %s", e)
+        return 1, "", str(e)
+
 
 class DiscoveryEngineBase(abc.ABC):
     """Protocol every discovery engine implements.
