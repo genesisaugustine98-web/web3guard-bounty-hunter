@@ -374,6 +374,12 @@ class TelegramBot:
             self._cmd_cancel(chat_id)
         elif cmd == "/report":
             self._cmd_report(chat_id)
+        elif cmd in ("/website", "/recon"):
+            self._cmd_website(chat_id, arg)
+        elif cmd in ("/jobs", "/queue"):
+            self._cmd_jobs(chat_id)
+        elif cmd in ("/engines", "/caps", "/limits", "/coverage"):
+            self._cmd_ops_info(chat_id, cmd)
         elif cmd == "/languages":
             self._send(self._languages_text(), chat_id)
         else:
