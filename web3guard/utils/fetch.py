@@ -241,6 +241,11 @@ class _SafeRedirectHandler(HTTPRedirectHandler):
 _OPENER = build_opener(_SafeRedirectHandler())
 
 
+def safe_http_get(url: str, *, max_bytes: int = MAX_FILE_BYTES) -> bytes:
+    """Public safe GET primitive for higher-level scanners."""
+    return _http_request(url, max_bytes=max_bytes)
+
+
 def _http_request(url: str, max_bytes: int = MAX_FILE_BYTES) -> bytes:
     """GET ``url`` with retries, size cap, and SSRF checks. Returns bytes."""
     _assert_public_host(url)
@@ -811,7 +816,7 @@ def fetch_target(target: str, workdir: Path | None = None) -> Path:
 
     # 4. Downloadable artifact (archive suffix, single file, or anything
     #    else we can sniff once the head bytes arrive).
-    if _looks_like_archive(resolved) or _looks_like_single_file(resolved) or True:
+    if _looks_like_archive(resolved) or _looks_like_single_file(resolved):
         download_name = "artifact"
         parsed = urlparse(resolved)
         base_name = Path(parsed.path).name or download_name
