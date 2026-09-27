@@ -222,6 +222,16 @@ def build_parser() -> argparse.ArgumentParser:
                               "behavior); without --keep the path is printed "
                               "but registered for cleanup on exit")
 
+    # ---- website --------------------------------------------------------
+    web = sub.add_parser("website", help="Passive GET-only website reconnaissance")
+    web.add_argument("target", help="Authorized http(s) website target")
+    web.add_argument("--max-pages", type=int, default=25)
+    web.add_argument("--max-depth", type=int, default=2)
+    web.add_argument("--out", type=Path, default=None)
+
+    # ---- capabilities ----------------------------------------------------
+    sub.add_parser("capabilities", help="Show installed scanner/tool capabilities")
+
     # ---- telegram -------------------------------------------------------
     tg = sub.add_parser(
         "telegram",
@@ -246,6 +256,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "fetch":
         return _cmd_fetch(args)
+    if args.command == "website":
+        return _cmd_website(args)
+    if args.command == "capabilities":
+        return _cmd_capabilities(args)
     if args.command == "telegram":
         from web3guard.telegram_bot import main as tg_main
 
@@ -273,6 +287,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_scope(args)
     parser.print_help()
     return 1
+
+
+def _cmd_website(args: argparse.Namespace) -> int:
+    from web3guard.website import scan_website, write_website_report
+    try:
+        report = scan_website(args.target, max_pages=max(1, args.max_pages), max_depth=max(0, args.max_depth))
+    except Exception as exc:
+        print(f"error: website reconnaissance failed: {exc}", file=sys.stderr)
+        return 2
+    out_dir = args.out or (args.workdir / "website-reports")
+    written = write_website_report(report, out_dir)
+    print(f"Web3Guard website reconnaissance: {report.target}")
+    print(f"Pages: {len(report.pages)} | URLs: {len(report.discovered_urls)} | endpoints: {len(report.endpoints)}")
+    print(f"Security findings: {len(report.security_findings)} | secrets: {len(report.secret_findings)}")
+    for fmt, path in written.items(): print(f"  - {fmt}: {path}")
+    return 0
+
+
+def _cmd_capabilities(args: argparse.Namespace) -> int:
+    from web3guard.sota_tools import capabilities
+    for cap in capabilities():
+        state = "READY" if cap.installed else "missing"
+        print(f"{cap.name:<16} {state:<8} {cap.mode:<10} {cap.role}")
+    return 0
 
 
 def _setup_logging(verbosity: int) -> None:
