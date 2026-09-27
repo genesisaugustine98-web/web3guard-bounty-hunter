@@ -27,7 +27,7 @@ def test_zero_cost_ceiling_is_disabled():
 
 def test_secret_text_is_redacted():
     secret = "github_pat_" + "A" * 45
-    assert secret in redact_sensitive_text(secret)
+    assert secret not in redact_sensitive_text(secret)
     assert "<redacted:github_fine_grained_pat>" in redact_sensitive_text(secret)
     matches = list(iter_secret_matches(secret))
     assert matches
