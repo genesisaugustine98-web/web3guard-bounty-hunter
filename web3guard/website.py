@@ -10,7 +10,7 @@ from urllib.parse import urljoin, urlparse, urldefrag
 from web3guard.utils.fetch import FetchError, _OPENER, _assert_public_host
 from web3guard.utils.secrets import iter_secret_matches, redact_sensitive_text
 
-_ENDPOINT_RE = re.compile(r'(?:(?:https?:)?//[^"\'\\s<>]+|/(?:api|graphql|rest|v[0-9]+)/[^"\'\\s<>]+)', re.I)
+_ENDPOINT_RE = re.compile(r'''(?:(?:https?:)?//[^\s"'<>]+|/(?:api|graphql|rest|v\d+)/[^\s"'<>]+)''', re.I)
 
 @dataclass
 class WebsitePage:
