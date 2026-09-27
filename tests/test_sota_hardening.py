@@ -1,9 +1,8 @@
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 import pytest
 
-from web3guard.ai.cost import CostTracker, CostCeilingExceeded
+from web3guard.ai.cost import CostTracker
 from web3guard.utils.secrets import iter_secret_matches, redact_sensitive_text
 
 
