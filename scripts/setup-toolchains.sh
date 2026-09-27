@@ -33,6 +33,7 @@ install_clarinet() {
   curl -sSL "$url" -o /tmp/clarinet.tar.gz && tar -xzf /tmp/clarinet.tar.gz -C "$dir"
   chmod +x "$dir/clarinet"
   echo "$dir" >> "$GITHUB_PATH" 2>/dev/null || true
+  export PATH="$dir:$PATH"
   [ -x "$dir/clarinet" ]
 }
 
@@ -63,6 +64,7 @@ install_aptos() {
   curl -sSL "$url" -o /tmp/aptos.zip && unzip -oq /tmp/aptos.zip -d "$dir"
   chmod +x "$dir/aptos"
   echo "$dir" >> "$GITHUB_PATH" 2>/dev/null || true
+  export PATH="$dir:$PATH"
   [ -x "$dir/aptos" ]
 }
 
@@ -77,6 +79,7 @@ install_solana() {
   curl -sSL "$url" -o /tmp/solana.tar.bz2
   tar -xjf /tmp/solana.tar.bz2 -C "$dir" --strip-components=1
   echo "$dir/bin" >> "$GITHUB_PATH" 2>/dev/null || true
+  export PATH="$dir/bin:$PATH"
   if ! has anchor; then
     cargo install --locked --git https://github.com/coral-xyz/anchor avm --force
     avm install latest && avm use latest
