@@ -63,7 +63,21 @@ class _FakeProvider(AIProvider):
 
 
 def _client(provider: _FakeProvider, **kw) -> AIClient:
-    return AIClient(providers=[provider], model="default-model", **kw)
+    return AIClient(
+        providers=[provider],
+        model="default-model",
+        cost_tracker=__import__("web3guard.ai.cost", fromlist=["CostTracker"]).CostTracker(
+            pricing={
+                "default-model": {"input": 0.0, "output": 0.0},
+                "other-model": {"input": 0.0, "output": 0.0},
+                "m-x": {"input": 0.0, "output": 0.0},
+                "m-e": {"input": 0.0, "output": 0.0},
+                "m": {"input": 0.0, "output": 0.0},
+            },
+            **kw.pop("cost_tracker", {}),
+        ),
+        **kw,
+    )
 
 
 # ---------------------------------------------------------------------------
