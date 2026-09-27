@@ -9,6 +9,8 @@ from enum import Enum, StrEnum
 from pathlib import Path
 from typing import Any
 
+from web3guard.utils.secrets import redact_sensitive_text, sanitize_mapping
+
 
 class ReportFormat(StrEnum):
     TXT = "txt"
@@ -49,7 +51,8 @@ class ReportBuilder:
 
     def _render(self, fmt: str) -> str:
         if fmt == "json":
-            return json.dumps(dataclasses.asdict(self.result), indent=2, default=_json_default) + "\n"
+            payload = sanitize_mapping(dataclasses.asdict(self.result))
+            return json.dumps(payload, indent=2, default=_json_default) + "\n"
         if fmt == "sarif":
             return json.dumps(self._sarif(), indent=2) + "\n"
         if fmt == "md":
@@ -64,10 +67,10 @@ class ReportBuilder:
         for finding in findings:
             lines.extend([
                 f"[{finding.severity}] {finding.category or 'uncategorized'}",
-                f"Target: {finding.target}",
-                f"Location: {finding.file}{':' + finding.line_hint if finding.line_hint else ''}",
+                f"Target: {redact_sensitive_text(finding.target)}",
+                f"Location: {redact_sensitive_text(finding.file)}{':' + redact_sensitive_text(finding.line_hint) if finding.line_hint else ''}",
                 f"Status: {finding.status}",
-                finding.description,
+                redact_sensitive_text(finding.description),
                 "",
             ])
         return "\n".join(lines).rstrip() + "\n"
@@ -79,12 +82,12 @@ class ReportBuilder:
             lines.extend([
                 f"## {finding.severity}: {finding.category or 'Uncategorized'}",
                 "",
-                f"- Target: `{finding.target}`",
-                f"- Location: `{finding.file}{':' + finding.line_hint if finding.line_hint else ''}`",
+                f"- Target: `{redact_sensitive_text(finding.target)}`",
+                f"- Location: `{redact_sensitive_text(finding.file)}{':' + redact_sensitive_text(finding.line_hint) if finding.line_hint else ''}`",
                 f"- Status: `{finding.status}`",
                 f"- Confidence: `{finding.confidence:.2f}`",
                 "",
-                finding.description,
+                redact_sensitive_text(finding.description),
                 "",
             ])
         return "\n".join(lines).rstrip() + "\n"
@@ -108,7 +111,7 @@ class ReportBuilder:
                 + (f":<code>{_html_escape(f.line_hint)}</code>" if f.line_hint else "")
                 + "</td>"
                 f"<td>{_html_escape(f.function or '')}</td>"
-                f"<td>{_html_escape(f.description or '')}</td>"
+                f"<td>{_html_escape(redact_sensitive_text(f.description or ''))}</td>"
                 f"<td>{_html_escape(f.status)}</td>"
                 f"<td>{f.confidence:.2f}</td>"
                 "</tr>"
@@ -160,7 +163,7 @@ class ReportBuilder:
             results.append({
                 "ruleId": rule_id,
                 "level": levels.get(str(finding.severity).upper(), "warning"),
-                "message": {"text": finding.description or finding.reasoning or finding.category},
+                "message": {"text": redact_sensitive_text(finding.description or finding.reasoning or finding.category)},
                 "locations": [{"physicalLocation": location}],
             })
         return {
