@@ -35,7 +35,8 @@ import json
 import logging
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -1873,7 +1874,7 @@ class Scanner:
                         fut.cancel()
 
         findings: list[Finding] = []
-        for engine, discovered in results:
+        for _engine, discovered in results:
             for item in discovered:
                 item_lang = language_for_file(Path(target_path) / item.file) or language
                 if item_lang != language:
