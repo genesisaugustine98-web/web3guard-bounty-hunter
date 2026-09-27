@@ -41,3 +41,27 @@ def test_secret_scan_never_returns_value(tmp_path: Path):
     finding = scan_path(tmp_path)[0]
     assert value not in str(finding)
     assert "redacted" in str(finding).lower()
+
+
+def test_report_boundary_scrubs_secrets(tmp_path: Path):
+    from web3guard.reports.builder import ReportBuilder
+    from web3guard.scanner import Finding, ScanResult, TargetLanguage, TargetResult
+
+    secret = "github_pat_" + "C" * 45
+    finding = Finding(
+        target="https://example.test",
+        language="solidity",
+        file="Contract.sol",
+        category="secret-test",
+        description=secret,
+        reasoning=secret,
+    )
+    result = ScanResult(
+        started_at="s",
+        finished_at="e",
+        config={},
+        targets=[TargetResult(target="https://example.test", language=TargetLanguage.SOLIDITY, findings=[finding])],
+    )
+    written = ReportBuilder(result).write(tmp_path, formats=["txt", "json", "md", "sarif"])
+    for path in written.values():
+        assert secret not in path.read_text(encoding="utf-8")
