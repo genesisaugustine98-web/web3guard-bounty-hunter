@@ -106,7 +106,10 @@ class _FakeProvider:
 def _make_client(providers):
     return AIClient(
         providers=providers,
-        cost_tracker=CostTracker(max_cost_usd=100.0),
+        cost_tracker=CostTracker(
+            max_cost_usd=100.0,
+            allow_unknown_pricing=True,
+        ),
         cache_path=None,
     )
 
