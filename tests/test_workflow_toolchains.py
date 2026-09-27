@@ -22,7 +22,7 @@ def test_toolchain_installs_stay_wired_in_ci() -> None:
     text = WORKFLOW.read_text()
     # toolchain-smoke + scan-on-command + scan all set up Node and invoke
     # the toolchain script.
-    assert text.count("actions/setup-node@v4") == 3
+    assert text.count("actions/setup-node@v7") == 3
     assert text.count("bash scripts/setup-toolchains.sh") == 3
     # The smoke job installs only the lightweight subset and runs the
     # non-Foundry sandbox smoke tests; the scan jobs install everything.
