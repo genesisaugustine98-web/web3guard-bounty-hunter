@@ -301,7 +301,8 @@ def _cmd_website(args: argparse.Namespace) -> int:
     print(f"Web3Guard website reconnaissance: {report.target}")
     print(f"Pages: {len(report.pages)} | URLs: {len(report.discovered_urls)} | endpoints: {len(report.endpoints)}")
     print(f"Security findings: {len(report.security_findings)} | secrets: {len(report.secret_findings)}")
-    for fmt, path in written.items(): print(f"  - {fmt}: {path}")
+    for fmt, path in written.items():
+        print(f"  - {fmt}: {path}")
     return 0
 
 
