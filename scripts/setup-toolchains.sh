@@ -103,5 +103,18 @@ done
 
 if [ "${#FAILED[@]}" -gt 0 ]; then
   echo "::warning::one or more toolchains failed to install: ${FAILED[*]}"
+  if [ "${WEB3GUARD_REQUIRE_TOOLCHAINS:-0}" = "1" ]; then
+    echo "::error::required toolchain mode: ${FAILED[*]} is not available"
+    exit 1
+  fi
+fi
+
+if [ "${WEB3GUARD_REQUIRE_TOOLCHAINS:-0}" = "1" ]; then
+  for required in "${TOOLS[@]}"; do
+    if ! has "$required"; then
+      echo "::error::required toolchain missing after setup: $required"
+      exit 1
+    fi
+  done
 fi
 exit 0
