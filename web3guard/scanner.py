@@ -35,6 +35,7 @@ import json
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -70,7 +71,7 @@ from web3guard.storage import DurableStore
 from web3guard.storage.durable import StorageError
 from web3guard.utils.bounty import ScopeAllowlist, ScopeDenied
 from web3guard.utils.resilience import disk_ok_or_raise
-from web3guard.utils.secrets import scan_path
+from web3guard.utils.secrets import redact_sensitive_text, sanitize_mapping, scan_path
 from web3guard.utils.vuln_catalog import get_catalog
 
 LOGGER = logging.getLogger("web3guard.scanner")
@@ -267,7 +268,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "base_url": "https://openrouter.ai/api/v1",
             "api_key_env": "OPENROUTER_API_KEY",
             "rpm": 60,
-            "model": "deepseek/deepseek-chat",
+            "model": "deepseek/deepseek-v4-flash-0731:free",
         },
         {
             "type": "groq",
@@ -297,6 +298,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "enable_attack_sequence_brainstorm": True,
     "enable_role_map": True,
     "enable_secret_scan": True,
+    "enable_sota_sca": True,
+    "sota_sca_timeout_seconds": 240,
+    "sota_max_parallel": 4,
+    "max_files_per_target": 10000,
     "enable_incremental_scan": False,
     "enable_deployment_verification": False,
     "enable_dependency_scan": False,
@@ -437,6 +442,7 @@ class Scanner:
         else:
             self.injection_guard = injection_guard or PromptInjectionGuard()
         self.ai_client = ai_client or self._build_ai_client()
+        self._discovery_cache: dict[tuple[str, str], list[object]] = {}
         # v3.5: durable storage — local SQLite first, optional Supabase/
         # Postgres replication with an outbox for missed writes.
         try:
@@ -530,9 +536,17 @@ class Scanner:
         # Cost tracker with persistence
         cost_path = self.workdir / self.config.get("cost_db_path", ".web3guard/cost.db")
         cost_path.parent.mkdir(parents=True, exist_ok=True)
+        pricing = self.config.get("model_pricing") or None
+        provider_models = {
+            str(p.get("name", p.get("type", ""))): str(p.get("model", default_model))
+            for p in self.config.get("ai_providers", [])
+            if p.get("enabled", True) is not False and p.get("name")
+        }
         cost = CostTracker(
             max_cost_usd=float(self.config.get("max_cost_usd", 50.0)),
             persist_path=cost_path,
+            pricing=pricing,
+            allow_unknown_pricing=False,
         )
         # LLM cache
         cache_path = self.workdir / self.config.get("cache_path", ".web3guard/llm_cache.db")
@@ -541,6 +555,7 @@ class Scanner:
             providers=providers,
             model=default_model,
             role_models=role_models,
+            provider_models=provider_models,
             cost_tracker=cost,
             cache_path=cache_path,
             injection_guard=self.injection_guard,
@@ -831,6 +846,11 @@ class Scanner:
         # and de-duplicated by fingerprint across adapters.
         analysis_budget = max(1, budget // 1500) if budget else 0
         seen_fps: set[str] = set()
+        if self.config.get("enable_sota_sca", True):
+            for sf in self._run_sota_sca(target_path, target):
+                if self._severity_at_least(sf.severity, min_severity) and sf.fingerprint not in seen_fps:
+                    seen_fps.add(sf.fingerprint)
+                    tr.findings.append(sf)
         tr.role_map = {}
         tr.attack_sequences = {}
         reachability = None
@@ -860,6 +880,7 @@ class Scanner:
                 LOGGER.warning("adapter %s discover_files failed: %s", lang, e)
                 files = []
             files = self._ordered_files(files, target_path, plan)
+            files = files[:int(self.config.get("max_files_per_target", 10000))]
             if dirty_files is not None:
                 # Incremental mode: skip chunks from clean files so only
                 # changed code (plus its transitive importers) is
@@ -1110,10 +1131,10 @@ class Scanner:
             f"Language: {adapter.language.value}\n"
             f"File: {chunk.file}\n"
             f"Lines: {chunk.lines or '?'}\n\n"
-            f"---- CODE ----\n{chunk.content}\n---- END CODE ----\n"
+            f"---- CODE ----\n{redact_sensitive_text(chunk.content)}\n---- END CODE ----\n"
         )
         if chunk.context:
-            user += f"\n---- CONTEXT ----\n{chunk.context}\n---- END CONTEXT ----\n"
+            user += f"\n---- CONTEXT ----\n{redact_sensitive_text(chunk.context)}\n---- END CONTEXT ----\n"
         user += (
             "\nRespond with a single JSON object with the schema:\n"
             "{\n"
@@ -1751,38 +1772,107 @@ class Scanner:
 
     # ---- helpers ---------------------------------------------------------
 
+    def _run_sota_sca(self, target_path: Path, target: str) -> list[Finding]:
+        """Normalize installed OSV-Scanner/Trivy signals into scanner findings."""
+        try:
+            from web3guard.sota_tools import run_sca_suite
+        except ImportError:
+            return []
+        try:
+            raw = run_sca_suite(
+                target_path,
+                timeout=int(self.config.get("sota_sca_timeout_seconds", 240)),
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("SOTA SCA suite failed: %s", exc)
+            return []
+        findings: list[Finding] = []
+        for item in raw:
+            f = Finding(
+                target=target,
+                language="dependency",
+                file=str(item.get("file", "dependency")),
+                category=str(item.get("category", "dependency-vulnerability")),
+                severity=str(item.get("severity", "MEDIUM")),
+                confidence=float(item.get("confidence", 0.9)),
+                description=redact_sensitive_text(str(item.get("description", item.get("title", "SCA finding")))),
+                reasoning=f"Reported by {item.get('engine', 'SCA')}",
+                line_hint=str(item.get("line", "") or ""),
+                tool_consensus=[str(item.get("engine", "SCA"))],
+                metadata={"sota_sca": sanitize_mapping(item.get("raw", {}))},
+            )
+            f.fingerprint = self._fingerprint(f)
+            findings.append(f)
+        return findings
+
     def _run_discovery(
         self,
         target_path: Path,
         target: str,
         language: TargetLanguage,
     ) -> list[Finding]:
-        """Run installed discovery engines compatible with the target language."""
+        """Run compatible discovery engines in parallel within a target deadline."""
         from web3guard.discovery import ALL_ENGINES
+        from web3guard.discovery.static_analyzer import language_for_file
 
-        findings: list[Finding] = []
         deadline = time.monotonic() + int(self.config.get("discovery_time_budget_seconds", 900))
+        target_key = str(target_path.resolve())
+        engines = []
         for engine_type in ALL_ENGINES:
             engine = engine_type()
             if language not in engine.supported_languages or not engine.enabled_by_default:
                 continue
-            remaining = int(deadline - time.monotonic())
-            if remaining <= 0:
-                LOGGER.warning("discovery time budget exhausted")
-                break
             if not engine.is_installed():
                 continue
+            engines.append(engine)
+
+        def run_one(engine):
+            key = (target_key, engine.name)
+            if key in self._discovery_cache:
+                return engine, self._discovery_cache[key]
+            remaining = int(deadline - time.monotonic())
+            if remaining <= 0:
+                return engine, []
             try:
-                discovered = engine.run(target_path, timeout=min(engine.default_timeout, remaining))
+                items = engine.run(
+                    target_path,
+                    timeout=min(engine.default_timeout, remaining),
+                )
             except Exception as exc:  # noqa: BLE001
                 LOGGER.warning("discovery engine %s failed: %s", engine.name, exc)
-                continue
+                items = []
+            self._discovery_cache[key] = items
+            return engine, items
+
+        workers = max(
+            1,
+            min(int(self.config.get("sota_max_parallel", 4)), len(engines) or 1),
+        )
+        results = []
+        if len(engines) <= 1:
+            results = [run_one(e) for e in engines]
+        else:
+            with ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="web3guard-discovery",
+            ) as ex:
+                futures = {ex.submit(run_one, e): e for e in engines}
+                try:
+                    for fut in as_completed(
+                        futures,
+                        timeout=max(1, int(deadline - time.monotonic())),
+                    ):
+                        results.append(fut.result())
+                except FuturesTimeoutError:
+                    LOGGER.warning(
+                        "discovery deadline reached; retaining completed engine results"
+                    )
+                    for fut in futures:
+                        fut.cancel()
+
+        findings: list[Finding] = []
+        for engine, discovered in results:
             for item in discovered:
-                # The multi-language static engine reports every language
-                # it finds, regardless of which adapter requested it.
-                # Resolve the file's *actual* language so findings are
-                # tagged correctly and each adapter only keeps its own.
-                from web3guard.discovery.static_analyzer import language_for_file
                 item_lang = language_for_file(Path(target_path) / item.file) or language
                 if item_lang != language:
                     continue
@@ -1795,7 +1885,7 @@ class Scanner:
                     severity=item.severity,
                     confidence=item.confidence,
                     swc_id=item.swc_id,
-                    description=item.description or item.title,
+                    description=redact_sensitive_text(item.description or item.title),
                     reasoning=f"Reported by {item.engine}",
                     line_hint=(
                         f"{item.line}-{item.end_line}"
@@ -1803,8 +1893,8 @@ class Scanner:
                         else str(item.line or "")
                     ),
                     tool_consensus=[item.engine],
-                    metadata={"discovery": item.raw},
-                )  # engine identity lives in tool_consensus[0] via engine_marker
+                    metadata={"discovery": sanitize_mapping(item.raw)},
+                )
                 finding.fingerprint = self._fingerprint(finding)
                 findings.append(finding)
         return findings
