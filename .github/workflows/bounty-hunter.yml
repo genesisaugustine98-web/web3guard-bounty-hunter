@@ -149,7 +149,7 @@ jobs:
 
       - name: Install lightweight sandbox toolchains
         run: |
-          bash scripts/setup-toolchains.sh clarinet scarb blueprint aptos
+          WEB3GUARD_REQUIRE_TOOLCHAINS=1 bash scripts/setup-toolchains.sh clarinet scarb blueprint aptos
 
       - name: Install Foundry (EVM exploit-confirmation regression)
         run: |
@@ -173,6 +173,22 @@ jobs:
             tests/test_build_profile.py tests/test_foundry_build_repro.py \
             tests/test_impact_extraction.py tests/test_differential.py \
             tests/test_calibration.py::test_calibrate_l2_golden_cases -v
+
+      - name: Emit required capability matrix
+        run: |
+          mkdir -p test-results
+          python scripts/capability-matrix.py --json test-results/capabilities.json --require-foundry
+
+      - name: Run required integration gate (no skips)
+        run: python scripts/required-integration-gate.py --junit test-results/required-integration.xml
+
+      - name: Upload integration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web3guard-integration-evidence-${{ github.run_id }}
+          path: test-results/
+          if-no-files-found: warn
 
   live-exploit-e2e:
     name: Live exploit E2E (real model)
@@ -468,6 +484,10 @@ jobs:
             echo "Telegram reply skipped (token or chat_id not set)"
           fi
 
+      - name: Secret leak gate
+        if: always()
+        run: python scripts/secret-leak-gate.py reports
+
       - name: Upload report artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -616,6 +636,10 @@ jobs:
         if: always()
         run: |
           python -m web3guard.cli dashboard | tee web3guard-dashboard.txt || true
+
+      - name: Secret leak gate
+        if: always()
+        run: python scripts/secret-leak-gate.py reports
 
       - name: Upload report artifacts (incl. dual feed)
         if: always()
