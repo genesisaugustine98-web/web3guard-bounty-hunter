@@ -76,6 +76,7 @@ class AIClient:
         providers: list[AIProvider],
         model: str = "deepseek-ai/deepseek-v4-flash-0731",
         role_models: Mapping[str, str] | None = None,
+        provider_models: Mapping[str, str] | None = None,
         cost_tracker: CostTracker | None = None,
         cache_path: Path | None = None,
         injection_guard: PromptInjectionGuard | None = None,
@@ -92,6 +93,7 @@ class AIClient:
         # cache key already includes the model, so roles routed to
         # different models never share cache entries.
         self._role_models: dict[str, str] = dict(role_models or {})
+        self._provider_models: dict[str, str] = dict(provider_models or {})
         self._cost = cost_tracker or CostTracker()
         self._guard = injection_guard or PromptInjectionGuard()
         self._seed = default_seed
@@ -236,8 +238,10 @@ class AIClient:
             ChatMessage(role="system", content=system),
             ChatMessage(role="user", content=user_quarantined),
         ]
-        # v3.3: resolve the model for this role (per-role override first).
-        model = self._role_models.get(role, self._model)
+        # Resolve an explicit role override first; otherwise honor each
+        # provider's configured default model during failover.
+        requested_model = self._role_models.get(role, self._model)
+        model = requested_model
         # 3. Cache check
         key = self._cache_key(messages, model=model, temperature=temperature,
                               max_tokens=max_tokens, seed=self._seed)
@@ -264,6 +268,7 @@ class AIClient:
             eligible = list(self._providers)
         for provider in eligible:
             state = self._circuit[provider.name]
+            provider_model = requested_model if role in self._role_models else self._provider_models.get(provider.name, requested_model)
             if state.is_open(cooldown=self._cooldown):
                 LOGGER.warning("circuit open for %s, skipping", provider.name)
                 continue
@@ -271,7 +276,7 @@ class AIClient:
                 try:
                     response = provider.chat(
                         messages,
-                        model=model,
+                        model=provider_model,
                         max_tokens=max_tokens,
                         temperature=temperature,
                         seed=self._seed,
@@ -309,7 +314,7 @@ class AIClient:
                     # 6. Record cost
                     self._cost.record(
                         provider=provider.name,
-                        model=response.model or model,
+                        model=response.model or provider_model,
                         prompt_tokens=response.prompt_tokens,
                         completion_tokens=response.completion_tokens,
                         role=role,
