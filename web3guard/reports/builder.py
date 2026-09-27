@@ -154,7 +154,7 @@ class ReportBuilder:
             rules.setdefault(rule_id, {
                 "id": rule_id,
                 "name": finding.category or "Web3GuardFinding",
-                "shortDescription": {"text": finding.description or finding.category or "Web3Guard finding"},
+                "shortDescription": {"text": redact_sensitive_text(finding.description or finding.category or "Web3Guard finding")},
             })
             location: dict[str, Any] = {"artifactLocation": {"uri": finding.file}}
             start_line = _start_line(finding.line_hint)
