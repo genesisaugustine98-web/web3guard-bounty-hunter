@@ -60,39 +60,7 @@ class DiscoveryResult:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
-def safe_run_subprocess(
-    cmd: list[str],
-    *,
-    cwd: Path,
-    timeout: int,
-    env_extra: dict[str, str] | None = None,
-    policy: SandboxPolicy | None = None,
-) -> tuple[int, str, str]:
-    """Run a discovery-engine subprocess under sandbox policy.
-
-    Returns (returncode, stdout, stderr). The subprocess:
-    - inherits the policy's resource limits (CPU/AS/FSIZE/NOFILE/NPROC)
-    - has its environment filtered to drop API keys
-    - has stdout/stderr truncated to a safe size
-    """
-    guard = SandboxGuard(policy or SandboxPolicy())
-    report = guard.prepare_subprocess(cmd, cwd=cwd, extra_env=env_extra)
-    try:
-        proc = subprocess.run(
-            report.command, cwd=report.cwd, env=report.env,
-            capture_output=True, text=True, timeout=timeout,
-            preexec_fn=guard.apply_resource_limits if sys.platform != "win32" else None,
-        )
-        return (
-            proc.returncode,
-            guard.truncate_revert_reason(proc.stdout),
-            guard.truncate_revert_reason(proc.stderr),
-        )
-    except subprocess.TimeoutExpired:
-        return 124, "", f"timed out after {timeout}s"
-    except FileNotFoundError as e:
-        return 127, "", f"command not found: {e}"
-
+def safe_run_subprocess(\n    cmd: list[str],\n    *,\n    cwd: Path,\n    timeout: int,\n    env_extra: dict[str, str] | None = None,\n    policy: SandboxPolicy | None = None,\n) -> tuple[int, str, str]:\n    """Run a discovery subprocess through the same hardened runner as PoCs."""\n    from web3guard.security.sandbox_guard import run_sandboxed\n    try:\n        return run_sandboxed(\n            cmd, cwd=cwd, timeout=timeout, extra_env=env_extra, policy=policy,\n        )\n    except FileNotFoundError as e:\n        return 127, "", f"command not found: {e}"\n    except Exception as e:  # noqa: BLE001\n        LOGGER.warning("discovery sandbox wrapper failed: %s", e)\n        return 1, "", str(e)\n
 
 class DiscoveryEngineBase(abc.ABC):
     """Protocol every discovery engine implements.
