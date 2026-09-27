@@ -134,7 +134,77 @@ class CostTracker:
             + (completion_tokens / 1_000_000.0) * rates.get("output", 0.0)
         )
 
-    def record(\n        self,\n        *,\n        provider: str,\n        model: str,\n        prompt_tokens: int,\n        completion_tokens: int,\n        role: str = "analysis",\n    ) -> CostRecord:\n        cost = self.cost_for(model, prompt_tokens, completion_tokens)\n        rec = CostRecord(\n            timestamp=time.time(),\n            provider=provider,\n            model=model,\n            prompt_tokens=prompt_tokens,\n            completion_tokens=completion_tokens,\n            cost_usd=cost,\n            role=role,\n        )\n        if self._persist_path is None:\n            projected_total = self._local_total_cost() + cost\n            if self._max_cost_usd > 0 and projected_total > self._max_cost_usd:\n                raise CostCeilingExceeded(\n                    f"cost ceiling exceeded: ${projected_total:.4f} > ${self._max_cost_usd:.4f}"\n                )\n            self._records.append(rec)\n            return rec\n\n        with closing(sqlite3.connect(str(self._persist_path), timeout=5.0)) as conn:\n            conn.execute("PRAGMA journal_mode=WAL")\n            conn.execute("PRAGMA synchronous=NORMAL")\n            conn.execute("PRAGMA busy_timeout=5000")\n            conn.execute("BEGIN IMMEDIATE")\n            persisted_total = float(\n                conn.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM cost_records").fetchone()[0] or 0.0\n            )\n            projected_total = max(self._local_total_cost(), persisted_total) + cost\n            if self._max_cost_usd > 0 and projected_total > self._max_cost_usd:\n                conn.rollback()\n                raise CostCeilingExceeded(\n                    f"cost ceiling exceeded: ${projected_total:.4f} > ${self._max_cost_usd:.4f}"\n                )\n            conn.execute(\n                "INSERT INTO cost_records (timestamp, provider, model, "\n                "prompt_tokens, completion_tokens, cost_usd, role) "\n                "VALUES (?, ?, ?, ?, ?, ?, ?)",\n                (rec.timestamp, rec.provider, rec.model, rec.prompt_tokens,\n                 rec.completion_tokens, rec.cost_usd, rec.role),\n            )\n            conn.commit()\n        self._records.append(rec)\n        return rec\n\n    def _local_total_cost(self) -> float:\n        return sum(r.cost_usd for r in self._records)\n\n    def total_cost(self) -> float:\n        local = self._local_total_cost()\n        if self._persist_path is None:\n            return local\n        try:\n            with closing(sqlite3.connect(str(self._persist_path), timeout=5.0)) as conn:\n                conn.execute("PRAGMA busy_timeout=5000")\n                persisted = float(\n                    conn.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM cost_records").fetchone()[0] or 0.0\n                )\n                return max(local, persisted)\n        except sqlite3.Error:\n            return local\n\n    def total_tokens(self) -> tuple[int, int]:
+    def record(
+        self,
+        *,
+        provider: str,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        role: str = "analysis",
+    ) -> CostRecord:
+        cost = self.cost_for(model, prompt_tokens, completion_tokens)
+        rec = CostRecord(
+            timestamp=time.time(),
+            provider=provider,
+            model=model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cost_usd=cost,
+            role=role,
+        )
+        if self._persist_path is None:
+            projected_total = self._local_total_cost() + cost
+            if self._max_cost_usd > 0 and projected_total > self._max_cost_usd:
+                raise CostCeilingExceeded(
+                    f"cost ceiling exceeded: ${projected_total:.4f} > ${self._max_cost_usd:.4f}"
+                )
+            self._records.append(rec)
+            return rec
+
+        with closing(sqlite3.connect(str(self._persist_path), timeout=5.0)) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("BEGIN IMMEDIATE")
+            persisted_total = float(
+                conn.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM cost_records").fetchone()[0] or 0.0
+            )
+            projected_total = max(self._local_total_cost(), persisted_total) + cost
+            if self._max_cost_usd > 0 and projected_total > self._max_cost_usd:
+                conn.rollback()
+                raise CostCeilingExceeded(
+                    f"cost ceiling exceeded: ${projected_total:.4f} > ${self._max_cost_usd:.4f}"
+                )
+            conn.execute(
+                "INSERT INTO cost_records (timestamp, provider, model, "
+                "prompt_tokens, completion_tokens, cost_usd, role) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (rec.timestamp, rec.provider, rec.model, rec.prompt_tokens,
+                 rec.completion_tokens, rec.cost_usd, rec.role),
+            )
+            conn.commit()
+        self._records.append(rec)
+        return rec
+
+    def _local_total_cost(self) -> float:
+        return sum(r.cost_usd for r in self._records)
+
+    def total_cost(self) -> float:
+        local = self._local_total_cost()
+        if self._persist_path is None:
+            return local
+        try:
+            with closing(sqlite3.connect(str(self._persist_path), timeout=5.0)) as conn:
+                conn.execute("PRAGMA busy_timeout=5000")
+                persisted = float(
+                    conn.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM cost_records").fetchone()[0] or 0.0
+                )
+                return max(local, persisted)
+        except sqlite3.Error:
+            return local
+
+    def total_tokens(self) -> tuple[int, int]:
         """Return (prompt_tokens, completion_tokens) totals."""
         return (
             sum(r.prompt_tokens for r in self._records),
