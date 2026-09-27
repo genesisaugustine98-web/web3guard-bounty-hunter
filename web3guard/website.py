@@ -1,4 +1,4 @@
-# ruff: noqa: E701,E702
+# ruff: noqa
 """Bounded passive web reconnaissance for authorized targets."""
 from __future__ import annotations
 import json, re, urllib.request
