@@ -20,11 +20,12 @@ def test_toolchain_script_exists_and_is_shell_valid() -> None:
 
 def test_toolchain_installs_stay_wired_in_ci() -> None:
     text = WORKFLOW.read_text()
-    # toolchain-smoke + scan-on-command + scan all set up Node and invoke
-    # the toolchain script.
+    # The toolchain-smoke, scan-on-command, and scan jobs all prepare Node
+    # and invoke the shared toolchain installer.
     assert text.count("actions/setup-node@v7") == 3
     assert text.count("bash scripts/setup-toolchains.sh") == 3
-    # The smoke job installs only the lightweight subset and runs the
-    # non-Foundry sandbox smoke tests; the scan jobs install everything.
+    # The strict smoke lane installs the lightweight required toolchains
+    # and the no-skip integration gate owns the deterministic test list.
     assert "bash scripts/setup-toolchains.sh clarinet scarb blueprint aptos" in text
-    assert "tests/test_sandbox_smoke.py" in text
+    gate = (PROJECT_ROOT / "scripts/required-integration-gate.py").read_text()
+    assert "tests/test_sandbox_smoke.py" in gate
