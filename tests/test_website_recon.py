@@ -1,5 +1,5 @@
-from web3guard.website import scan_website
 from web3guard import website
+from web3guard.website import scan_website
 
 
 def test_website_scan_is_same_origin_and_redacts_secrets(monkeypatch):
