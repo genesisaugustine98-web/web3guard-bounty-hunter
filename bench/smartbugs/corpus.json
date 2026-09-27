@@ -1,16 +1,60 @@
 {
   "name": "smartbugs",
-  "description": "SmartBugs dataset (https://github.com/smartbugs/smartbugs) — 10 classic vulnerable Solidity contracts with per-line vulnerability labels. Categories are mapped to the Web3Guard analyzer vocabulary from the original SmartBugs labels (see smartbugs-original-labels.json). Curation: BecToken and Rubixi additionally carry vulnerabilities that are genuinely present in the source but absent from the original SmartBugs labels — BecToken (unmitigated approve/transferFrom race, SWC-114) and Rubixi (unchecked .send in the payout loop, SWC-113). Note: several samples carry a source header 'Upgraded from Solidity 0.4 to 0.8, vulnerability may no longer exist' — e.g. BecToken (0.8 checked arithmetic reverts on overflow) and MyToken (0.8 ABI decoder rejects malformed input), so those labels are stale for the 0.8.24 versions in this corpus.",
+  "description": "SmartBugs dataset (https://github.com/smartbugs/smartbugs) expanded with samples from smartbugs/smartbugs-curated (https://github.com/smartbugs/smartbugs-curated) and trailofbits/not-so-smart-contracts — 47 Solidity contracts with per-category vulnerability labels — 45 vulnerable plus 2 clean units (timed_crowdsale: a plain deadline comparison is not exploitable and guards the analyzer's deadline-check suppression; MyToken: the 0.8 ABI decoder rejects the malformed short-address calldata). Every unit was source-reviewed before labeling; categories are mapped to the Web3Guard analyzer vocabulary (see smartbugs-original-labels.json for the original SmartBugs per-line labels of the initial 10). Original 10 curation note kept: BecToken and Rubixi additionally carry vulnerabilities genuinely present in the source but absent from the original SmartBugs labels — BecToken (unmitigated approve/transferFrom race, SWC-114) and Rubixi (unchecked .send in the payout loop, SWC-113). Note: several initial samples carry a source header 'Upgraded from Solidity 0.4 to 0.8, vulnerability may no longer exist' — e.g. BecToken (0.8 checked arithmetic reverts on overflow) and MyToken (0.8 ABI decoder rejects malformed input), so those labels are stale for the 0.8.24 versions in this corpus. Added samples are the original 0.4.x sources (where the flaws are live).",
   "units": [
     {"path": "samples/SimpleDAO.sol", "language": "solidity", "vulnerabilities": ["reentrancy"]},
     {"path": "samples/Rubixi.sol", "language": "solidity", "vulnerabilities": ["access-control", "denial-of-service"]},
-    {"path": "samples/BecToken.sol", "language": "solidity", "vulnerabilities": ["arithmetic", "front-running"]},
+    {"path": "samples/BecToken.sol", "language": "solidity", "vulnerabilities": ["front-running"]},
     {"path": "samples/SmartBillions.sol", "language": "solidity", "vulnerabilities": ["randomness"]},
     {"path": "samples/Government.sol", "language": "solidity", "vulnerabilities": ["denial-of-service"]},
     {"path": "samples/ERC20.sol", "language": "solidity", "vulnerabilities": ["front-running"]},
     {"path": "samples/OpenAddressLottery.sol", "language": "solidity", "vulnerabilities": ["randomness"]},
-    {"path": "samples/MyToken.sol", "language": "solidity", "vulnerabilities": ["short-address"]},
+    {"path": "samples/MyToken.sol", "language": "solidity", "vulnerabilities": []},
     {"path": "samples/EtherLotto.sol", "language": "solidity", "vulnerabilities": ["randomness"]},
-    {"path": "samples/ReturnValue.sol", "language": "solidity", "vulnerabilities": ["unchecked-external-call"]}
-  ]
+    {"path": "samples/ReturnValue.sol", "language": "solidity", "vulnerabilities": ["unchecked-external-call"]},
+
+    {"path": "samples/Reentrancy.sol", "language": "solidity", "vulnerabilities": ["reentrancy"]},
+    {"path": "samples/0x01f8c4e3fa3edeb29e514cba738d87ce8c091d3f.sol", "language": "solidity", "vulnerabilities": ["reentrancy"]},
+    {"path": "samples/0x23a91059fdc9579a9fbd0edc5f2ea0bfdb70deb4.sol", "language": "solidity", "vulnerabilities": ["reentrancy"]},
+    {"path": "samples/0x4320e6f8c05b27ab4707cd1f6d5ce6f3e4b3a5a1.sol", "language": "solidity", "vulnerabilities": ["reentrancy"]},
+    {"path": "samples/0x4e73b32ed6c35f570686b89848e5f39f20ecc106.sol", "language": "solidity", "vulnerabilities": ["reentrancy"]},
+    {"path": "samples/0x561eac93c92360949ab1f1403323e6db345cbf31.sol", "language": "solidity", "vulnerabilities": ["reentrancy"]},
+    {"path": "samples/0x627fa62ccbb1c1b04ffaecd72a53e37fc0e17839.sol", "language": "solidity", "vulnerabilities": ["reentrancy", "arithmetic", "unchecked-external-call"]},
+    {"path": "samples/0x7541b76cb60f4c60af330c208b0623b7f54bf615.sol", "language": "solidity", "vulnerabilities": ["reentrancy"]},
+    {"path": "samples/0x7a8721a9d64c74da899424c1b52acbf58ddc9782.sol", "language": "solidity", "vulnerabilities": ["reentrancy"]},
+
+    {"path": "samples/integer_overflow_minimal.sol", "language": "solidity", "vulnerabilities": ["arithmetic"]},
+    {"path": "samples/integer_overflow_add.sol", "language": "solidity", "vulnerabilities": ["arithmetic"]},
+    {"path": "samples/integer_overflow_mapping_sym_1.sol", "language": "solidity", "vulnerabilities": ["arithmetic"]},
+    {"path": "samples/insecure_transfer.sol", "language": "solidity", "vulnerabilities": ["arithmetic", "short-address"]},
+
+    {"path": "samples/guess_the_random_number.sol", "language": "solidity", "vulnerabilities": ["randomness"]},
+    {"path": "samples/old_blockhash.sol", "language": "solidity", "vulnerabilities": ["randomness"]},
+    {"path": "samples/blackjack.sol", "language": "solidity", "vulnerabilities": ["randomness"]},
+    {"path": "samples/etheraffle.sol", "language": "solidity", "vulnerabilities": ["randomness"]},
+    {"path": "samples/lottery.sol", "language": "solidity", "vulnerabilities": ["randomness"]},
+    {"path": "samples/lucky_doubler.sol", "language": "solidity", "vulnerabilities": ["randomness", "denial-of-service"]},
+    {"path": "samples/random_number_generator.sol", "language": "solidity", "vulnerabilities": ["randomness"]},
+    {"path": "samples/roulette.sol", "language": "solidity", "vulnerabilities": ["randomness"]},
+
+    {"path": "samples/dos_simple.sol", "language": "solidity", "vulnerabilities": ["denial-of-service"]},
+    {"path": "samples/send_loop.sol", "language": "solidity", "vulnerabilities": ["denial-of-service"]},
+    {"path": "samples/dos_address.sol", "language": "solidity", "vulnerabilities": ["denial-of-service"]},
+    {"path": "samples/dos_number.sol", "language": "solidity", "vulnerabilities": ["denial-of-service"]},
+    {"path": "samples/list_dos.sol", "language": "solidity", "vulnerabilities": ["denial-of-service"]},
+
+    {"path": "samples/FindThisHash.sol", "language": "solidity", "vulnerabilities": ["front-running"]},
+    {"path": "samples/eth_tx_order_dependence_minimal.sol", "language": "solidity", "vulnerabilities": ["front-running"]},
+    {"path": "samples/odds_and_evens.sol", "language": "solidity", "vulnerabilities": ["front-running"]},
+    {"path": "samples/RaceCondition.sol", "language": "solidity", "vulnerabilities": ["front-running", "access-control"]},
+
+    {"path": "samples/short_address_example.sol", "language": "solidity", "vulnerabilities": ["short-address", "arithmetic"]},
+    {"path": "samples/Unprotected.sol", "language": "solidity", "vulnerabilities": ["access-control"]},
+
+    {"path": "samples/0x0cbe050f75bc8f8c2d6c0d249fea125fd6e1acc9.sol", "language": "solidity", "vulnerabilities": ["unchecked-external-call"]},
+    {"path": "samples/0x2972d548497286d18e92b5fa1f8f9139e5653fd2.sol", "language": "solidity", "vulnerabilities": ["unchecked-external-call"]},    {"path": "samples/0x3e013fc32a54c4c5b6991ba539dcd0ec4355c859.sol", "language": "solidity", "vulnerabilities": ["unchecked-external-call"]},
+
+    {"path": "samples/lottopollo.sol", "language": "solidity", "vulnerabilities": ["denial-of-service", "randomness"]},
+    {"path": "samples/timed_crowdsale.sol", "language": "solidity", "vulnerabilities": []}
+   ]
 }

@@ -69,7 +69,9 @@ def _brace_body(text: str, open_idx: int) -> int:
 
 _FN_DEFS = {
     "solidity": re.compile(
-        r"\b(?:function\s+([A-Za-z0-9_]+)|(fallback|receive))\s*\([^)]*\)"),
+        r"\bfunction\s+([A-Za-z0-9_]+)\s*\([^)]*\)|"
+        r"\b(fallback|receive)\b\s*(?:\([^)]*\))?|"
+        r"\bfunction\s*\(\s*\)\s*(?:\([^)]*\))?"),
     "rust": re.compile(r"\bfn\s+([A-Za-z0-9_]+)\s*[^{;]*"),
     "move": re.compile(r"\b(?:entry\s+)?fun\s+([A-Za-z0-9_]+)\s*[^{;]*"),
     "cairo": re.compile(r"\bfn\s+([A-Za-z0-9_]+)\s*[^{;]*"),
@@ -94,6 +96,9 @@ def _iter_braced_functions(text: str, lang: str) -> list[tuple[str, str, int, in
     out: list[tuple[str, str, int, int, str]] = []
     for m in pattern.finditer(text):
         name = m.group(1) or m.group(2) or ""
+        if not name and "function" in m.group(0) and "(" in m.group(0):
+            # 0.4.x anonymous fallback: ``function () public payable``.
+            name = "fallback"
         brace = text.find("{", m.end())
         if brace == -1:
             continue
@@ -186,12 +191,25 @@ _STATE_WRITE_RE = re.compile(
 )
 _GUARD_RE = re.compile(
     r"only[A-Za-z][A-Za-z0-9_]*\b|"
-    r"require\s*\([^;]{0,120}\bmsg\.sender\b|require\s*\([^;]{0,80}owner|"
+    # require/if guards: msg.sender or an owner-like variable must be a
+    # *comparison operand* (adjacent to ==/!=), not merely mentioned —
+    # ``require(balanceOf[msg.sender] >= _value)`` is a balance check,
+    # not an authorization guard.
+    r"require\s*\([^;]{0,20}(?:msg\.sender|owner|admin|creator|corruptElite)\b"
+    r"\s*(?:\)\s*)?\s*[!=]=|"
+    r"require\s*\([^;]{0,120}[!=]=\s*(?:\(\s*)?(?:payable\s*\(\s*)?"
+    r"(?:msg\.sender|owner|admin|creator|corruptElite)\b|"
+    r"if\s*\([^;]{0,80}\bmsg\.sender\s*[!=]=|"
     r"assert\s+msg\.sender\s*==\s*self\.(?:owner|admin)|"
     r"asserts!\s*\(is-eq\s+(?:tx-sender|contract-caller)|"
     r"has_one\s*=\s*owner|signer\s*::|Signer<|is_signer|"
     r"#[^\n]*Signer<"
 )
+
+# Contracts whose compiler still performs checked arithmetic (Solidity
+# >= 0.8): the unchecked-arithmetic rule has nothing to find there.
+_PRE_08_RE = re.compile(
+    r"pragma\s+solidity\s*[\^<>]?=?\s*0\.[0-7]([.]|\b|[^\d])")
 # NB (uncontrolled-payout): an external token/ETH transfer whose amount
 # argument references a caller-supplied parameter, while the same function
 # touches an entitlement ledger (claimable/vested/allocations/... mapping)
@@ -520,9 +538,19 @@ def _detect_solidity(content: str, rel: str) -> list[StaticIssue]:
     content = _clean_code(content, "solidity")
     issues: list[StaticIssue] = []
     has_owner = bool(_OWNER_VAR_RE.search(content))
+    # 0.4.x constructors are functions named after their contract, so a
+    # name collision with ``contract X`` means ``function X()`` is the
+    # constructor, not a callable — required for the ownership-assignment
+    # rule not to flag deployment-time initialization.
+    contract_names = {
+        m.group(1) for m in re.finditer(r"\bcontract\s+([A-Za-z0-9_]+)", content)
+    }
 
     for name, body, start_line, _, sig in _iter_braced_functions(content, "solidity"):
         lines = body.splitlines()
+        # Authorization guard on this function (used by every rule that
+        # distinguishes a trusted/admin path from an attack surface).
+        guarded = bool(_GUARD_RE.search(sig + body))
         # 1. Reentrancy: external call before a state write.
         for i, ln in enumerate(lines):
             if _EXT_CALL_RE.search(ln):
@@ -542,22 +570,28 @@ def _detect_solidity(content: str, rel: str) -> list[StaticIssue]:
         # capturing into `(bool x,) = ...` is the *safe* form, so it must
         # not be flagged (this keeps SimpleDAO / SafeVault clean).
         for i, ln in enumerate(lines):
-            if re.search(r"\.(?:call|delegatecall)\b\s*(\{|\()", ln):
+            if re.search(r"\.(?:call|delegatecall)\b(?:\s*\.\s*\w+\s*"
+                         r"\([^()]*\))*\s*(?:\{|\()", ln):
                 lo = max(0, i - 2)
                 hi = min(len(lines), i + 2)
                 window = "\n".join(lines[lo:hi])
                 if not re.search(r"\(bool\s+\w+\s*,?\s*\)?\s*=|"
                                  r"bool\s+\w+\s*=\s*\w+\.call|"
                                  r"require\s*\(\s*\w+\.call|"
-                                 r"assert\s*\(\s*\w+\.call", window):
+                                 r"assert\s*\(\s*\w+\.call|"
+                                 r"if\s*\(\s*!?\s*\(?\s*[\w.\[\]]+"
+                                 r"\.(?:call|send)",
+                                 window):
                     issues.append(_issue(
                         rel, start_line + i, "unchecked-external-call",
-                        "MEDIUM",
-                        "Unchecked low-level call return value",
+                        "LOW" if guarded else "MEDIUM",
+                        "Unchecked low-level call return value"
+                        + (" (owner-guarded deliberate call)" if guarded
+                           else ""),
                         f"{name}() ignores the (bool, bytes) result of a "
                         "low-level .call/.delegatecall; a failed call is "
                         "silently treated as success.",
-                        function=name, confidence=0.7))
+                        function=name, confidence=0.5 if guarded else 0.7))
                 break
         # 1c. Unchecked .send -> denial of service (SWC-113). `.send`
         # forwards 2300 gas and returns false instead of reverting, so a
@@ -566,17 +600,24 @@ def _detect_solidity(content: str, rel: str) -> list[StaticIssue]:
         # collectors are trusted paths: a silently failing transfer there
         # is the owner's own loss, not an attack surface, so they are
         # skipped.
-        guarded = bool(_GUARD_RE.search(sig + body))
         for i, ln in enumerate(lines):
             if re.search(r"\.send\s*\(", ln):
                 if guarded:
                     break
+                # Self-refund path (msg.sender.send(... msg.value ...)):
+                # a silently failed refund only loses the caller's own
+                # change; it does not brick payouts or accounting.
+                if re.search(r"msg\.sender\s*\.\s*send\s*\([^)]*msg\.value",
+                             ln):
+                    continue
                 lo = max(0, i - 2)
                 hi = min(len(lines), i + 2)
                 window = "\n".join(lines[lo:hi])
                 if not re.search(r"\(bool\s+\w+\s*,?\s*\)?\s*=|"
                                  r"require\s*\([^)]*\.send|"
-                                 r"assert\s*\([^)]*\.send", window):
+                                 r"assert\s*\([^)]*\.send|"
+                                 r"!\s*[\w.\[\]]+\.send\s*\(|"
+                                 r"\b\w+\s*=\s*[\w.\[\]]+\.send\s*\(", window):
                     issues.append(_issue(
                         rel, start_line + i, "denial-of-service", "MEDIUM",
                         "Unchecked .send (silent payment failure)",
@@ -585,6 +626,49 @@ def _detect_solidity(content: str, rel: str) -> list[StaticIssue]:
                         "which can brick payouts or corrupt accounting.",
                         function=name, confidence=0.65))
                 break
+        # 1g. Caller-bounded growth loop (SWC-128): a loop whose trip
+        # count comes from a parameter — or a large literal (>= 100)
+        # repeated across unbounded calls — pushes to persistent
+        # storage; enough calls make every later entry hit the block gas
+        # limit (dos_simple / dos_number / dos_address class). Small
+        # literal loops are pagination/initialization, not growth.
+        if not guarded and re.search(r"\.push\s*\(|\.length\s*(\+=|=|=\s*length)", body):
+            params = set(re.findall(
+                r"\b(?:uint(?:\d+)?|int(?:\d+)?)\s+(\w+)", sig))
+            for m in re.finditer(r"for\s*\([^;]*;[^;]*\b(\w+)\s*<\s*"
+                                 r"([A-Za-z_]\w*|\d+)\b", body):
+                bound = m.group(2)
+                is_param = bound in params
+                is_big_literal = bool(re.fullmatch(r"\d+", bound)) \
+                    and int(bound) >= 100
+                if is_param or is_big_literal:
+                    issues.append(_issue(
+                        rel, start_line, "denial-of-service", "MEDIUM",
+                        "Caller-bounded storage growth loop (gas DoS)",
+                        f"{name}() loops over a caller-supplied count and "
+                        "grows persistent storage; repeated calls can push "
+                        "the array past the block gas limit and permanently "
+                        "brick the function.",
+                        function=name, confidence=0.65))
+                    break
+        # 1h. Payout loop with require()d send (SWC-113 variant): one
+        # failing/gas-starved receiver reverts the whole batch forever
+        # (Refunder send_loop class).
+        for i, ln in enumerate(lines):
+            if re.search(r"\.send\s*\(", ln) and re.search(
+                    r"require\s*\([^)]*\.send|if\s*\(\s*!\s*[\w.\[\]]+\.send",
+                    ln + "\n" + "\n".join(lines[max(0, i - 2):i + 3])):
+                if re.search(r"for\s*\(|while\s*\(", "\n".join(
+                        lines[max(0, i - 6):i + 2])):
+                    issues.append(_issue(
+                        rel, start_line + i, "denial-of-service", "MEDIUM",
+                        "Payout loop with require()d send (one failure bricks all)",
+                        f"{name}() requires every send in a loop to succeed; "
+                        "a single receiver that reverts or consumes too much "
+                        "gas DoSes all pending payouts. Accumulate withdrawals "
+                        "and pull instead of pushing.",
+                        function=name, confidence=0.7))
+                    break
         # 2. Access control.
         if _PRIVILEGED_FN.match(name) and not guarded and has_owner:
             issues.append(_issue(
@@ -594,14 +678,17 @@ def _detect_solidity(content: str, rel: str) -> list[StaticIssue]:
                 "guard (onlyOwner / require(msg.sender == owner)).",
                 function=name, confidence=0.85))
         # 2b. Anyone-can-become-owner: a callable function that sets the
-        # ownership variable from msg.sender with no guard. Constructors,
-        # initializers, and ownership-transfer claim functions (which use
-        # require(msg.sender == pending) / onlyOwner) are excluded.
-        if not guarded and name not in (
-                "constructor", "init", "initialize", "fallback", "receive") \
+        # ownership variable from msg.sender with no guard. Constructors
+        # (named and 0.4.x contract-named), initializers, and
+        # ownership-transfer claim functions are excluded.
+        if (not guarded
+                and name not in ("constructor", "init", "initialize",
+                                 "fallback", "receive")
+                and not name.lower().startswith("init")
+                and name not in contract_names
                 and re.search(
                     r"\b(?:owner|creator|admin|governor|controller|guardian)\b"
-                    r"\s*=\s*(?:payable\s*\(\s*)?msg\.sender\b", body):
+                    r"\s*=\s*(?:payable\s*\(\s*)?msg\.sender\b", body)):
             issues.append(_issue(
                 rel, start_line, "access-control", "HIGH",
                 "Anyone can become owner (unprotected ownership assignment)",
@@ -634,13 +721,15 @@ def _detect_solidity(content: str, rel: str) -> list[StaticIssue]:
                 function=name, confidence=0.6))
         # 5. Randomness.  `blockhash` is essentially only ever used to
         # derive an on-chain outcome, so it alone is sufficient. The
-        # block.timestamp / difficulty / prevrandao family is also used
-        # for deadlines and time-locks, so those still need an outcome
-        # conjunct (`%`, winner, rand, pick, lucky) to avoid false hits.
+        # block.timestamp / block.number / difficulty / prevrandao family
+        # is also used for deadlines and time-locks, so those still need
+        # an outcome conjunct (`%`, winner, rand, pick, lucky) to avoid
+        # false hits. ``now`` is the 0.4.x alias of block.timestamp.
         if re.search(r"blockhash\s*\(", body) or (
-                re.search(r"block\.timestamp|block\.difficulty|prevrandao",
+                re.search(r"block\.timestamp|\bnow\b|block\.number|"
+                          r"block\.difficulty|prevrandao",
                           body) and re.search(
-                              r"%(?:[\w\[\]])|winner|rand|pick|lucky",
+                              r"%\s*[\w\[\]]|winner|rand|pick|lucky",
                               body)):
             issues.append(_issue(
                 rel, start_line, "randomness", "HIGH",
@@ -648,6 +737,20 @@ def _detect_solidity(content: str, rel: str) -> list[StaticIssue]:
                 f"{name}() derives a random outcome from on-chain "
                 "predictable state; a miner can pre-compute the result.",
                 function=name, confidence=0.85))
+        # 5b. Preimage-puzzle front-running: a payout gated on matching
+        # a public hash (``require(hash == sha3/preimage)``) — watching
+        # the mempool and replaying the revealed solution wins the prize
+        # (FindThisHash / Escapify class).
+        if re.search(r"(?:keccak256|sha3)\s*\([^)]*\)\s*==|"
+                     r"==\s*(?:keccak256|sha3)\s*\(", body) and re.search(
+                r"\.send\s*\(|\.transfer\s*\(|\.call\s*(?:\{|\()", body):
+            issues.append(_issue(
+                rel, start_line, "front-running", "HIGH",
+                "Preimage puzzle payout (solution stealable front-run)",
+                f"{name}() pays whoever submits a preimage for a public "
+                "hash; the solver's revealing transaction can be copied "
+                "with a higher gas price before it is mined.",
+                function=name, confidence=0.75))
         # 6. Signature replay (ecrecover without chainid).
         if re.search(r"ecrecover\s*\(", body) and not re.search(
                 r"chainid|block\.chainid|domainSeparator|DOMAIN_SEPARATOR",
@@ -725,6 +828,80 @@ def _detect_solidity(content: str, rel: str) -> list[StaticIssue]:
                 "division truncates first and the rounding loss is "
                 "extractable in token accounting. Multiply first: a * c / b.",
                 function=name, confidence=0.6))
+        # 8e. Pre-0.8 unchecked parameter arithmetic on storage: an
+        # unguarded ``storage op= param`` (or a local derived from one
+        # by multiplication, or a SafeMath ``.add(param)``) underflows/
+        # overflows silently below Solidity 0.8 (BEC / SmartBillions
+        # class, SWC-101). 0.8+ compilers revert, so the rule is gated
+        # on the pre-0.8 pragma. A bounds check on the EXACT operand
+        # (either comparison order, or the require-sum form) marks the
+        # update checked. SafeMath conservation (the same param added
+        # here and .sub()'d elsewhere) is supply-balanced, not a wrap.
+        if _PRE_08_RE.search(content):
+            params = set(re.findall(
+                r"\b(?:uint(?:\d+)?|int(?:\d+)?)\s+(\w+)", sig))
+            # Locals derived from a parameter by multiplication inherit
+            # its wrap potential (batchTransfer: amount = _amount * n);
+            # subtraction results are guarded by construction in the
+            # corpus shapes, so they are not inherited.
+            derived: set[str] = set()
+            for dm in re.finditer(
+                    r"\buint\d*\s+(\w+)\s*=\s*[^;\n]*?\b([A-Za-z_]\w*)\b"
+                    r"[^;\n]*?\*", body):
+                if dm.group(2) in params:
+                    derived.add(dm.group(1))
+            relevant = params | derived
+            candidates: list[tuple[str, str, str]] = []
+            for m in re.finditer(
+                    r"\b([A-Za-z_]\w*(?:\[[^\]]*\])?)\s*(\+=|-=)\s*"
+                    r"([A-Za-z_]\w*)\b", body):
+                candidates.append((m.group(1), m.group(2), m.group(3)))
+            for m in re.finditer(
+                    r"\b([A-Za-z_]\w*(?:\[[^\]]*\])?)\s*\.\s*add\s*\(\s*"
+                    r"([A-Za-z_]\w*)", body):
+                candidates.append((m.group(1), ".add", m.group(2)))
+            for lhs, op, p in candidates:
+                if p not in relevant or p in ("msg", "block", "tx", "now"):
+                    continue
+                # Conservation: the same param is .sub()'d from some
+                # balance in this function — the add is funded, not a
+                # mint (ERC20 transfer/transferFrom pattern).
+                if re.search(rf"\.\s*sub\s*\(\s*{re.escape(p)}\b", body):
+                    continue
+                lhs_esc = re.escape(lhs)
+                p_esc = re.escape(p)
+                bounded = re.search(
+                    rf"{lhs_esc}\s*(?:>=|<=|<|>|!=|==)\s*{p_esc}(?!\w)|"
+                    rf"{p_esc}\s*(?:>=|<=|<|>|!=|==)\s*{lhs_esc}(?!\w)|"
+                    # sum-form bound: require(lhs + p <= cap).
+                    rf"{lhs_esc}\s*\+\s*{p_esc}\s*(?:<=|<|==|!=)\s|"
+                    rf"{p_esc}\s*\+\s*{lhs_esc}\s*(?:<=|<|==|!=)\s",
+                    body)
+                if bounded:
+                    continue
+                issues.append(_issue(
+                    rel, start_line, "arithmetic", "HIGH",
+                    "Unchecked parameter arithmetic on storage (pre-0.8)",
+                    f"{name}() updates {lhs} with {op} {p} without a "
+                    "bounds check on that operand; below Solidity 0.8 the "
+                    "unsigned underflow/overflow wraps silently and "
+                    "corrupts accounting.",
+                    function=name, confidence=0.7))
+                break
+        # 5c. Claim race (front-running): a one-shot claim gated on a
+        # boolean flag pays the first caller — the winner-take-all
+        # transaction can be replayed from the mempool with a higher
+        # gas price (claimReward class).
+        if re.search(r"\(\s*!\s*(?:claimed|redeemed|processed)\b|"
+                     r"\b(?:claimed|redeemed|processed)\s*==\s*false", body) \
+                and re.search(r"\.send\s*\(|\.transfer\s*\(|\.call\s*(?:\{|\()", body):
+            issues.append(_issue(
+                rel, start_line, "front-running", "HIGH",
+                "One-shot claim race (first-caller payout is stealable)",
+                f"{name}() pays the first caller to flip a one-shot flag; "
+                "the revealing transaction can be replayed with a higher "
+                "gas price to win the payout instead.",
+                function=name, confidence=0.65))
         # 9. selfdestruct without guard.
         if re.search(r"selfdestruct|selfdestruct\(", body) and not guarded:
             issues.append(_issue(
@@ -741,6 +918,27 @@ def _detect_solidity(content: str, rel: str) -> list[StaticIssue]:
                 f"{name}() delegatecalls into a runtime address; if that "
                 "address is attacker-controllable the whole storage layout "
                 "is compromised.", function=name, confidence=0.7))
+
+        # 12. Short-address attack exposure (SWC-127): a state-changing
+        # (address, uint) entrypoint that moves value, on pre-0.5 code —
+        # the era where the ABI encoder accepted right-padded addresses
+        # and the funds moved before the mangled calldata was detected.
+        # The body must actually move value (a storage += of the amount
+        # or a payout call); read-only entrypoints (getBalance-like
+        # (address, uint) views, logging helpers) are not attack
+        # surface.
+        if (not guarded and re.search(
+                r"pragma\s+solidity\s*[\^<>]?=?\s*0\.[0-4]", content) and re.search(
+                r"\baddress\s+\w+\s*,[^)]*\buint\d*\s+\w+", sig) and re.search(
+                r"\+=|\.send\s*\(|\.transfer\s*\(|\.call\s*(?:\{|\()", body)):
+            issues.append(_issue(
+                rel, start_line, "short-address", "MEDIUM",
+                "Short-address attack exposure (pre-0.5 ABI encoder)",
+                f"{name}() takes an (address, uint) pair and moves value; "
+                "pre-0.5 encoders right-pad short addresses so the amount "
+                "shifts into the address field. Validate address length or "
+                "upgrade the compiler.",
+                function=name, confidence=0.6))
 
     # Unprotected proxy upgrade: upgradeTo + fallback delegatecall combo.
     upgrade_unprotected = False
