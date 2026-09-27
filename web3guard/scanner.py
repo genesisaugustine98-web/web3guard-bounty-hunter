@@ -1817,6 +1817,8 @@ class Scanner:
 
         deadline = time.monotonic() + int(self.config.get("discovery_time_budget_seconds", 900))
         target_key = str(target_path.resolve())
+        if not hasattr(self, "_discovery_cache"):
+            self._discovery_cache = {}
         engines = []
         for engine_type in ALL_ENGINES:
             engine = engine_type()
