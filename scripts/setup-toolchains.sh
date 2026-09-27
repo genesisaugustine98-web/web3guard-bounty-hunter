@@ -26,9 +26,10 @@ note_fail() {
 
 install_clarinet() {
   has clarinet && return 0
-  local ver="v3.23.2"
-  # Asset naming changed from *.zip to *-glibc.tar.gz on the v3 releases.
-  local url="https://github.com/hirosystems/clarinet/releases/download/${ver}/clarinet-linux-x64-glibc.tar.gz"
+  # Use the official latest Linux x64 release asset rather than pinning
+  # a brittle historical filename. Current stable releases expose the
+  # generic clarinet-linux-x64.tar.gz asset.
+  local url="https://github.com/stx-labs/clarinet/releases/latest/download/clarinet-linux-x64.tar.gz"
   local dir="$HOME/.clarinet/bin"
   mkdir -p "$dir"
   curl -sSL "$url" -o /tmp/clarinet.tar.gz && tar -xzf /tmp/clarinet.tar.gz -C "$dir"
