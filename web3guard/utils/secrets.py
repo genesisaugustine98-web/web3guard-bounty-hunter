@@ -47,7 +47,14 @@ SECRET_PATTERNS: dict[str, re.Pattern[str]] = {
     "alchemy_rpc": re.compile(r"https://[a-zA-Z0-9._-]*alchemy[a-zA-Z0-9._-]*/v2/[A-Za-z0-9_-]{20,}"),
     "infura_rpc": re.compile(r"https://[a-zA-Z0-9._-]*infura[a-zA-Z0-9._-]*/v3/[A-Za-z0-9_-]{20,}"),
     "github_token": re.compile(r"gh[pousr]_[A-Za-z0-9_]{36,}"),
+    "github_fine_grained_pat": re.compile(r"github_pat_[A-Za-z0-9_]{40,}"),
+    "gitlab_token": re.compile(r"glpat-[A-Za-z0-9_-]{20,}"),
+    "huggingface_token": re.compile(r"hf_[A-Za-z0-9]{20,}"),
+    "openai_project_key": re.compile(r"sk-proj-[A-Za-z0-9_-]{20,}"),
     "openai_key": re.compile(r"sk-[A-Za-z0-9]{20,}"),
+    "stripe_secret": re.compile(r"(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{20,}"),
+    "stripe_webhook_secret": re.compile(r"whsec_[A-Za-z0-9]{20,}"),
+    "telegram_bot_token": re.compile(r"\b\d{8,12}:[A-Za-z0-9_-]{35}\b"),
     "google_api_key": re.compile(r"AIza[0-9A-Za-z_-]{35}"),
     "mnemonic": _MNEMONIC_RE,
 }
@@ -149,6 +156,35 @@ def scan_path(target_path: Path) -> list[dict[str, object]]:
                 "kind": m.kind,
                 "file": str(fp.relative_to(target_path)),
                 "line": m.line,
-                "snippet": m.value[:120],
+                "snippet": f"<redacted:{m.kind}>",
             })
     return findings
+
+
+def redact_sensitive_text(text: str) -> str:
+    """Replace recognizable credential material before logging/reporting/AI transfer."""
+    redacted = str(text or "")
+    for kind, pattern in SECRET_PATTERNS.items():
+        redacted = pattern.sub(f"<redacted:{kind}>", redacted)
+    return redacted
+
+
+def sanitize_mapping(value: object, *, key_hint: str = "") -> object:
+    """Recursively remove credential-bearing values from engine metadata."""
+    sensitive = ("secret", "token", "password", "private", "credential", "authorization", "match", "api_key", "apikey")
+    if isinstance(value, dict):
+        out = {}
+        for key, val in value.items():
+            k = str(key)
+            if any(term in k.lower() for term in sensitive):
+                out[k] = "<redacted>"
+            else:
+                out[k] = sanitize_mapping(val, key_hint=k)
+        return out
+    if isinstance(value, list):
+        return [sanitize_mapping(x, key_hint=key_hint) for x in value]
+    if isinstance(value, tuple):
+        return [sanitize_mapping(x, key_hint=key_hint) for x in value]
+    if isinstance(value, str):
+        return redact_sensitive_text(value)
+    return value

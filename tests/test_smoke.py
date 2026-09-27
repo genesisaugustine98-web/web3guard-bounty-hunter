@@ -8,6 +8,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 # Make the package importable when running pytest from the project root.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -336,15 +338,12 @@ def test_cost_tracker_enforces_ceiling():
         raise AssertionError("expected RuntimeError")
 
 
-def test_cost_tracker_unknown_model_is_free():
-    c = CostTracker()
-    cost = c.cost_for("never-seen-model", 1_000_000, 1_000_000)
-    assert cost == 0.0
-
-
-# ---------------------------------------------------------------------------
-# Pricing
-# ---------------------------------------------------------------------------
+def test_cost_tracker_unknown_model_fails_closed():
+    """Unknown pricing must not silently bypass the cost ceiling."""
+    from web3guard.ai.cost import CostTracker
+    tracker = CostTracker(max_cost_usd=10.0)
+    with pytest.raises(ValueError, match="unknown LLM model pricing"):
+        tracker.cost_for("never-seen-model", 100, 100)
 
 
 def test_researcher_payout_caps_at_max():

@@ -69,9 +69,17 @@ class GitleaksEngine(DiscoveryEngineBase):
                 category="secret-leak",
                 severity="CRITICAL",
                 title=f"Secret: {finding.get('RuleID', '?')}",
-                description=finding.get("Match", "")[:200],
+                description=(
+                    f"Gitleaks rule {finding.get('RuleID', '?')} matched; value redacted."
+                ),
                 confidence=0.95,
-                raw=finding,
+                raw={
+                    "rule_id": finding.get("RuleID", ""),
+                    "file": finding.get("File", ""),
+                    "start_line": finding.get("StartLine", 0),
+                    "end_line": finding.get("EndLine", 0),
+                    "fingerprint": finding.get("Fingerprint", ""),
+                },
             ))
         return results
 
@@ -97,7 +105,7 @@ class GitleaksEngine(DiscoveryEngineBase):
                     category="secret-leak",
                     severity="CRITICAL",
                     title=f"Secret: {match.kind}",
-                    description=match.value[:120],
+                    description=f"Potential {match.kind} exposed; value redacted.",
                     confidence=0.85,
                     raw={"kind": match.kind, "file": str(fp.relative_to(target_path))},
                 ))

@@ -374,6 +374,12 @@ class TelegramBot:
             self._cmd_cancel(chat_id)
         elif cmd == "/report":
             self._cmd_report(chat_id)
+        elif cmd in ("/website", "/recon"):
+            self._cmd_website(chat_id, arg)
+        elif cmd in ("/jobs", "/queue"):
+            self._cmd_jobs(chat_id)
+        elif cmd in ("/engines", "/caps", "/limits", "/coverage"):
+            self._cmd_ops_info(chat_id, cmd)
         elif cmd == "/languages":
             self._send(self._languages_text(), chat_id)
         else:
@@ -487,6 +493,128 @@ class TelegramBot:
                     LOGGER.debug("report re-send failed: %s", e)
         if not sent:
             self._send("Report directory exists but holds no artifacts.", chat_id)
+
+    def _cmd_jobs(self, chat_id: int) -> None:
+        jobs = [j for j in self._jobs.values() if not j.cancelled and j.stage not in ("report", "failed")]
+        if not jobs:
+            self._send("📭 No active scans. Completed jobs remain available with /report.", chat_id)
+            return
+        lines = ["<b>Active jobs</b>"]
+        for job in jobs:
+            lines.append(
+                f"• <code>{html.escape(job.target[:90])}</code> — "
+                f"{html.escape(job.stage)} ({time.time()-job.started:.0f}s)"
+            )
+        self._send("\n".join(lines), chat_id)
+
+    def _cmd_ops_info(self, chat_id: int, cmd: str) -> None:
+        if cmd == "/engines":
+            try:
+                from web3guard.discovery import ALL_ENGINES
+                rows = [
+                    f"• {e().name}: {'READY' if e().is_installed() else 'missing'}"
+                    for e in ALL_ENGINES
+                ]
+            except Exception as exc:
+                rows = [f"Engine inventory unavailable: {exc}"]
+            self._send("<b>Discovery engines</b>\n" + "\n".join(rows), chat_id)
+            return
+        if cmd == "/caps":
+            try:
+                from web3guard.sota_tools import capabilities
+                caps = capabilities()
+                ready = sum(1 for c in caps if c.installed)
+                rows = [
+                    f"• {c.name}: {'READY' if c.installed else 'missing'} ({c.mode})"
+                    for c in caps
+                ]
+                self._send(
+                    f"<b>Capabilities</b> — {ready}/{len(caps)} installed\n"
+                    + "\n".join(rows),
+                    chat_id,
+                )
+            except Exception as exc:
+                self._send(f"Capabilities unavailable: {html.escape(str(exc))}", chat_id)
+            return
+        if cmd == "/limits":
+            self._send(
+                "<b>Runtime limits</b>\n"
+                f"• max scan budget: {self.max_budget:,} tokens\n"
+                "• chat rate limit: 5 scans / minute\n"
+                "• website recon: GET-only, same-origin, bounded\n"
+                "• PoC runner: resource limits + filtered secrets + unprivileged child",
+                chat_id,
+            )
+            return
+        self._send(
+            "<b>Coverage</b>\n"
+            "• language adapters: multi-language registry\n"
+            "• discovery: built-in + installed external engines\n"
+            "• SCA: OSV-Scanner / Trivy / Go tools when installed\n"
+            "• web: passive website reconnaissance\n"
+            "• on-chain: verified-source fetch + optional deployment verification",
+            chat_id,
+        )
+
+    def _cmd_website(self, chat_id: int, arg: str) -> None:
+        if not arg:
+            self._send(
+                "Usage: /website <https://example.com>\n"
+                "Alias: /recon <https://example.com>\n"
+                "Passive mode only: same-origin GET requests; no form submission or mutation.",
+                chat_id,
+            )
+            return
+        target = arg.split()[0]
+        if not target.startswith(("http://", "https://")):
+            self._send("Website targets must start with http:// or https://.", chat_id)
+            return
+        if not self.is_allowed(chat_id):
+            self._send("This bot is private; this chat is not allowlisted.", chat_id)
+            return
+        with self._lock:
+            if chat_id in self._jobs and not self._jobs[chat_id].cancelled and self._jobs[chat_id].stage not in ("report","failed"):
+                self._send("A job is already running for this chat — /cancel first.", chat_id)
+                return
+            job = ScanJob(chat_id=chat_id, target=target, budget=0, discovery_only=True)
+            self._jobs[chat_id] = job
+        status = self._send(
+            "🌐 <b>Web3Guard passive recon</b>\n"
+            f"target: <code>{html.escape(target)}</code>\n"
+            "GET-only crawl → headers/cookies → endpoints → JS secret scan",
+            chat_id,
+        )
+        job.status_message_id = int(status.get("message_id", 0))
+        threading.Thread(target=self._run_website, args=(job,), daemon=True).start()
+
+    def _run_website(self, job: ScanJob) -> None:
+        try:
+            from web3guard.website import scan_website, write_website_report
+            self._progress(job, "fetch")
+            report = scan_website(job.target)
+            if job.cancelled:
+                raise ScanCancelled()
+            self._progress(job, "report")
+            job.findings_count = len(report.security_findings) + len(report.secret_findings)
+            out_dir = self.workdir / f"website-report-{int(time.time())}"
+            written = write_website_report(report, out_dir)
+            job.report_dir = out_dir
+            self._send(
+                "🌐 <b>Passive recon complete</b>\n"
+                f"<code>{html.escape(job.target)}</code>\n"
+                f"pages: {len(report.pages)} · URLs: {len(report.discovered_urls)} · "
+                f"endpoints: {len(report.endpoints)} · findings: {job.findings_count}",
+                job.chat_id,
+            )
+            for key in ("md", "txt", "json"):
+                path = written.get(key)
+                if path and Path(path).is_file():
+                    send_document(self.token, job.chat_id, Path(path), f"Website recon report ({key})")
+        except ScanCancelled:
+            self._send("🛑 Website recon cancelled.", job.chat_id)
+        except Exception as exc:
+            job.error = str(exc)
+            self._send(f"❌ Website recon failed: {html.escape(str(exc))}", job.chat_id)
 
     # -- document uploads ---------------------------------------------------
 
@@ -759,6 +887,13 @@ class TelegramBot:
             "/status — this chat's last scan\n"
             "/cost — session spend\n"
             "/report — re-send the last scan's artifacts\n"
+            "/website <url> — passive web reconnaissance\n"
+            "/recon <url> — alias for /website\n"
+            "/jobs — active scan jobs\n"
+            "/engines — discovery engine inventory\n"
+            "/caps — installed capability matrix\n"
+            "/limits — runtime limits\n"
+            "/coverage — scanner coverage\n"
             "/cancel — stop the running scan\n"
             "/languages — supported languages\n\n"
             "🆓 Zero-dollar: free-tier LLMs, free Blockscout, no API keys.\n"

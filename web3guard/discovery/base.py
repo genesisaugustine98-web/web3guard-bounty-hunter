@@ -11,15 +11,13 @@ from __future__ import annotations
 
 import abc
 import logging
-import subprocess
-import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from web3guard.languages.base import TargetLanguage
-from web3guard.security import SandboxGuard, SandboxPolicy
+from web3guard.security import SandboxPolicy
 
 LOGGER = logging.getLogger("web3guard.discovery.base")
 
@@ -68,30 +66,22 @@ def safe_run_subprocess(
     env_extra: dict[str, str] | None = None,
     policy: SandboxPolicy | None = None,
 ) -> tuple[int, str, str]:
-    """Run a discovery-engine subprocess under sandbox policy.
+    """Run a discovery engine through the hardened sandbox runner."""
+    from web3guard.security.sandbox_guard import run_sandboxed
 
-    Returns (returncode, stdout, stderr). The subprocess:
-    - inherits the policy's resource limits (CPU/AS/FSIZE/NOFILE/NPROC)
-    - has its environment filtered to drop API keys
-    - has stdout/stderr truncated to a safe size
-    """
-    guard = SandboxGuard(policy or SandboxPolicy())
-    report = guard.prepare_subprocess(cmd, cwd=cwd, extra_env=env_extra)
     try:
-        proc = subprocess.run(
-            report.command, cwd=report.cwd, env=report.env,
-            capture_output=True, text=True, timeout=timeout,
-            preexec_fn=guard.apply_resource_limits if sys.platform != "win32" else None,
+        return run_sandboxed(
+            cmd,
+            cwd=cwd,
+            timeout=timeout,
+            extra_env=env_extra,
+            policy=policy,
         )
-        return (
-            proc.returncode,
-            guard.truncate_revert_reason(proc.stdout),
-            guard.truncate_revert_reason(proc.stderr),
-        )
-    except subprocess.TimeoutExpired:
-        return 124, "", f"timed out after {timeout}s"
-    except FileNotFoundError as e:
-        return 127, "", f"command not found: {e}"
+    except FileNotFoundError as exc:
+        return 127, "", f"command not found: {exc}"
+    except Exception as exc:
+        LOGGER.warning("discovery sandbox wrapper failed: %s", exc)
+        return 1, "", str(exc)
 
 
 class DiscoveryEngineBase(abc.ABC):

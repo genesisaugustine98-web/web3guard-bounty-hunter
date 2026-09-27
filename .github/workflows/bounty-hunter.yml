@@ -59,10 +59,10 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout scanner
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -81,10 +81,10 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout scanner
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -105,10 +105,10 @@ jobs:
         python-version: ["3.11", "3.12"]
     steps:
       - name: Checkout scanner
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -130,10 +130,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout scanner
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -143,13 +143,13 @@ jobs:
           python -m pip install -e ".[dev]"
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
 
       - name: Install lightweight sandbox toolchains
         run: |
-          bash scripts/setup-toolchains.sh clarinet scarb blueprint aptos
+          WEB3GUARD_REQUIRE_TOOLCHAINS=1 bash scripts/setup-toolchains.sh clarinet scarb blueprint aptos
 
       - name: Install Foundry (EVM exploit-confirmation regression)
         run: |
@@ -166,13 +166,21 @@ jobs:
           foundryup --install stable
           echo "$(dirname "$FOUNDRYUP")" >> "$GITHUB_PATH"
 
-      - name: Run sandbox smoke + real exploit-confirmation tests
+      - name: Emit required capability matrix
         run: |
-          python -m pytest tests/test_sandbox_smoke.py tests/test_exploit_e2e_foundry.py \
-            tests/test_differential_e2e_foundry.py tests/test_cairo_impact_e2e.py \
-            tests/test_build_profile.py tests/test_foundry_build_repro.py \
-            tests/test_impact_extraction.py tests/test_differential.py \
-            tests/test_calibration.py::test_calibrate_l2_golden_cases -v
+          mkdir -p test-results
+          python scripts/capability-matrix.py --json test-results/capabilities.json --require-foundry
+
+      - name: Run required integration gate (no skips)
+        run: python scripts/required-integration-gate.py --junit test-results/required-integration.xml
+
+      - name: Upload integration evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: web3guard-integration-evidence-${{ github.run_id }}
+          path: test-results/
+          if-no-files-found: warn
 
   live-exploit-e2e:
     name: Live exploit E2E (real model)
@@ -181,10 +189,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout scanner
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -247,10 +255,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout scanner
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -299,7 +307,7 @@ jobs:
 
       - name: Upload benchmark report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: web3guard-benchmark-${{ github.run_id }}
           path: |
@@ -313,10 +321,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout scanner
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -338,10 +346,10 @@ jobs:
       contents: read
     steps:
       - name: Checkout scanner
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -380,7 +388,7 @@ jobs:
           "$FOUNDRYUP" --install nightly
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
 
@@ -468,9 +476,13 @@ jobs:
             echo "Telegram reply skipped (token or chat_id not set)"
           fi
 
+      - name: Secret leak gate
+        if: always()
+        run: python scripts/secret-leak-gate.py reports
+
       - name: Upload report artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: web3guard-command-report-${{ github.run_id }}
           path: |
@@ -488,12 +500,12 @@ jobs:
       contents: read
     steps:
       - name: Checkout scanner
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           submodules: recursive
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -532,7 +544,7 @@ jobs:
           "$FOUNDRYUP" --install nightly
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
 
@@ -617,9 +629,13 @@ jobs:
         run: |
           python -m web3guard.cli dashboard | tee web3guard-dashboard.txt || true
 
+      - name: Secret leak gate
+        if: always()
+        run: python scripts/secret-leak-gate.py reports
+
       - name: Upload report artifacts (incl. dual feed)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: web3guard-report-${{ github.run_id }}
           path: |

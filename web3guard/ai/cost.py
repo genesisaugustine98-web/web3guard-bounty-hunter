@@ -38,6 +38,7 @@ class CostCeilingExceeded(RuntimeError):
 
 DEFAULT_PRICING: dict[str, dict[str, float]] = {
     "deepseek-ai/deepseek-v4-flash-0731": {"input": 0.0, "output": 0.0},  # free on NIM
+    "deepseek/deepseek-v4-flash-0731:free": {"input": 0.0, "output": 0.0},  # free on OpenRouter
     "deepseek/deepseek-chat":         {"input": 0.14, "output": 0.28},
     "deepseek/deepseek-coder":        {"input": 0.14, "output": 0.28},
     "meta/llama-3.3-70b-instruct":    {"input": 0.59, "output": 0.79},
@@ -81,6 +82,7 @@ class CostTracker:
         pricing: Mapping[str, Mapping[str, float]] | None = None,
         max_cost_usd: float = 50.0,
         persist_path: Path | None = None,
+        allow_unknown_pricing: bool = False,
     ) -> None:
         self._pricing: dict[str, dict[str, float]] = {
             k: dict(v) for k, v in (pricing or DEFAULT_PRICING).items()
@@ -88,6 +90,7 @@ class CostTracker:
         self._max_cost_usd = max_cost_usd
         self._records: list[CostRecord] = []
         self._persist_path = persist_path
+        self._allow_unknown_pricing = allow_unknown_pricing
         if persist_path is not None:
             self._init_db(persist_path)
 
@@ -120,9 +123,12 @@ class CostTracker:
                     rates = r
                     break
         if rates is None:
-            # Unknown model: assume free; the cost ceiling is for paid
-            # providers we know about, not for unknowns.
-            return 0.0
+            if self._allow_unknown_pricing:
+                LOGGER.warning("unknown model pricing for %s; treating as zero by explicit override", model)
+                return 0.0
+            raise ValueError(
+                f"unknown LLM model pricing for {model!r}; configure model_pricing before using it"
+            )
         return (
             (prompt_tokens / 1_000_000.0) * rates.get("input", 0.0)
             + (completion_tokens / 1_000_000.0) * rates.get("output", 0.0)
@@ -147,27 +153,56 @@ class CostTracker:
             cost_usd=cost,
             role=role,
         )
-        self._records.append(rec)
-        if self._persist_path is not None:
-            with closing(sqlite3.connect(str(self._persist_path))) as conn:
-                conn.execute(
-                    "INSERT INTO cost_records (timestamp, provider, model, "
-                    "prompt_tokens, completion_tokens, cost_usd, role) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (rec.timestamp, rec.provider, rec.model,
-                     rec.prompt_tokens, rec.completion_tokens, rec.cost_usd, rec.role),
+        if self._persist_path is None:
+            projected_total = self._local_total_cost() + cost
+            if self._max_cost_usd > 0 and projected_total > self._max_cost_usd:
+                raise CostCeilingExceeded(
+                    f"cost ceiling exceeded: ${projected_total:.4f} > ${self._max_cost_usd:.4f}"
                 )
-                conn.commit()
-        total = self.total_cost()
-        if total > self._max_cost_usd:
-            raise CostCeilingExceeded(
-                f"cost ceiling exceeded: ${total:.4f} > ${self._max_cost_usd:.4f} "
-                f"(raise max_cost_usd in config or set it to 0 to disable)"
+            self._records.append(rec)
+            return rec
+
+        with closing(sqlite3.connect(str(self._persist_path), timeout=5.0)) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("BEGIN IMMEDIATE")
+            persisted_total = float(
+                conn.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM cost_records").fetchone()[0] or 0.0
             )
+            projected_total = max(self._local_total_cost(), persisted_total) + cost
+            if self._max_cost_usd > 0 and projected_total > self._max_cost_usd:
+                conn.rollback()
+                raise CostCeilingExceeded(
+                    f"cost ceiling exceeded: ${projected_total:.4f} > ${self._max_cost_usd:.4f}"
+                )
+            conn.execute(
+                "INSERT INTO cost_records (timestamp, provider, model, "
+                "prompt_tokens, completion_tokens, cost_usd, role) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (rec.timestamp, rec.provider, rec.model, rec.prompt_tokens,
+                 rec.completion_tokens, rec.cost_usd, rec.role),
+            )
+            conn.commit()
+        self._records.append(rec)
         return rec
 
-    def total_cost(self) -> float:
+    def _local_total_cost(self) -> float:
         return sum(r.cost_usd for r in self._records)
+
+    def total_cost(self) -> float:
+        local = self._local_total_cost()
+        if self._persist_path is None:
+            return local
+        try:
+            with closing(sqlite3.connect(str(self._persist_path), timeout=5.0)) as conn:
+                conn.execute("PRAGMA busy_timeout=5000")
+                persisted = float(
+                    conn.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM cost_records").fetchone()[0] or 0.0
+                )
+                return max(local, persisted)
+        except sqlite3.Error:
+            return local
 
     def total_tokens(self) -> tuple[int, int]:
         """Return (prompt_tokens, completion_tokens) totals."""

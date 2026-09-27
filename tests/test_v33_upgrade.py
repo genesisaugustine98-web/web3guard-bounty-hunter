@@ -63,7 +63,18 @@ class _FakeProvider(AIProvider):
 
 
 def _client(provider: _FakeProvider, **kw) -> AIClient:
-    return AIClient(providers=[provider], model="default-model", **kw)
+    from web3guard.ai.cost import CostTracker
+
+    return AIClient(
+        providers=[provider],
+        model="default-model",
+        cost_tracker=CostTracker(
+            max_cost_usd=100.0,
+            allow_unknown_pricing=True,
+        ),
+        **kw,
+    )
+
 
 
 # ---------------------------------------------------------------------------
@@ -425,7 +436,11 @@ def test_serve_cost_endpoint_reads_persisted_records():
         workdir = Path(td)
         cost_db = workdir / ".web3guard" / "cost.db"
         cost_db.parent.mkdir(parents=True)
-        tracker = CostTracker(persist_path=cost_db, max_cost_usd=1e9)
+        tracker = CostTracker(
+            persist_path=cost_db,
+            max_cost_usd=1e9,
+            allow_unknown_pricing=True,
+        )
         tracker.record(provider="p", model="m", prompt_tokens=1000,
                        completion_tokens=500, role="analysis")
         port = 18322

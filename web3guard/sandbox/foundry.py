@@ -29,6 +29,7 @@ from web3guard.sandbox.build_system import (
     render_foundry_toml,
 )
 from web3guard.security import SandboxGuard, SandboxPolicy
+from web3guard.utils.secrets import redact_sensitive_text
 
 LOGGER = logging.getLogger("web3guard.sandbox.foundry")
 
@@ -166,7 +167,7 @@ class FoundrySandbox:
             test_cmd,
             cwd=sandbox_path, timeout=timeout,
         )
-        combined = out + "\n" + err
+        combined = redact_sensitive_text(out + "\n" + err)
         if self.fork_url:
             # Foundry may echo the RPC URL (with embedded key) in error
             # output; strip it so credentials never reach reports.

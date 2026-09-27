@@ -26,14 +26,14 @@ note_fail() {
 
 install_clarinet() {
   has clarinet && return 0
-  local ver="v3.23.2"
-  # Asset naming changed from *.zip to *-glibc.tar.gz on the v3 releases.
-  local url="https://github.com/hirosystems/clarinet/releases/download/${ver}/clarinet-linux-x64-glibc.tar.gz"
+  # Official Linux x64 glibc asset used by the Clarinet release pipeline.
+  local url="https://github.com/stx-labs/clarinet/releases/latest/download/clarinet-linux-x64-glibc.tar.gz"
   local dir="$HOME/.clarinet/bin"
   mkdir -p "$dir"
   curl -sSL "$url" -o /tmp/clarinet.tar.gz && tar -xzf /tmp/clarinet.tar.gz -C "$dir"
   chmod +x "$dir/clarinet"
   echo "$dir" >> "$GITHUB_PATH" 2>/dev/null || true
+  export PATH="$dir:$PATH"
   [ -x "$dir/clarinet" ]
 }
 
@@ -64,6 +64,7 @@ install_aptos() {
   curl -sSL "$url" -o /tmp/aptos.zip && unzip -oq /tmp/aptos.zip -d "$dir"
   chmod +x "$dir/aptos"
   echo "$dir" >> "$GITHUB_PATH" 2>/dev/null || true
+  export PATH="$dir:$PATH"
   [ -x "$dir/aptos" ]
 }
 
@@ -78,6 +79,7 @@ install_solana() {
   curl -sSL "$url" -o /tmp/solana.tar.bz2
   tar -xjf /tmp/solana.tar.bz2 -C "$dir" --strip-components=1
   echo "$dir/bin" >> "$GITHUB_PATH" 2>/dev/null || true
+  export PATH="$dir/bin:$PATH"
   if ! has anchor; then
     cargo install --locked --git https://github.com/coral-xyz/anchor avm --force
     avm install latest && avm use latest
@@ -103,5 +105,18 @@ done
 
 if [ "${#FAILED[@]}" -gt 0 ]; then
   echo "::warning::one or more toolchains failed to install: ${FAILED[*]}"
+  if [ "${WEB3GUARD_REQUIRE_TOOLCHAINS:-0}" = "1" ]; then
+    echo "::error::required toolchain mode: ${FAILED[*]} is not available"
+    exit 1
+  fi
+fi
+
+if [ "${WEB3GUARD_REQUIRE_TOOLCHAINS:-0}" = "1" ]; then
+  for required in "${TOOLS[@]}"; do
+    if ! has "$required"; then
+      echo "::error::required toolchain missing after setup: $required"
+      exit 1
+    fi
+  done
 fi
 exit 0
