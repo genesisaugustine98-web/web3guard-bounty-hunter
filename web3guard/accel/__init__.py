@@ -54,6 +54,16 @@ class PythonAccelerator:
             for m in iter_secret_matches(content)
         ]
 
+    def secret_matches(self, content: str) -> list[dict[str, Any]]:
+        """Rule-complete secret scan shared by all engine callers.
+
+        Contract: identical output on the Python and Rust paths — the
+        native regex set is deliberately the mnemonic-free subset (BIP39
+        shape-heuristics live Python-side), so the Rust wrapper re-runs
+        the Python matcher and unions its mnemonic matches back in.
+        """
+        return self.scan_secrets(content)
+
     def extract_imports(self, content: str) -> list[str]:
         """First import match per pattern — mirrors graph._IMPORT_PATTERNS."""
         from web3guard.graph.analyzer import _IMPORT_PATTERNS
@@ -75,11 +85,29 @@ class RustAccelerator:
 
     def hash_files(self, paths: list[Any]) -> dict[str, str]:
         raw = self._mod.hash_files([str(p) for p in paths])
-        return dict(raw)
+        # Native hashes are the full hex digest; Python reference and the
+        # graph's stored hashes are truncated to 24 chars. Truncate here so
+        # callers cannot tell which implementation ran.
+        return {p: h[:24] for p, h in dict(raw).items()}
 
     def scan_secrets(self, content: str) -> list[dict[str, Any]]:
-        raw = self._mod.scan_secrets(content)
-        return [dict(x) for x in raw]
+        # The native regex set deliberately excludes the mnemonic rule
+        # (its BIP39 shape-heuristics live Python-side), so union the
+        # Python matcher's output back in to keep rule coverage identical
+        # between the native and pure-Python paths.
+        out: list[dict[str, Any]] = [
+            dict(x) for x in self._mod.scan_secrets(content)
+        ]
+        covered = {(m["match"], m["line"]) for m in out}
+        from web3guard.utils.secrets import iter_secret_matches
+        for m in iter_secret_matches(content):
+            if m.kind != "mnemonic":
+                continue
+            if (m.value, m.line) in covered:
+                continue
+            out.append({"rule": m.kind, "match": m.value, "line": m.line})
+        out.sort(key=lambda d: (d["line"], d["match"]))
+        return out
 
     def extract_imports(self, crate_dir: str) -> list[str]:
         return list(self._mod.extract_imports(crate_dir))
@@ -120,8 +148,6 @@ def reset_accelerator() -> None:
 _SELECTED: Any = None
 
 __all__ = [
-    "PythonAccelerator",
-    "RustAccelerator",
     "accelerator",
     "reset_accelerator",
 ]

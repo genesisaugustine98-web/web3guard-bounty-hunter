@@ -17,7 +17,6 @@ from web3guard.discovery.base import (
     temp_report_path,
 )
 from web3guard.languages.base import TargetLanguage
-from web3guard.utils.secrets import iter_secret_matches
 
 LOGGER = logging.getLogger("web3guard.discovery.gitleaks")
 
@@ -76,7 +75,14 @@ class GitleaksEngine(DiscoveryEngineBase):
         return results
 
     def _builtin_scan(self, target_path: Path) -> list[DiscoveryResult]:
-        """Regex-only fallback so we always have secret-scan signal."""
+        """Regex fallback so we always have secret-scan signal.
+
+        Routed through the accelerator: identical output whether the
+        native Rust extension is installed or the pure-Python matcher
+        runs (see ``accelerator.secret_matches`` for the parity contract).
+        """
+        from web3guard.accel import accelerator
+        accel = accelerator()
         results: list[DiscoveryResult] = []
         for fp in target_path.rglob("*"):
             if not fp.is_file():
@@ -88,17 +94,17 @@ class GitleaksEngine(DiscoveryEngineBase):
                 content = fp.read_text(errors="ignore")
             except Exception:  # noqa: BLE001
                 continue
-            for match in iter_secret_matches(content):
+            for match in accel.secret_matches(content):
                 results.append(DiscoveryResult(
                     engine="gitleaks",
                     target=str(target_path),
                     file=str(fp.relative_to(target_path)),
-                    line=match.line,
+                    line=int(match["line"]),
                     category="secret-leak",
                     severity="CRITICAL",
-                    title=f"Secret: {match.kind}",
-                    description=match.value[:120],
+                    title=f"Secret: {match['rule']}",
+                    description=str(match["match"])[:120],
                     confidence=0.85,
-                    raw={"kind": match.kind, "file": str(fp.relative_to(target_path))},
+                    raw={"kind": match["rule"], "file": str(fp.relative_to(target_path))},
                 ))
         return results

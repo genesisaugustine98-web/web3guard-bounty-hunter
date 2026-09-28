@@ -52,7 +52,13 @@ _IMPORT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 
 def hash_content(content: str) -> str:
-    """SHA-256 of file content (first 24 hex chars)."""
+    """SHA-256 of file content (first 24 hex chars).
+
+    Deliberately Python-side only: the native accelerator hashes raw file
+    bytes, while the graph hashes the ``errors="ignore"`` decoded text the
+    analyzer actually compares. Feeding raw-byte hashes into a graph built
+    from decoded text would corrupt persisted dirty-detection state.
+    """
     return hashlib.sha256(
         content.encode("utf-8", errors="ignore")).hexdigest()[:24]
 

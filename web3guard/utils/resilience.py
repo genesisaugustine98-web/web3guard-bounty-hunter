@@ -98,13 +98,6 @@ def disk_ok_or_raise(workdir: Path, floor: int | None = None) -> None:
             "batch size; refusing to risk a mid-scan ENOSPC.")
 
 
-def is_retryable_http(status: int) -> bool:
-    """Retry policy for batch runners (aligned with fetch.py)."""
-    if status in (408, 429):
-        return True
-    return 500 <= status < 600
-
-
 def classify_error(err: BaseException) -> str:
     """Rough retry classification used by batch loops to decide
     continue vs skip-target vs abort-batch."""

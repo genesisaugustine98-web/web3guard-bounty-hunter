@@ -298,10 +298,3 @@ class ScopeAllowlist:
         progs.sort(key=lambda p: -p.max_bounty_usd)
         return [p.to_dict() for p in progs]
 
-
-def routes_for_target(target: str, allow: list[str] | None = None,
-                      cache_dir: Path | None = None) -> list[dict[str, Any]]:
-    """Convenience wrapper: program cards covering ``target``."""
-    wl = ScopeAllowlist(allow or [], require_authorized_scope=False,
-                        cache_dir=cache_dir)
-    return [p.to_dict() for p in wl.routes_for(target)]
