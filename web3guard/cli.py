@@ -157,7 +157,34 @@ def build_parser() -> argparse.ArgumentParser:
     # ---- price ----------------------------------------------------------
     sub.add_parser("price", help="Show the cost-pricing model")
 
-    # ---- bench ----------------------------------------------------------
+    # ---- recon ----------------------------------------------------------
+    recon = sub.add_parser(
+        "recon",
+        help=(
+            "Authorized-surface web recon (ROE-gated). Requires an "
+            "authorization JSON naming researcher, program, source, and "
+            "in-scope assets — every request is scope-checked, rate-limited, "
+            "and audited."
+        ),
+    )
+    recon.add_argument("--auth", type=Path, required=True,
+                       help="Path to the authorization JSON (see docs)")
+    recon.add_argument("--workdir", type=Path, default=None,
+                       help="Output dir for report, H1 draft, audit log "
+                            "(default: <global workdir>/webrecon/<host-stem>)")
+    recon.add_argument("--phases", default="surface,passive",
+                       help="Comma-separated phases: surface,passive")
+    recon.add_argument("--max-pages", type=int, default=12,
+                       help="Max same-host pages per host (default 12)")
+    recon.add_argument("--min-interval", type=float, default=3.0,
+                       help="Min seconds between requests to the same host")
+    recon.add_argument("--max-requests-per-host", type=int, default=40,
+                       help="Hard per-host request budget for the session")
+    recon.add_argument("--scheme", choices=("http", "https"), default="https",
+                       help="Scheme for target URLs (http only for local/test servers)")
+    recon.add_argument("--dry-run", action="store_true",
+                       help="Validate the authorization and print the plan "
+                            "without contacting anything")    # ---- bench ----------------------------------------------------------
     bench = sub.add_parser(
         "bench",
         help=(
@@ -271,6 +298,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_bounties(args)
     if args.command == "scope":
         return _cmd_scope(args)
+    if args.command == "recon":
+        return _cmd_recon(args)
     parser.print_help()
     return 1
 
@@ -591,6 +620,97 @@ def _cmd_bounties(args: argparse.Namespace) -> int:
         print(f"{p['name']:<44.44} {reward:>12}  {assets:<18.18} {p['url']}")
     print(f"\n{len(programs)} program(s). Add program names or your own "
           "targets to config 'allow:' to authorize scanning.")
+    return 0
+
+
+def _cmd_recon(args: argparse.Namespace) -> int:
+    """Authorized-surface web recon (ROE-gated; see web3guard.webrecon)."""
+    import json as _json
+
+    from web3guard.webrecon import (
+        authorization_from_json,
+        run_phases,
+    )
+
+    if not args.auth.exists():
+        print(f"error: authorization file not found: {args.auth}")
+        return 2
+    try:
+        data = _json.loads(args.auth.read_text(encoding="utf-8"))
+        authz = authorization_from_json(data)
+    except (ValueError, KeyError, TypeError) as e:
+        print(f"error: invalid authorization file: {e}")
+        return 2
+
+    phases = [p.strip() for p in args.phases.split(",") if p.strip()]
+    bad = [p for p in phases if p not in ("surface", "passive")]
+    if bad:
+        print(f"error: unknown phase(s): {', '.join(bad)} "
+              f"(valid: surface, passive)")
+        return 2
+
+    workdir = args.workdir or (Path(".web3guard/webrecon") )
+    print("Authorization:")
+    print(f"  program:    {authz.program}")
+    print(f"  researcher: {authz.researcher}")
+    print(f"  source:     {authz.source}")
+    print(f"  fingerprint: {authz.fingerprint}")
+    print("  assets:")
+    for a in authz.assets:
+        print(f"    - {a.host}{a.path_prefix}")
+    print(f"  phases:     {', '.join(phases)}")
+    print(f"  limits: min_interval={args.min_interval}s, "
+          f"max_requests_per_host={args.max_requests_per_host}, "
+          f"max_pages={args.max_pages}")
+    print(f"  audit log:  {Path(workdir) / 'webrecon_audit.jsonl'}")
+    if args.dry_run:
+        print("dry-run: no requests were made.")
+        return 0
+
+    confirm = input(
+        f"Proceed with live recon against the {len(authz.assets)} asset(s) "
+        "above? [y/N] ")
+    if confirm.strip().lower() != "y":
+        print("aborted by user — nothing was contacted.")
+        return 1
+
+    if args.scheme == "http" and not args.dry_run:
+        confirm_http = input(
+            "WARNING: --scheme http sends unencrypted requests. "
+            "Intended for local/test servers only. Continue? [y/N] ")
+        if confirm_http.strip().lower() != "y":
+            print("aborted by user — nothing was contacted.")
+            return 1
+
+    results = run_phases(
+        authz, Path(workdir),
+        phases=phases,
+        scheme=args.scheme,
+        max_pages=args.max_pages,
+        min_interval=args.min_interval,
+        max_requests_per_host=args.max_requests_per_host,
+    )
+    hosts = results.get("surface", {}).get("hosts", [])
+    print()
+    print(f"Surface phase: {len(hosts)} host(s) mapped, "
+          f"{results.get('session_requests', 0)} request(s) total")
+    for h in hosts:
+        err = h.get("error")
+        if err:
+            print(f"  {h.get('host', '?')}: ERROR {err}")
+        else:
+            print(f"  {h.get('host', '?')}: root={h.get('root_status', '?')}, "
+                  f"pages={len(h.get('pages', []))}, "
+                  f"robots-disallows={len(h.get('robots', {}).get('disallows', []))}")
+    passive = results.get("passive", {})
+    for d, pdata in passive.items():
+        print(f"Passive [{d}]: crt.sh subdomains={len(pdata.get('crtsh_subdomains', []))}, "
+              f"wayback urls={len(pdata.get('wayback_sample', []))}")
+    findings = results.get("findings", [])
+    print(f"\nCandidates: {len(findings)} "
+          f"(reportable: {sum(1 for f in findings if f.get('reportable'))})")
+    print(f"Report: {results.get('report_path')}")
+    print(f"H1 draft (verify manually before filing): {results.get('draft_path')}")
     return 0
 
 
