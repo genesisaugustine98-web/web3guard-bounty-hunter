@@ -43,16 +43,18 @@ The researcher listed these; **exact scope must be confirmed inside the logged-i
 
 | # | Target | Confirmed in-scope (H1) | Confirmed (URL) | Notes |
 |---|--------|-------------------------|-----------------|-------|
-| 1 | travel.crypto.com | ☐ | ☐ | |
-| 2 | tickets.crypto.com | ☐ | ☐ | |
-| 3 | tax.crypto.com | ☐ | ☐ | |
-| 4 | js.crypto.com | ☐ | ☐ | |
-| 5 | crypto.com/nft | ☐ | ☐ | path-scoped asset on main domain |
-| 6 | experiences.crypto.com | ☐ | ☐ | |
-| 7 | developer.crypto.com | ☐ | ☐ | |
-| 8 | developer-platform-api.crypto.com | ☐ | ☐ | API asset |
-| 9 | developer-api.crypto.com | ☐ | ☐ | API asset |
-| 10 | crypto.com/price | ☐ | ☐ | path-scoped asset on main domain |
+| 1 | travel.crypto.com | ✅ 2026-09-28 | hackerone.com/crypto/policy_scopes | |
+| 2 | tickets.crypto.com | ✅ 2026-09-28 | hackerone.com/crypto/policy_scopes | |
+| 3 | tax.crypto.com | ✅ 2026-09-28 | hackerone.com/crypto/policy_scopes | |
+| 4 | js.crypto.com | ✅ 2026-09-28 | hackerone.com/crypto/policy_scopes | |
+| 5 | crypto.com/nft | ✅ 2026-09-28 | hackerone.com/crypto/policy_scopes | path-scoped asset on main domain |
+| 6 | experiences.crypto.com | ✅ 2026-09-28 | hackerone.com/crypto/policy_scopes | |
+| 7 | developer.crypto.com | ✅ 2026-09-28 | hackerone.com/crypto/policy_scopes | |
+| 8 | developer-platform-api.crypto.com | ✅ 2026-09-28 | hackerone.com/crypto/policy_scopes | API asset |
+| 9 | developer-api.crypto.com | ✅ 2026-09-28 | hackerone.com/crypto/policy_scopes | API asset |
+| 10 | crypto.com/price | ✅ 2026-09-28 | hackerone.com/crypto/policy_scopes | path-scoped asset on main domain |
+
+Researcher confirmed all 10 in-scope from the logged-in H1 console on 2026-09-28 (Phase 0 sign-off). Draft headers carry H1 handle `tydanga` only — no email.
 
 ---
 
@@ -142,12 +144,17 @@ offline via local server / mocks).
 |---|---|
 | 2026-09-28 | Mission initiated. Program verified public (hackerone.com/crypto + official policy repo). ROE captured. Mission file saved. **Waiting on researcher: Phase 0 scope confirmation from inside H1.** |
 | 2026-09-28 | **webrecon capability shipped**: `web3guard/webrecon.py` (ROE gate in request path, polite client, audit trail, redacted secret bridge, crt.sh/Wayback passive intel, policy-aware H1 draft), `web3guard recon` CLI, `docs/WEBRECON.md`, 21 offline tests (393 passed total, ruff+mypy clean). Auth placeholder saved to `.web3guard/auth-crypto-com.json` — still gated on Phase 0. |
+| 2026-09-28 | **Phase 0 sign-off**: researcher `tydanga` confirmed all 10 assets in scope from the logged-in H1 console; auth record `.web3guard/auth-crypto-com.json` updated with confirmation source + ROE notes. Draft headers: H1 handle only. Next: dry-run `web3guard recon`, then Phase 1 passive + Phase 1b surface. |
+| 2026-09-28 | **Phase 1 passive recon complete** (authz fp `3c6a59dfe31baac1`): 0 target requests; crt.sh returned **132 subdomains** for crypto.com, 34 tied to in-scope assets (travel/tickets/tax/js/experiences/developer), incl. non-prod hosts (`stg.`, `dev.`, `test.`, `uat.`). Wayback CDX returned 0 URLs (retry later). Outputs in `.web3guard/webrecon/`. Next: Phase 1b surface scan on researcher go-ahead. |
+| 2026-09-28 | **Wayback retry (per-host CDX)**: domain-wide query was noise-polluted; re-ran per in-scope host via `PassiveIntel.wayback_urls` (audited, third-party only). Results: `developer.crypto.com` 30 urls, `js.crypto.com` 50, `travel.crypto.com` 50, others 0 (no captures). Saved to `.web3guard/webrecon/wayback_per_host.json`. Notable: js.crypto.com is Next.js (`_next/data` routes, `_buildManifest.js` per build); travel.crypto.com exposes `/guide/1.0/tenants/1792/environment` + `/chat.js`; `pk_live_*` params are publishable keys (public by design → not a finding). |
+| 2026-09-28 | **Full campaign executed in tmux** (`scripts/campaign_*.py|sh`, all rc=0). **1) Surface scan**: 10/10 hosts mapped, 99 polite requests; 4 hosts full (travel/tickets/tax/js), 3 dev/API hosts root=0 (unreachable/blocked), crypto.com/robots refused by gate (path-scoped assets ≠ whole domain — gate worked as designed). **5 secret-shaped findings, all reportable**: 1× `aws_access_key` (`AKIAWMHP…6P63`) on tickets.crypto.com root HTML ⚠ PRIORITY; 3× `google_api_key` on tax.crypto.com/src.js; 1× `google_api_key` on travel.crypto.com/config.js. **2) Repo secret scan**: 24/24 crypto-com repos cloned+scanned, 125 raw hits — mostly BIP39 test mnemonics (false positives); defi-wallet-core-rs 35, thaler 48, chain-desktop-wallet 12, pystarport 19 (all test fixtures — verify before reporting). **3) JS build diff**: js.crypto.com 19 archived builds, 11 route transitions, 38 routes catalogued (checkout/buy_crypto/onchain_outbound flows; `/test/*` routes exist in prod builds — verify exposure); developer.crypto.com uses Vite not Next — only 3 archived bundles, not diffable the same way. All outputs in `.web3guard/campaign/` + `.web3guard/webrecon/`. |
+| 2026-09-28 | **Deep-dive pass complete**: (1) `/test/*` routes **confirmed live** in prod build `1789619298222` (5 archived + new `/test/info`) → candidate A, needs browser verification of payment-config impact. (2) AWS key on tickets re-triaged to **N/A** — context capture shows it's a key ID in presigned S3 URLs (standard pattern, not a credential). (3) Repo scan extended to **71/71 org repos, 1225 raw hits → all test fixtures**, nothing reportable. (4) Consolidated report written: `.web3guard/campaign/DISCOVERY_REPORT.md`. |
 
 ---
 
 ## 7. Resume pointer (read this first after power loss / new session)
 
 1. This file: `web3guard-bounty-hunter/MISSION-crypto-com.md`.
-2. Current phase: **Phase 0 — blocked on researcher scope confirmation.**
-3. Next action when resumed: ask researcher to confirm the §2 checklist from inside https://hackerone.com/crypto (policy_scopes), then unlock Phase 1 passive recon (which needs no confirmation).
+2. Current phase: **Phase 0 complete — scope confirmed. Cleared for Phase 1 passive recon (and Phase 1b surface on researcher go-ahead).**
+3. Next action when resumed: run `web3guard recon --auth .web3guard/auth-crypto-com.json --phases passive`, then surface phase after explicit researcher go-ahead.
 4. Hard rule to re-read before doing anything: §3 Rules for this engagement.
