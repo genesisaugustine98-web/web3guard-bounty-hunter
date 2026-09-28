@@ -65,13 +65,22 @@ class PythonAccelerator:
         return self.scan_secrets(content)
 
     def extract_imports(self, content: str) -> list[str]:
-        """First import match per pattern — mirrors graph._IMPORT_PATTERNS."""
+        """Extract import targets from source text (all matches, deduped,
+        first-seen order) — mirrors graph._IMPORT_PATTERNS.
+
+        Deliberately NOT wired into the graph builder (v3.6.1 audit): this
+        helper covers the shared regex set but not the per-language
+        resolution step (``IncrementalAnalyzer._resolve_import``), so
+        consuming it directly would drop graph edges. Kept as a preview
+        utility only; callers must not feed its output into graph state.
+        """
         from web3guard.graph.analyzer import _IMPORT_PATTERNS
         out: list[str] = []
         for _lang, pat in _IMPORT_PATTERNS:
-            m = pat.search(content)
-            if m:
-                out.append(m.group(1))
+            for m in pat.finditer(content):
+                raw = (m.group(1) or "").strip()
+                if raw and raw not in out:
+                    out.append(raw)
         return out
 
 
@@ -109,8 +118,17 @@ class RustAccelerator:
         out.sort(key=lambda d: (d["line"], d["match"]))
         return out
 
-    def extract_imports(self, crate_dir: str) -> list[str]:
-        return list(self._mod.extract_imports(crate_dir))
+    def extract_imports(self, content: str) -> list[str]:
+        """Extract import targets from source text (all matches, deduped,
+        first-seen order) — identical semantics to the Python path.
+
+        Coverage note: the native module implements the Rust subset
+        (``use`` imports and ``mod`` declarations) only. Feeding it the
+        full pattern set output would drop edges for the other 7 language
+        families, so this surface is deliberately not wired into the graph
+        builder (see docs/DEAD_CODE_AUDIT.md).
+        """
+        return list(self._mod.extract_imports(content))
 
 
 _NONE: list[Any] = []

@@ -5,6 +5,7 @@ Covers:
 - ``accelerator().secret_matches`` parity contract (Python path here,
   Rust wrapper tested with a fake native module).
 - ``RustAccelerator`` hash truncation + mnemonic-rule union.
+- ``extract_imports`` signature/semantics parity (Python vs Rust path).
 - Gitleaks builtin fallback routes through the accelerator unchanged.
 - Removed dead code stays removed (guards against quiet reintroduction).
 """
@@ -88,6 +89,52 @@ def test_rust_wrapper_unions_mnemonic_matches() -> None:
     text = f'{AWS_KEY}\nseed: "{MNEMONIC}"\n'
     rules = {h["rule"] for h in accel.scan_secrets(text)}
     assert rules == {"aws_access_key", "mnemonic"}
+
+
+def test_extract_imports_python_all_matches_deduped() -> None:
+    """Python path: every pattern match, deduped, first-seen order —
+    not just the first match per pattern (v3.6.1 follow-up fix)."""
+    src = (
+        'import "@openzeppelin/contracts/token/ERC20.sol";\n'
+        'import {SafeMath} from "./math.sol";\n'
+        'import "@openzeppelin/contracts/token/ERC20.sol";\n'  # duplicate
+        'import "math/big.sol";\n'
+    )
+    got = PythonAccelerator().extract_imports(src)
+    assert got == [
+        "@openzeppelin/contracts/token/ERC20.sol",
+        "./math.sol",
+        "math/big.sol",
+    ]
+
+
+def test_extract_imports_signatures_aligned() -> None:
+    """Both accelerator paths must take source *content* — the Rust
+    wrapper previously declared ``crate_dir`` and forwarded it verbatim,
+    silently changing what the argument meant."""
+    import inspect
+
+    from web3guard.accel import RustAccelerator
+
+    for cls in (PythonAccelerator, RustAccelerator):
+        params = list(inspect.signature(cls.extract_imports).parameters)
+        assert params == ["self", "content"], f"{cls.__name__}: {params}"
+
+
+def test_rust_wrapper_extract_imports_takes_content() -> None:
+    """RustAccelerator must forward the *text*, matching the native
+    ``fn extract_imports(content: &str)`` entry point."""
+
+    class FakeNative:
+        def extract_imports(self, content: str) -> list[str]:
+            # Native implements the Rust subset only (use / mod decls).
+            return ["std::io"] if "use std::io;" in content else []
+
+    from web3guard.accel import RustAccelerator
+
+    accel = RustAccelerator(FakeNative())
+    assert accel.extract_imports("use std::io;\n") == ["std::io"]
+    assert accel.extract_imports("fn main() {}\n") == []
 
 
 def test_gitleaks_builtin_scan_routes_through_accel(tmp_path: Path) -> None:

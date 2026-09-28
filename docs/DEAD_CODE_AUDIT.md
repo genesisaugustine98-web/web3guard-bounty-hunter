@@ -30,6 +30,14 @@ Scope: full package cross-reference (AST), CLI surface, docs claims vs reality
    only 2 of Python's import patterns (would drop graph edges = weaker
    dirty-propagation) and hashes raw bytes vs the graph's decoded text
    (would corrupt persisted hashes). Both parity gaps documented in code.
+   Follow-up (same day): `extract_imports` signatures aligned across
+   both accelerator paths — RustAccelerator declared `crate_dir` and
+   forwarded it verbatim although the native entry point takes source
+   *content* (`fn extract_imports(content: &str)`); the Python path
+   also only returned the first match per pattern while native returns
+   all matches deduped. Both paths now take `content` and share
+   all-matches/deduped/first-seen semantics; still NOT wired into the
+   graph builder (per-language `_resolve_import` remains Python-only).
 2. `python -m web3guard.accel` — accel_cli existed but the package lacked
    `__main__.py`; command 404'd. Added 6-line dispatcher.
 
