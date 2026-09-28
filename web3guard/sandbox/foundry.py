@@ -22,7 +22,12 @@ from pathlib import Path
 
 from web3guard.languages.base import LanguageAdapter
 from web3guard.languages.vyper import VyperAdapter
-from web3guard.sandbox.base import SandboxResult, hardened_run
+from web3guard.sandbox.base import (
+    SandboxResult,
+    hardened_run,
+    is_path_within,
+    snapshot_target_files,
+)
 from web3guard.sandbox.build_system import (
     BuildProfile,
     detect_build_profile,
@@ -59,6 +64,14 @@ class FoundrySandbox:
         """Create a fresh forge init and copy the target's user code into src/."""
         if self._root is not None:
             return self._root
+        # Snapshot the target's file list BEFORE creating the sandbox root.
+        # The root lives under self.workdir; when workdir overlaps the target
+        # (scanner scans its own cwd, tests point both at tmp_path) a lazy
+        # rglob would otherwise discover the sandbox's own freshly copied
+        # files and copy them into themselves, nesting until path lengths
+        # explode (the "web3guard-foundry-X/src/web3guard-foundry-X/..."
+        # garbage pytest could not clean up).
+        target_files = snapshot_target_files(target_path)
         root = Path(tempfile.mkdtemp(prefix="web3guard-foundry-", dir=str(self.workdir)))
         # forge init
         try:
@@ -72,13 +85,15 @@ class FoundrySandbox:
         profile = self.build_profile or detect_build_profile(target_path)
         is_vyper = isinstance(self.adapter, VyperAdapter)
         src_root = target_path / profile.src_dir
-        for fp in target_path.rglob("*"):
-            if not fp.is_file():
+        for fp in target_files:
+            # Defense in depth on top of the pre-root snapshot: never copy
+            # anything from inside the sandbox's own tree.
+            if is_path_within(fp, root):
                 continue
+            # Never follow symlinks out of the target: a malicious repo
+            # can point a source file at /etc/passwd or ~/.aws/credentials
+            # and have its contents compiled into the sandbox.
             if fp.is_symlink():
-                # Never follow symlinks out of the target: a malicious repo
-                # can point a source file at /etc/passwd or ~/.aws/credentials
-                # and have its contents compiled into the sandbox.
                 LOGGER.warning("skipping symlink in target: %s", fp)
                 continue
             rel_str = "/" + fp.relative_to(target_path).as_posix().lower().strip("/") + "/"

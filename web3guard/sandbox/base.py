@@ -66,6 +66,36 @@ def hardened_run(
 LOGGER = logging.getLogger("web3guard.sandbox.base")
 
 
+def is_path_within(child: Path, ancestor: Path) -> bool:
+    """True when ``child`` lies inside ``ancestor`` (both resolved).
+
+    Unresolvable paths are never considered contained, so the caller
+    fails safe rather than silently copying outside the allowed tree.
+    """
+    try:
+        c = child.resolve()
+        a = ancestor.resolve()
+    except OSError:
+        return False
+    return c == a or a in c.parents
+
+
+def snapshot_target_files(target_path: Path) -> list[Path]:
+    """Materialize the target's file list before the sandbox root exists.
+
+    ``Path.rglob`` is a lazy generator: if the sandbox root is created
+    inside the target tree (workdir == target, the common scanner case)
+    the walk would discover files the sandbox just wrote and copy them
+    into itself, nesting until path lengths explode. Snapshotting the
+    file list up front freezes the set we copy.
+
+    Symlinks that resolve to files are kept in the list so each sandbox's
+    copy loop can reject them explicitly (with its warning log); a
+    symlink swapped in between snapshot and copy is still caught there.
+    """
+    return [fp for fp in target_path.rglob("*") if fp.is_file()]
+
+
 @dataclass
 class SandboxResult:
     """Result of running a PoC in a sandbox."""
@@ -84,7 +114,7 @@ class TestSandbox(Protocol):
 
     def setup(self, target_path: Path) -> Path:
         """Initialize a fresh sandbox; return the path to its root."""
-        ...
+        ...  # implementations must snapshot_target_files() before mkdtemp
 
     def write_poc(self, sandbox_path: Path, code: str, fingerprint: str) -> Path:
         """Write the AI-generated PoC into the sandbox."""

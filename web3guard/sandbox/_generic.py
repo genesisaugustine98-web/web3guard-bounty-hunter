@@ -22,7 +22,12 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from web3guard.languages.base import LanguageAdapter
-from web3guard.sandbox.base import SandboxResult, hardened_run
+from web3guard.sandbox.base import (
+    SandboxResult,
+    hardened_run,
+    is_path_within,
+    snapshot_target_files,
+)
 from web3guard.security import SandboxGuard, SandboxPolicy
 
 LOGGER = logging.getLogger("web3guard.sandbox.generic")
@@ -55,6 +60,11 @@ class GenericSandbox:
     def setup(self, target_path: Path) -> Path:
         if self._root is not None:
             return self._root
+        # Snapshot the target's file list BEFORE creating the sandbox root:
+        # when workdir overlaps the target, a lazy rglob would discover the
+        # sandbox's own freshly written files and copy them into itself
+        # (see snapshot_target_files in sandbox/base.py for details).
+        target_files = snapshot_target_files(target_path)
         root = Path(tempfile.mkdtemp(prefix=f"web3guard-{self.language}-", dir=str(self.workdir)))
         # Init the project
         try:
@@ -73,13 +83,14 @@ class GenericSandbox:
                 break
         self.post_init(root)
         # Copy the target's user code.
-        for fp in target_path.rglob("*"):
-            if not fp.is_file():
+        for fp in target_files:
+            # Defense in depth on top of the pre-root snapshot.
+            if is_path_within(fp, root):
                 continue
+            # Never follow symlinks out of the target: a malicious repo
+            # can point a source file at /etc/passwd or ~/.aws/credentials
+            # and have its contents compiled into the sandbox.
             if fp.is_symlink():
-                # Never follow symlinks out of the target: a malicious repo
-                # can point a source file at /etc/passwd or ~/.aws/credentials
-                # and have its contents compiled into the sandbox.
                 LOGGER.warning("skipping symlink in target: %s", fp)
                 continue
             rel = fp.relative_to(target_path)
