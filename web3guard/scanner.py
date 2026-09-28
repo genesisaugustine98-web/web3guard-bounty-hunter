@@ -58,13 +58,14 @@ from web3guard.planning import AdaptivePlanner
 from web3guard.reachability import ReachabilityAnalyzer, ReachabilityVerdict
 from web3guard.reports import ReportBuilder
 from web3guard.sandbox.differential import (
-    DifferentialOutcome,
     run_differential,
 )
 from web3guard.security import (
+    ConfirmationGate,
     PromptInjectionGuard,
     SandboxGuard,
     SandboxPolicy,
+    apply_verdict,
 )
 from web3guard.storage import DurableStore
 from web3guard.storage.durable import StorageError
@@ -290,6 +291,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "enable_exploit": True,
     "max_exploit_attempts": 3,
     "enable_differential": True,
+    # v3.6 confirmation gate: machine-verified evidence only. Findings
+    # confirm ONLY when the PoC impact reproduces on replay, a negative
+    # control kills the exploit where a mutator exists, and the source
+    # hash is bound. No LLM opinion can flip a status.
+    "enable_runtime_confirmation": True,
+    # Discovery-engine findings below this severity are never routed
+    # through the (costly) exploit loop.
+    "runtime_confirmation_min_severity": "HIGH",
+    # When True, findings whose category has no differential mutator are
+    # refused confirmation instead of confirming with a confidence cap.
+    "require_negative_control": False,
     "enable_reachability": True,
     "reachability_use_slither": True,
     "use_ai_planning": True,
@@ -851,6 +863,22 @@ class Scanner:
                         continue
                     if reachability is not None:
                         self._apply_reachability(reachability, finding)
+                    # v3.6: discovery findings no longer dead-end at
+                    # POTENTIAL. High-severity static findings get the
+                    # same PoC-confirmation loop as AI findings, so the
+                    # deterministic engines can produce CONFIRMED
+                    # EXPLOIT verdicts backed by sandbox evidence.
+                    # NOTE: gated on enable_ai_analysis — discovery-only
+                    # scans keep their zero-LLM-call guarantee.
+                    if (self.config.get("enable_runtime_confirmation", True)
+                            and self.config.get("enable_ai_analysis", True)
+                            and self.config.get("enable_exploit", True)
+                            and self._severity_at_least(
+                                finding.severity,
+                                str(self.config.get(
+                                    "runtime_confirmation_min_severity", "HIGH")))):
+                        self._confirm_static_finding(
+                            adapter, finding, target_path)
                     seen_fps.add(finding.fingerprint)
                     tr.findings.append(finding)
             # Discover files, ordered by research-plan risk.
@@ -1288,19 +1316,23 @@ class Scanner:
                 if evidence is not None and not evidence.confirmed:
                     last_err = "PoC passed but impact evidence was zero"
                     continue
-                if self.config.get("enable_differential", True):
-                    outcome: DifferentialOutcome = run_differential(
-                        adapter, target_path, self.workdir, code,
-                        finding.fingerprint or "exploit", finding.category,
-                        fork_url=self.config.get("fork_url"),
-                    )
-                    finding.metadata["differential"] = outcome.status
-                    if outcome.status == "patched-still-passes":
-                        last_err = "differential: exploit also passes on patched copy"
-                        continue
-                    if outcome.status == "vulnerable-failed":
-                        last_err = "differential: vulnerable run failed"
-                        continue
+                if self.config.get("enable_runtime_confirmation", True):
+                    # v3.6: the confirmation gate owns the verdict. The
+                    # ad-hoc pass + differential block is replaced by a
+                    # machine-verified checklist (impact evidence,
+                    # negative control, replay, source binding).
+                    verdict = self._confirmation_gate().evaluate(
+                        finding, adapter, target_path, code, ok, out)
+                    apply_verdict(finding, verdict)
+                    finding.metadata["differential"] = verdict.negative_control
+                    if verdict.confirmed:
+                        finding.poc_code = code
+                        finding.exploit_log = out
+                        self._capture_on_chain_tvl(finding, out)
+                        return
+                    last_err = f"confirmation gate: {verdict.reason}"
+                    continue
+                # Legacy path (gate disabled): sandbox pass is enough.
                 finding.status = "CONFIRMED EXPLOIT"
                 finding.poc_code = code
                 finding.exploit_log = out
@@ -1312,6 +1344,64 @@ class Scanner:
             last_err = out[-1500:]
         finding.status = f"POTENTIAL (PoC unconfirmed: {last_err[:200]})"
         finding.poc_code = code if 'code' in locals() else ""
+    def _confirmation_gate(self) -> ConfirmationGate:
+        """Build the confirmation gate for this scanner's configuration.
+
+        Constructed per call so the sandbox factory and differential
+        function resolve lazily (test fakes patch module attributes, and
+        config can flip between phases).
+        """
+        from web3guard.sandbox import create_sandbox
+        differential = run_differential \
+            if self.config.get("enable_differential", True) else None
+        return ConfirmationGate(
+            sandbox_factory=create_sandbox,
+            differential_fn=differential,
+            extract_impact=None,
+            workdir=self.workdir,
+            fork_url=self.config.get("fork_url"),
+            require_negative_control=bool(
+                self.config.get("require_negative_control", False)),
+        )
+
+    def _confirm_static_finding(
+        self,
+        adapter: LanguageAdapter,
+        finding: Finding,
+        target_path: Path,
+    ) -> None:
+        """Route a discovery-engine finding through the PoC loop.
+
+        Static findings previously dead-ended at POTENTIAL. They now get
+        the same AI-generated PoC + confirmation-gate treatment as AI
+        findings, using a synthesized chunk built from the finding's own
+        source window so the exploit model sees the flagged code first.
+        """
+        from web3guard.languages.base import Chunk
+        src = target_path / str(finding.file)
+        if not src.is_file():
+            return
+        try:
+            content = src.read_text(errors="ignore")
+        except OSError:
+            return
+        try:
+            line_start = max(1, int(str(finding.line_hint).split("-")[0]))
+        except (TypeError, ValueError):
+            line_start = 1
+        lines = content.splitlines()
+        lo = max(0, line_start - 12)
+        hi = min(len(lines), line_start + 24)
+        chunk = Chunk(
+            file=str(finding.file),
+            chunk_id=0,
+            content="\n".join(lines[lo:hi]),
+            kind="discovery-window",
+            lines=f"{lo + 1}-{hi}",
+            context=(finding.description or "")[:600],
+            language=adapter.language.value,
+        )
+        self._generate_poc(adapter, finding, chunk, target_path)
 
     @staticmethod
     def _repair_prompt(previous_code: str, last_err: str,

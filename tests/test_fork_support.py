@@ -217,7 +217,8 @@ class _CaptureSandbox:
 
     def __init__(self):
         self.kwargs: dict = {}
-        self.output = "PASSED\n  vuln_tvl: 5000000\n"
+        # Non-zero impact markers: the confirmation gate requires them.
+        self.output = "PASSED\n  vuln_tvl: 5000000\nimpact_gain: 100\n"
 
     def write_and_run(self, code, fingerprint, timeout=90):
         return True, self.output
@@ -261,6 +262,7 @@ def test_scanner_passes_fork_url_to_sandbox(tmp_path, monkeypatch):
            "fork_url": "https://rpc.example/v1"}
     ai = _FakeChat([ChatResponse(content=_valid_poc(), model="m")])
     scanner = Scanner(config=cfg, workdir=tmp_path, ai_client=ai)
+    (tmp_path / "Vault.sol").write_text("contract Vault {}", encoding="utf-8")
     finding = Finding(target="x", language="solidity", file="Vault.sol")
     scanner._generate_poc(_FakeAdapter(), finding, _chunk(), tmp_path)
     assert cap.kwargs.get("fork_url") == "https://rpc.example/v1"
@@ -274,6 +276,7 @@ def test_fork_hint_populated_when_fork_configured(tmp_path):
            "fork_url": "https://rpc.example/v1"}
     ai = _FakeChat([ChatResponse(content=_valid_poc(), model="m")])
     scanner = Scanner(config=cfg, workdir=tmp_path, ai_client=ai)
+    (tmp_path / "Vault.sol").write_text("contract Vault {}", encoding="utf-8")
     finding = Finding(target="x", language="solidity", file="Vault.sol")
     scanner._generate_poc(_FakeAdapter(), finding, _chunk(), tmp_path)
     assert ai.user_messages
@@ -288,6 +291,7 @@ def test_fork_hint_empty_when_no_fork(tmp_path):
            "enable_exploit": True, "max_exploit_attempts": 1}
     ai = _FakeChat([ChatResponse(content=_valid_poc(), model="m")])
     scanner = Scanner(config=cfg, workdir=tmp_path, ai_client=ai)
+    (tmp_path / "Vault.sol").write_text("contract Vault {}", encoding="utf-8")
     finding = Finding(target="x", language="solidity", file="Vault.sol")
     scanner._generate_poc(_FakeAdapter(), finding, _chunk(), tmp_path)
     assert ai.user_messages
@@ -306,6 +310,7 @@ def test_confirmed_poc_parses_vuln_tvl(tmp_path, monkeypatch):
            "fork_url": "https://rpc.example/v1"}
     ai = _FakeChat([ChatResponse(content=_valid_poc(), model="m")])
     scanner = Scanner(config=cfg, workdir=tmp_path, ai_client=ai)
+    (tmp_path / "Vault.sol").write_text("contract Vault {}", encoding="utf-8")
     finding = Finding(target="x", language="solidity", file="Vault.sol")
     scanner._generate_poc(_FakeAdapter(), finding, _chunk(), tmp_path)
     assert finding.status == "CONFIRMED EXPLOIT"
@@ -334,6 +339,7 @@ def test_scanner_forwards_fork_url_to_differential(tmp_path, monkeypatch):
            "fork_url": "https://rpc.example/v1"}
     ai = _FakeChat([ChatResponse(content=_valid_poc(), model="m")])
     scanner = Scanner(config=cfg, workdir=tmp_path, ai_client=ai)
+    (tmp_path / "Vault.sol").write_text("contract Vault {}", encoding="utf-8")
     finding = Finding(target="x", language="solidity", file="Vault.sol")
     scanner._generate_poc(_FakeAdapter(), finding, _chunk(), tmp_path)
     assert captured.get("fork_url") == "https://rpc.example/v1"

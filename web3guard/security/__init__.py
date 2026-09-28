@@ -45,6 +45,12 @@ either glossed over or implemented only as informational warnings:
      reports to a safe length to avoid path/env leakage.
 """
 
+from web3guard.security.confirmation import (
+    NO_NEGATIVE_CONTROL_CAP,
+    ConfirmationGate,
+    ConfirmationVerdict,
+    apply_verdict,
+)
 from web3guard.security.prompt_injection import (
     InjectionVerdict,
     PromptInjectionGuard,
@@ -56,6 +62,10 @@ from web3guard.security.sandbox_guard import (
 )
 
 __all__ = [
+    "ConfirmationGate",
+    "ConfirmationVerdict",
+    "NO_NEGATIVE_CONTROL_CAP",
+    "apply_verdict",
     "PromptInjectionGuard",
     "InjectionVerdict",
     "SandboxGuard",
