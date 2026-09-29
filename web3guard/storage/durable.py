@@ -35,6 +35,7 @@ from typing import Any
 
 from web3guard.storage.base import StorageBackend, StorageError
 from web3guard.storage.sqlite_backend import SqliteBackend
+from web3guard.storage.routing import StorageRouter
 
 LOGGER = logging.getLogger("web3guard.storage")
 
@@ -116,34 +117,49 @@ class DurableStore:
         Config keys (all optional, under ``storage:``)::
 
             storage:
-              findings_db_path: .web3guard/findings.db
+              durable_db_path: .web3guard/durable.db
               remote: auto            # auto | off
               retention:
                 cost_records_days: 180
         """
-        st = config.get("storage") if isinstance(config.get("storage"), dict) else {}
-        db_rel = (st or {}).get("findings_db_path") or config.get(
-            "findings_db_path", ".web3guard/findings.db")
-        db_path = Path(db_rel)
-        if not db_path.is_absolute():
-            db_path = Path(workdir) / db_path
-        local = SqliteBackend(db_path)
+        router = StorageRouter.from_config(Path(workdir), config)
+        local = SqliteBackend(router.durable_db_path)
         remote = None
-        mode = str((st or {}).get("remote", "auto")).lower()
-        if mode != "off":
+        if router.remote_configured and router.remote_mode != "off":
             import os
-            dsn = (
-                os.environ.get("SUPABASE_DB_URL")
-                or os.environ.get("POSTGRES_DSN") or ""
-            ).strip()
+            dsn = (os.environ.get(router.remote_dsn_env or "") or "").strip()
             if dsn:
                 from web3guard.storage.postgres_backend import PostgresBackend
                 try:
                     remote = PostgresBackend(dsn)
                 except StorageError as e:
+                    if router.remote_required:
+                        raise
                     LOGGER.warning("remote storage unavailable, local-only: %s", e)
-        retention_cfg = (st or {}).get("retention") or {}
-        return cls(local=local, remote=remote, retention=dict(retention_cfg))
+        retention_cfg = (
+            (config.get("storage") or {}).get("retention")
+            if isinstance(config.get("storage"), dict) else {}
+        ) or {}
+        store = cls(local=local, remote=remote, retention=dict(retention_cfg))
+        if router.remote_required:
+            if store.remote is None:
+                raise StorageError(
+                    "storage.remote=required but the remote backend could not be initialized"
+                )
+            remote_health = store.remote.health()
+            if not remote_health.ok:
+                raise StorageError(
+                    "storage.remote=required but the remote backend is unhealthy: "
+                    + remote_health.detail
+                )
+            try:
+                store.remote.query_all("SELECT 1 FROM scan_runs LIMIT 1")
+            except Exception as e:  # noqa: BLE001
+                raise StorageError(
+                    "storage.remote=required but the remote schema is unavailable: "
+                    + str(e)[:300]
+                ) from e
+        return store
 
     # ------------------------------------------------------------------
     # Schema
@@ -320,6 +336,28 @@ class DurableStore:
         self.local.execute(sql, values)
         self._replicate(table, row_key, dict(zip(cols, values, strict=True)))
 
+    def delete(self, table: str, row_key: str, row_value: Any) -> None:
+        """Delete a local row and replicate the deletion when configured."""
+        self.local.execute(
+            f"DELETE FROM {table} WHERE {row_key} = ?",
+            (row_value,),
+        )
+        if self.remote is None:
+            return
+        try:
+            self.remote.execute(
+                f"DELETE FROM {table} WHERE {row_key} = ?",
+                (row_value,),
+            )
+        except Exception as e:  # noqa: BLE001
+            self._enqueue_outbox(
+                table,
+                row_key,
+                {row_key: row_value},
+                str(e),
+                op="delete",
+            )
+
     def _replicate(self, table: str, row_key: str, values: dict[str, Any]) -> None:
         if self.remote is None:
             return
@@ -337,12 +375,13 @@ class DurableStore:
             self._enqueue_outbox(table, row_key, values, str(e))
 
     def _enqueue_outbox(self, table: str, row_key: str,
-                        values: dict[str, Any], error: str) -> None:
+                        values: dict[str, Any], error: str,
+                        *, op: str = "upsert") -> None:
         try:
             self.local.execute(
                 "INSERT INTO outbox (ts, table_name, op, row_key, payload, attempts, last_error)"
-                " VALUES (?, ?, 'upsert', ?, ?, 0, ?)",
-                (time.time(), table, row_key,
+                " VALUES (?, ?, ?, ?, ?, 0, ?)",
+                (time.time(), table, op, row_key,
                  json.dumps({k: v for k, v in values.items()}, default=str),
                  error[:500]),
             )
@@ -373,7 +412,7 @@ class DurableStore:
         if self.remote is None:
             return {"replayed": 0, "failed": 0, "dropped": 0}
         rows = self.local.query_all(
-            "SELECT id, table_name, row_key, payload, attempts, ts FROM outbox"
+            "SELECT id, table_name, op, row_key, payload, attempts, ts FROM outbox"
             " ORDER BY id ASC LIMIT ?", (limit,))
         replayed = failed = dropped = 0
         for row in rows:
@@ -495,27 +534,49 @@ class DurableStore:
         prompt_tokens: int, completion_tokens: int, cost_usd: float,
         role: str = "analysis", scan_id: str = "",
     ) -> None:
-        """Insert one cost record (the durable ledger budgets read from)."""
-        self.local.execute(
-            "INSERT INTO cost_records (timestamp, provider, model, "
-            "prompt_tokens, completion_tokens, cost_usd, role, scan_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (timestamp, provider, model, prompt_tokens, completion_tokens,
-             cost_usd, role, scan_id),
-        )
+        """Record cost in local durable ledger and remote replica."""
+        self.write("cost_records", "id", {
+            "id": int(time.time_ns()),
+            "timestamp": timestamp,
+            "provider": provider,
+            "model": model,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "cost_usd": cost_usd,
+            "role": role,
+            "scan_id": scan_id,
+        })
 
     def write_scan_run(
         self, *, started_at: str, finished_at: str, targets: int,
         findings: int, confirmed: int, cost_usd: float,
         status: str = "ok", metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Record a finished scan (dashboard/serve history + audit)."""
-        self.local.execute(
-            "INSERT INTO scan_runs (started_at, finished_at, targets, findings, "
-            "confirmed, cost_usd, status, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (started_at, finished_at, targets, findings, confirmed,
-             cost_usd, status, json.dumps(metadata or {}, default=str)),
-        )
+        """Record scan history in local durable ledger and remote replica."""
+        self.write("scan_runs", "id", {
+            "id": int(time.time_ns()),
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "targets": targets,
+            "findings": findings,
+            "confirmed": confirmed,
+            "cost_usd": cost_usd,
+            "status": status,
+            "metadata": metadata or {},
+        })
+
+    def record_state_event(
+        self, *, kind: str, key: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """Append a namespaced state event through the durable write router."""
+        self.write("state_events", "id", {
+            "id": int(time.time_ns()),
+            "ts": time.time(),
+            "kind": kind,
+            "key": key,
+            "payload": payload or {},
+        })
 
     def record_finding(self, record: Any) -> None:
         """Mirror a :class:`~web3guard.findings_db.FindingRecord` durably.

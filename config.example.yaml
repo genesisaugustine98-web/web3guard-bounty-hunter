@@ -121,6 +121,16 @@ report_formats: [txt, json, sarif, md]
 findings_db_path: .web3guard/findings.db
 cache_path:      .web3guard/llm_cache.db
 cost_db_path:    .web3guard/cost.db
+# Storage routing: durable.db is intentionally separate from findings.db.
+storage:
+  remote: auto
+  paths:
+    findings_db_path: .web3guard/findings.db
+    cost_db_path: .web3guard/cost.db
+    cache_path: .web3guard/llm_cache.db
+    durable_db_path: .web3guard/durable.db
+    reports_dir: reports
+  retention: {}
 
 # ----- Per-language enable/disable -----
 languages:

@@ -1,0 +1,8 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {QUEUE_OP_RESERVATION_PER_SCAN,SAFE_LIMITS,Web3GuardFreeGuard,utcDay,utcMonth} from "../bot/cloudflare_free_guard.js";
+function fakeState(){const values=new Map();return{storage:{async get(k){return values.get(k);},async put(k,v){values.set(k,v);}}};}
+async function post(guard,body){const response=await guard.fetch(new Request("https://test/admit",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)}));return{status:response.status,data:await response.json()};}
+test("daily cap is atomic and fail-closed",async()=>{const guard=new Web3GuardFreeGuard(fakeState());assert.equal((await post(guard,{reservations:[{metric:"scan_dispatches",units:1,limit:2}]})).status,200);assert.equal((await post(guard,{reservations:[{metric:"scan_dispatches",units:1,limit:2}]})).status,200);const blocked=await post(guard,{reservations:[{metric:"scan_dispatches",units:1,limit:2}]});assert.equal(blocked.status,429);assert.equal(blocked.data.error,"free_cap_reached");});
+test("per-chat rate limiting is distributed through the Durable Object",async()=>{const guard=new Web3GuardFreeGuard(fakeState());for(let i=0;i<5;i++)assert.equal((await post(guard,{rate:{key:"chat-1",limit:5,windowMs:60000}})).status,200);assert.equal((await post(guard,{rate:{key:"chat-1",limit:5,windowMs:60000}})).status,429);assert.equal((await post(guard,{rate:{key:"chat-2",limit:5,windowMs:60000}})).status,200);});
+test("calendar counters are UTC based and bounded",()=>{assert.equal(utcDay().length,10);assert.equal(utcMonth().length,7);assert.equal(QUEUE_OP_RESERVATION_PER_SCAN,5);assert.equal(SAFE_LIMITS.queueOpsPerDay,7000);assert.equal(SAFE_LIMITS.scanDispatchesPerDay,1000);});
