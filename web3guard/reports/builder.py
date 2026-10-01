@@ -61,6 +61,19 @@ class ReportBuilder:
     def _text(self) -> str:
         findings = list(self.result.all_findings)
         lines = ["Web3Guard Exploit Report", "=" * 24, f"Findings: {len(findings)}", ""]
+        errors = [(getattr(t, 'target', '?'), getattr(t, 'error', ''))
+                for t in self.result.targets if getattr(t, 'error', '')]
+        if errors:
+            lines.append("TARGET ERRORS (these targets were NOT scanned):")
+            for target, err in errors:
+                lines.append(f"  - {target}: {err}")
+            lines.append("")
+            if not findings:
+                lines.append(
+                    "WARNING: no targets were successfully scanned. "
+                    "A typo in the target path looks identical to a clean "
+                    "scan — verify the path above.")
+                lines.append("")
         for finding in findings:
             lines.extend([
                 f"[{finding.severity}] {finding.category or 'uncategorized'}",
@@ -75,6 +88,20 @@ class ReportBuilder:
     def _markdown(self) -> str:
         findings = list(self.result.all_findings)
         lines = ["# Web3Guard Exploit Report", "", f"**Findings:** {len(findings)}", ""]
+        errors = [(getattr(t, 'target', '?'), getattr(t, 'error', ''))
+                for t in self.result.targets if getattr(t, 'error', '')]
+        if errors:
+            lines.append("## Target errors (these targets were NOT scanned)")
+            lines.append("")
+            for target, err in errors:
+                lines.append(f"- `{target}`: {err}")
+            lines.append("")
+            if not findings:
+                lines.append(
+                    "> **WARNING:** no targets were successfully scanned. "
+                    "A typo in the target path looks identical to a clean "
+                    "scan — verify the paths above.")
+                lines.append("")
         for finding in findings:
             lines.extend([
                 f"## {finding.severity}: {finding.category or 'Uncategorized'}",
@@ -134,13 +161,34 @@ class ReportBuilder:
             f"<p><strong>Findings:</strong> {len(findings)} "
             f"&nbsp;|&nbsp; <strong>Confirmed:</strong> {len(self.result.confirmed_findings)} "
             f"&nbsp;|&nbsp; <strong>Targets:</strong> {len(self.result.targets)}</p>\n"
-            "<table>\n<thead><tr>"
+            + self._html_error_banner()
+            + "<table>\n<thead><tr>"
             "<th>Severity</th><th>Category</th><th>Location</th><th>Function</th>"
             "<th>Description</th><th>Status</th><th>Confidence</th>"
             "</tr></thead>\n<tbody>\n"
             + "\n".join(rows)
             + "\n</tbody>\n</table>\n</body>\n</html>\n"
         )
+
+    def _html_error_banner(self) -> str:
+        errors = [(getattr(t, 'target', '?'), getattr(t, 'error', ''))
+                for t in self.result.targets if getattr(t, 'error', '')]
+        if not errors:
+            return ""
+        items = "".join(
+            f"<li><code>{_html_escape(t)}</code>: {_html_escape(e)}</li>"
+            for t, e in errors)
+        warning = ""
+        if not list(self.result.all_findings):
+            warning = (
+                "<p><strong>WARNING:</strong> no targets were successfully "
+                "scanned. A typo in the target path looks identical to a "
+                "clean scan.</p>")
+        return (
+            "<div style=\"background:#fff3e0;border:1px solid #e65100;"
+            "padding:8px 12px;margin:8px 0;\">"
+            "<strong>Target errors (these targets were NOT scanned):</strong>"
+            f"<ul>{items}</ul>{warning}</div>\n")
 
     def _sarif(self) -> dict[str, Any]:
         results = []

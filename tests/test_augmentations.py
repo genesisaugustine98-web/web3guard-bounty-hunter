@@ -123,15 +123,20 @@ contract C {
     function ok1(uint256 amount) external { require(vesting[msg.sender] >= amount); t.transfer(msg.sender, amount); }
     // owner-only path: trusted, not flagged
     function ok2(uint256 amount) external onlyOwner { t.transfer(msg.sender, amount); }
-    // raw forwarding helper: low-level call is out of scope
-    function ok3(address to, uint256 amount) external { (bool s,) = to.call{value: amount}(""); require(s); }
+    // owner-only low-level call: trusted path, not flagged
+    function ok3(address to, uint256 amount) external onlyOwner { (bool s,) = to.call{value: amount}(""); require(s); }
     // FLAW: pays the parameter, ledger is a gate only (validation != auth)
     function bad(uint256 amount) external { require(vesting[msg.sender] > 0); t.transfer(msg.sender, amount); delete vesting[msg.sender]; }
+    // FLAW2: unguarded low-level call with a caller-chosen amount and
+    // destination — the cross-function taint tracker flags this even
+    // though the legacy payout detector scopes call{value:} out.
+    function bad2(address to, uint256 amount) external { (bool s,) = to.call{value: amount}(""); require(s); }
 }
 """
     found = {(r.category, r.function) for r in engine.run_text(src, "C.sol")
              if r.category == "uncontrolled-payout"}
-    assert found == {("uncontrolled-payout", "bad")}
+    assert found == {("uncontrolled-payout", "bad"),
+                     ("uncontrolled-payout", "bad2")}
 
 
 def test_uncontrolled_payout_ported_languages() -> None:
@@ -831,3 +836,50 @@ def test_bench_cli_validate_corpus(tmp_path: Path) -> None:
 
     assert _cmd_bench(BadArgs()) == 1
 
+
+
+# ---------------------------------------------------------------------------
+# Target-error surfacing (a typo'd path must not look like a clean scan)
+# ---------------------------------------------------------------------------
+
+
+def _error_result() -> ScanResult:
+    bad = SimpleNamespace(target="/bad/path", findings=[],
+                          error="failed to clone or locate target '/bad/path'")
+    return ScanResult(started_at="s", finished_at="e", config={},
+                      targets=[bad])
+
+
+def test_txt_report_surfaces_target_errors(tmp_path: Path) -> None:
+    written = ReportBuilder(_error_result()).write(tmp_path, formats=["txt"])
+    txt = written["txt"].read_text(encoding="utf-8")
+    assert "TARGET ERRORS" in txt
+    assert "/bad/path" in txt
+    assert "WARNING" in txt
+    # Must not read as a clean scan.
+    assert "Findings: 0\n" in txt  # count still shown...
+    assert "verify the path" in txt  # ...but flagged as suspicious
+
+
+def test_md_report_surfaces_target_errors(tmp_path: Path) -> None:
+    written = ReportBuilder(_error_result()).write(tmp_path, formats=["md"])
+    md = written["md"].read_text(encoding="utf-8")
+    assert "Target errors" in md
+    assert "/bad/path" in md
+    assert "WARNING" in md
+
+
+def test_html_report_surfaces_target_errors(tmp_path: Path) -> None:
+    written = ReportBuilder(_error_result()).write(tmp_path, formats=["html"])
+    html = written["html"].read_text(encoding="utf-8")
+    assert "Target errors" in html
+    assert "/bad/path" in html
+
+
+def test_reports_omit_error_section_when_clean(tmp_path: Path) -> None:
+    good = SimpleNamespace(target="/good", findings=[], error="")
+    result = ScanResult(started_at="s", finished_at="e", config={},
+                        targets=[good])
+    written = ReportBuilder(result).write(tmp_path, formats=["txt", "md"])
+    assert "TARGET ERRORS" not in written["txt"].read_text(encoding="utf-8")
+    assert "Target errors" not in written["md"].read_text(encoding="utf-8")

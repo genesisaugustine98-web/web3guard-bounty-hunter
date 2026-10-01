@@ -822,3 +822,89 @@ def test_cli_parallel_merge_keeps_metadata_and_survives_chunk_failure(tmp_path):
     # merged metadata survives (fixup) + chunk error recorded
     assert report["metadata"].get("cost_ceiling") == "fake ceiling"
     assert any("chunk" in e for e in report["metadata"]["batch_chunk_errors"])
+
+
+def test_cli_scan_returns_3_when_all_targets_fail(tmp_path, capsys):
+    """A typo'd path must not exit 0 looking like a clean scan."""
+    from unittest import mock
+
+    from web3guard.cli import _cmd_scan
+    cfg: dict = {
+        "ai_providers": [{
+            "type": "openai-compatible", "name": "fake",
+            "base_url": "http://127.0.0.1:9/v1",
+            "api_key_env": "NO_SUCH_KEY_XYZ", "rpm": 1000,
+        }],
+        "enable_discovery": False, "enable_ai_analysis": False,
+    }
+
+
+    from web3guard.languages import TargetLanguage
+    from web3guard.scanner import Scanner, ScanResult, TargetResult
+
+    def _fake_scan(self, targets, min_severity=None):
+        result = ScanResult(started_at="s", finished_at="e", config={})
+        result.targets = [
+            TargetResult(target=str(t), language=TargetLanguage.UNKNOWN,
+                         error=f"failed to clone or locate target {t!r}")
+            for t in targets]
+        result.cost_summary = {"total_cost_usd": 0.0, "calls": 0}
+        return result
+
+    args = mock.Mock(
+        targets=["/nonexistent/typo-path"], targets_file=None, parallel=1,
+        config=None, workdir=tmp_path, no_exploit=False,
+        no_self_critique=False, discovery_only=True, ai_only=False,
+        fork_url=None, seed=None, scan_dependencies=False,
+        min_severity="LOW", formats=["txt"], out=tmp_path / "reports")
+    with mock.patch.object(Scanner, "scan", _fake_scan), \
+            mock.patch("web3guard.cli.load_config", return_value=dict(cfg)):
+        rc = _cmd_scan(args)
+
+    assert rc == 3
+    err = capsys.readouterr().err
+    assert "not scanned" in err
+    assert "typo-path" in err
+
+
+def test_cli_scan_returns_0_on_partial_failure(tmp_path, capsys):
+    """One bad target + one good target: exit 0, error still surfaced."""
+    from unittest import mock
+
+    from web3guard.cli import _cmd_scan
+    cfg: dict = {
+        "ai_providers": [{
+            "type": "openai-compatible", "name": "fake",
+            "base_url": "http://127.0.0.1:9/v1",
+            "api_key_env": "NO_SUCH_KEY_XYZ", "rpm": 1000,
+        }],
+        "enable_discovery": False, "enable_ai_analysis": False,
+    }
+
+
+    from web3guard.languages import TargetLanguage
+    from web3guard.scanner import Scanner, ScanResult, TargetResult
+
+    def _fake_scan(self, targets, min_severity=None):
+        result = ScanResult(started_at="s", finished_at="e", config={})
+        result.targets = [
+            TargetResult(target="/bad", language=TargetLanguage.UNKNOWN,
+                         error="failed to clone or locate target '/bad'"),
+            TargetResult(target="/good", language=TargetLanguage.SOLIDITY),
+        ]
+        result.cost_summary = {"total_cost_usd": 0.0, "calls": 0}
+        return result
+
+    args = mock.Mock(
+        targets=["/bad", "/good"], targets_file=None, parallel=1,
+        config=None, workdir=tmp_path, no_exploit=False,
+        no_self_critique=False, discovery_only=True, ai_only=False,
+        fork_url=None, seed=None, scan_dependencies=False,
+        min_severity="LOW", formats=["txt"], out=tmp_path / "reports")
+    with mock.patch.object(Scanner, "scan", _fake_scan), \
+            mock.patch("web3guard.cli.load_config", return_value=dict(cfg)):
+        rc = _cmd_scan(args)
+
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "/bad" in err

@@ -103,15 +103,19 @@ class ConfirmationGate:
     # Individual checks
     # ------------------------------------------------------------------
 
-    def _ground(self, target_path: Path, finding: Any) -> str | None:
-        """Resolve the finding's file and bind its hash. Returns an error
-        string when the finding cannot be grounded (ghost finding)."""
+    def _ground(self, target_path: Path, finding: Any) -> Path | None:
+        """Resolve the finding's file and bind its hash.
+
+        Returns the resolved path, or None when the finding cannot be
+        grounded (ghost finding). The SHA-256 is stored in
+        ``finding.metadata["source_sha256"]``.
+        """
         candidate = target_path / str(finding.file)
         path = candidate if candidate.is_file() else Path(str(finding.file))
         if not path.is_file():
-            return f"source file not found: {finding.file}"
+            return None
         finding.metadata["source_sha256"] = file_sha256(path)
-        return None
+        return path
 
     @staticmethod
     def _impact_of(output: str) -> tuple[int, int] | None:
@@ -161,9 +165,10 @@ class ConfirmationGate:
         source_sha = ""
 
         # 1. Grounding — no file, no confirmation.
-        err = self._ground(target_path, finding)
-        if err is not None:
-            return ConfirmationVerdict(False, err, checks)
+        ground_path = self._ground(target_path, finding)
+        if ground_path is None:
+            return ConfirmationVerdict(
+                False, f"source file not found: {finding.file}", checks)
         source_sha = str(finding.metadata.get("source_sha256", ""))
         checks["grounding"] = "bound"
         checks["source_sha256"] = source_sha[:12]
@@ -200,6 +205,14 @@ class ConfirmationGate:
 
         # 4+5. Replay on an independent second sandbox run, after
         #     re-verifying the source bytes still hash to what we bound.
+        #     A mutation between grounding and replay (TOCTOU) must fail
+        #     loudly instead of confirming against different bytes.
+        if file_sha256(ground_path) != source_sha:
+            return ConfirmationVerdict(
+                False, "source changed during confirmation "
+                "(hash mismatch before replay)", checks,
+                impact_gain=gain, impact_loss=loss, source_sha256=source_sha)
+        checks["source_reverified"] = "bound"
         replay = self._sandbox_factory(
             adapter, target_path, self._workdir, fork_url=self._fork_url)
         if replay is None:

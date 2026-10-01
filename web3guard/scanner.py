@@ -307,6 +307,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "use_ai_planning": True,
     "enable_self_critique": True,
     "enable_attack_sequence_brainstorm": True,
+    # Red-team layer (v3.5): attacker-framed hypothesis generation +
+    # defender refutation + exploitability triage, as an alternative to
+    # the single-pass auditor-framed analysis. Opt-in: it costs extra LLM
+    # calls per chunk. Findings are marked tool_consensus=["redteam"].
+    "enable_redteam": False,
+    "redteam_max_hypotheses": 5,
+    "redteam_enable_defense": True,
+    "redteam_enable_triage": True,
+    "redteam_min_severity": "MEDIUM",
     "enable_role_map": True,
     "enable_secret_scan": True,
     "enable_incremental_scan": False,
@@ -929,6 +938,18 @@ class Scanner:
                     seen_fps.add(analyzed.fingerprint)
                     if self._severity_at_least(analyzed.severity, min_severity):
                         tr.findings.append(analyzed)
+                # Red-team layer: attacker-framed hypotheses that survived
+                # defensive refutation become findings in their own right.
+                if self.config.get("enable_redteam", False):
+                    for ch in chunks_to_analyze:
+                        for rt_finding in self._redteam_chunk(
+                            adapter, ch, target_path, target
+                        ):
+                            if rt_finding.fingerprint in seen_fps:
+                                continue
+                            seen_fps.add(rt_finding.fingerprint)
+                            if self._severity_at_least(rt_finding.severity, min_severity):
+                                tr.findings.append(rt_finding)
             # Optional post-scan passes (deterministic, offline).
             if self.config.get("enable_attack_sequence_brainstorm", True):
                 tr.attack_sequences[lang] = self._attack_sequences(adapter, target_path)
@@ -1200,6 +1221,80 @@ class Scanner:
         if self.config.get("enable_economic_analyzer", True):
             self._economic_analyzer(finding)
         return finding
+
+    def _redteam_chunk(
+        self,
+        adapter: LanguageAdapter,
+        chunk: Any,
+        target_path: Path,
+        target_url: str,
+    ) -> list[Finding]:
+        """Run the red-team loop on one chunk; survivors become findings."""
+        from web3guard.ai.redteam import CrossContractContext, RedTeamAnalyzer
+
+        findings: list[Finding] = []
+        try:
+            rt_config = {
+                "redteam_max_hypotheses": int(
+                    self.config.get("redteam_max_hypotheses", 5)),
+                "redteam_enable_defense": bool(
+                    self.config.get("redteam_enable_defense", True)),
+                "redteam_enable_triage": bool(
+                    self.config.get("redteam_enable_triage", True)),
+            }
+            analyzer = RedTeamAnalyzer(self.ai_client, rt_config)
+            try:
+                xctx = CrossContractContext(target_path)
+                extra_context = xctx.for_file(chunk.file, chunk.content)
+            except Exception:  # noqa: BLE001
+                extra_context = ""
+            context = (chunk.context or "") + (
+                "\n" + extra_context if extra_context else "")
+            report = analyzer.analyze(
+                chunk.content,
+                file=chunk.file,
+                language=adapter.language.value,
+                context=context,
+            )
+        except Exception as e:  # noqa: BLE001
+            LOGGER.warning("red-team analysis failed on %s: %s", chunk.file, e)
+            return findings
+        min_sev = str(self.config.get("redteam_min_severity", "MEDIUM"))
+        for h in report.survivors:
+            if not self._severity_at_least(h.severity, min_sev):
+                continue
+            confidence = h.confidence
+            if h.exploitability_score > 0:
+                confidence = (h.confidence + h.exploitability_score) / 2.0
+            description = h.title
+            if h.attack_path:
+                description += "\nAttack path:\n" + "\n".join(
+                    f"{i + 1}. {s}" for i, s in enumerate(h.attack_path))
+            reasoning = (
+                f"Survived defensive refutation. {h.defense_failure_note}"
+                if h.defense_failure_note else
+                "Survived defensive refutation."
+            )
+            finding = Finding(
+                target=target_url,
+                language=adapter.language.value,
+                file=chunk.file,
+                function=h.target_function,
+                category=h.category or "redteam",
+                severity=h.severity,
+                confidence=round(max(0.0, min(1.0, confidence)), 3),
+                description=description.strip(),
+                reasoning=reasoning.strip(),
+                line_hint=chunk.lines or "",
+            )
+            finding.tool_consensus = ["redteam"]
+            finding.metadata["redteam_hypothesis_id"] = h.id
+            finding.metadata["redteam_primitive"] = h.primitive
+            finding.metadata["redteam_prerequisites"] = h.prerequisites
+            finding.metadata["redteam_exploitability"] = h.exploitability_score
+            finding.fingerprint = self._fingerprint(finding)
+            findings.append(finding)
+        return findings
 
     def _apply_reachability(
         self, reachability: ReachabilityAnalyzer, finding: Finding

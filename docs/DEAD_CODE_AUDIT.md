@@ -1,5 +1,8 @@
-# Web3Guard v3.6.1 — Dead Code & Wiring Audit
+# Web3Guard v3.4.0 — Dead Code & Wiring Audit
 Date: 2026-09-28
+> Note: an earlier revision of this document was titled "v3.6.1"; that
+> version number was aspirational. The audit was performed against the
+> v3.4.0 codebase, which is what this title now reflects.
 Scope: full package cross-reference (AST), CLI surface, docs claims vs reality
 
 ## Method
@@ -20,7 +23,7 @@ Scope: full package cross-reference (AST), CLI surface, docs claims vs reality
 ## Unwired code — WIRED
 1. `web3guard/accel` (PythonAccelerator/RustAccelerator/accelerator +
    native/web3guard-accel Rust crate, ~700 lines incl. crate):
-   v3.5 feature, never imported outside itself. Wired into the Gitleaks
+   v3.4 feature, never imported outside itself. Wired into the Gitleaks
    discovery engine's builtin regex fallback via a single `secret_matches`
    helper on the accelerator — exact rule parity guaranteed:
    - native covers 7/8 SECRET_PATTERNS regexes (identical patterns verified);

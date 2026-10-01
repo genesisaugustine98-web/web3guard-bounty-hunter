@@ -1,4 +1,4 @@
-"""Tests for the machine-verified confirmation gate (v3.6).
+"""Tests for the machine-verified confirmation gate (v3.4).
 
 "No fakes, no hallucination": a finding earns CONFIRMED EXPLOIT only
 from reproducible machine evidence. These tests pin every gate check —
@@ -391,3 +391,82 @@ def test_gate_disabled_keeps_static_findings_unconfirmed(
     assert vault  # still discovered and reported
     assert all(f.status != "CONFIRMED EXPLOIT" for f in vault)
     assert _Spy.calls == 0  # exploit loop never ran for static findings
+
+
+# ---------------------------------------------------------------------------
+# Mutation tests: the gate must not confirm against mutated source bytes
+# ---------------------------------------------------------------------------
+
+
+def test_toctou_mutation_before_replay_is_refused(target: Path) -> None:
+    """Mutate the source between grounding and replay: the gate must
+    refuse, not confirm against different bytes with the old hash.
+
+    The mutation lands inside the negative-control step (the realistic
+    TOCTOU window: grounding -> differential -> re-verify -> replay).
+    """
+    vault = target / "Vault.sol"
+    original = vault.read_text(encoding="utf-8")
+
+    def _mutating_differential(*a, **k):
+        # Attacker (or a concurrent edit) patches the file after
+        # grounding but before the replay re-verification.
+        vault.write_text(original.replace(
+            "balances[msg.sender] = 0;",
+            "balances[msg.sender] = 0; // patched"), encoding="utf-8")
+        return DifferentialOutcome("confirmed")
+
+    factory = _SeqFactory([_IMPACT])
+    gate = _gate(factory, differential=_mutating_differential)
+    verdict = gate.evaluate(_Finding(), _Adapter(), target, "// poc",
+                            True, "impact_gain: 100")
+    assert not verdict.confirmed
+    assert "changed during confirmation" in verdict.reason
+    assert verdict.checks.get("source_reverified") is None
+    # The bound hash still refers to the pre-mutation bytes.
+    assert verdict.source_sha256
+
+
+def test_mutation_after_grounding_keeps_original_hash(target: Path) -> None:
+    """Even when refused, the verdict's hash must identify the bytes that
+    were actually analyzed — never the mutated ones."""
+    import hashlib
+    vault = target / "Vault.sol"
+    original = vault.read_text(encoding="utf-8")
+    original_hash = hashlib.sha256(original.encode()).hexdigest()
+
+    def _mutating_differential(*a, **k):
+        vault.write_text(original + "\n// trailing comment\n",
+                         encoding="utf-8")
+        return DifferentialOutcome("confirmed")
+
+    factory = _SeqFactory([_IMPACT])
+    gate = _gate(factory, differential=_mutating_differential)
+    verdict = gate.evaluate(_Finding(), _Adapter(), target, "// poc",
+                            True, "impact_gain: 100")
+    assert not verdict.confirmed
+    assert verdict.source_sha256 == original_hash
+
+
+def test_unmutated_source_passes_reverification(target: Path) -> None:
+    """Sanity: without mutation the new re-verification check passes and
+    a fully-evidenced finding still confirms."""
+    factory = _SeqFactory([_IMPACT])
+    gate = _gate(factory, differential=lambda *a, **k: DifferentialOutcome(
+        "confirmed"))
+    verdict = gate.evaluate(_Finding(), _Adapter(), target, "// poc",
+                            True, "impact_gain: 100")
+    assert verdict.confirmed
+    assert verdict.checks["source_reverified"] == "bound"
+
+
+def test_negative_control_mutation_kills_exploit(target: Path) -> None:
+    """The differential mutator patches the vuln; if the PoC still passes
+    on the patched copy, confirmation is refused (exploit not specific)."""
+    factory = _SeqFactory([_IMPACT])
+    gate = _gate(factory, differential=lambda *a, **k: DifferentialOutcome(
+        "patched-still-passes"))
+    verdict = gate.evaluate(_Finding(), _Adapter(), target, "// poc",
+                            True, "impact_gain: 100")
+    assert not verdict.confirmed
+    assert "negative control failed" in verdict.reason

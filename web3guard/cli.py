@@ -436,6 +436,16 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     if denied:
         print(f"Scope-denied targets (not scanned): {len(denied)} — "
               "see config 'allow:' / 'require_authorized_scope'.")
+    # Surface per-target errors loudly: a typo'd path must never look
+    # like a clean scan. Exit 3 when *no* target was successfully scanned.
+    errored = [t for t in result.targets if t.error]
+    for t in errored:
+        print(f"ERROR: target not scanned: {t.target}: {t.error}",
+              file=sys.stderr)
+    if result.targets and len(errored) == len(result.targets):
+        print("ERROR: no targets were successfully scanned — "
+              "check the target paths above.", file=sys.stderr)
+        return 3
     return 0
 
 

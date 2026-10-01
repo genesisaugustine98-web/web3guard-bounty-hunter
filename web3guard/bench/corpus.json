@@ -6,28 +6,33 @@
       "path": "test_contracts/vulnerable/ReentrancyVault.sol",
       "language": "solidity",
       "vulnerabilities": [
-        "reentrancy"
+        "reentrancy",
+        "floating-pragma"
       ]
     },
     {
       "path": "test_contracts/vulnerable/AccessControlFlaw.sol",
       "language": "solidity",
       "vulnerabilities": [
-        "access-control"
+        "access-control",
+        "floating-pragma"
       ]
     },
     {
       "path": "test_contracts/vulnerable/OracleManipulation.sol",
       "language": "solidity",
       "vulnerabilities": [
-        "oracle-manipulation"
+        "oracle-manipulation",
+        "floating-pragma"
       ]
     },
     {
       "path": "test_contracts/vulnerable/SignatureReplay.sol",
       "language": "solidity",
       "vulnerabilities": [
-        "signature-replay"
+        "signature-replay",
+        "floating-pragma",
+        "signature-malleability"
       ]
     },
     {
@@ -38,21 +43,24 @@
         "proxy-upgrade",
         "unprotected-init",
         "delegatecall",
-        "selfdestruct"
+        "selfdestruct",
+        "floating-pragma"
       ]
     },
     {
       "path": "test_contracts/vulnerable/RandomnessLottery.sol",
       "language": "solidity",
       "vulnerabilities": [
-        "randomness"
+        "randomness",
+        "floating-pragma"
       ]
     },
     {
       "path": "test_contracts/vulnerable/ArithmeticVault.sol",
       "language": "solidity",
       "vulnerabilities": [
-        "arithmetic"
+        "arithmetic",
+        "floating-pragma"
       ]
     },
     {
@@ -69,7 +77,8 @@
       "language": "move",
       "vulnerabilities": [
         "missing-acquires",
-        "access-control"
+        "access-control",
+        "denial-of-service"
       ]
     },
     {
@@ -111,7 +120,8 @@
       "vulnerabilities": [
         "slippage",
         "unlimited-approval",
-        "signature-replay"
+        "signature-replay",
+        "secret-leak"
       ]
     },
     {
@@ -179,14 +189,16 @@
       "path": "test_contracts/vulnerable/TxOriginLottery.sol",
       "language": "solidity",
       "vulnerabilities": [
-        "tx-origin"
+        "tx-origin",
+        "floating-pragma"
       ]
     },
     {
       "path": "test_contracts/vulnerable/SpotOracle.sol",
       "language": "solidity",
       "vulnerabilities": [
-        "oracle-manipulation"
+        "oracle-manipulation",
+        "floating-pragma"
       ]
     },
     {
@@ -225,7 +237,8 @@
       "language": "solidity",
       "vulnerabilities": [
         "uncontrolled-payout",
-        "arithmetic"
+        "arithmetic",
+        "floating-pragma"
       ]
     }
   ]

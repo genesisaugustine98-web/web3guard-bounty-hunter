@@ -375,6 +375,20 @@ _SWC = {
     "slippage": "SWC-108",
     "denial-of-service": "SWC-113",
     "front-running": "SWC-114",
+    "floating-pragma": "SWC-103",
+    "deprecated": "SWC-111",
+    "uninitialized-storage": "SWC-109",
+    "timestamp-dependence": "SWC-116",
+    "arbitrary-storage-write": "SWC-124",
+    "hash-collision": "SWC-133",
+    "private-data": "SWC-136",
+    "default-visibility": "SWC-100",
+    "rtl-override": "SWC-130",
+    "shadowing": "SWC-119",
+    "hardcoded-gas": "SWC-134",
+    "strict-balance-equality": "SWC-132",
+    "signature-malleability": "SWC-117",
+    "typographical-error": "SWC-129",
 }
 
 
@@ -424,6 +438,334 @@ def _detect_uncontrolled_payout_solidity(
             "the caller is owed.",
             function=name, confidence=0.75))
         break
+    return issues
+
+
+_TAINT_IDENT_RE = re.compile(r"[A-Za-z_]\w*")
+_TAINT_KEYWORDS = frozenset({
+    "function", "if", "else", "for", "while", "return", "require",
+    "assert", "revert", "uint", "uint8", "uint16", "uint32", "uint64",
+    "uint128", "uint256", "int", "int8", "int256", "address", "bool",
+    "bytes", "bytes32", "string", "memory", "calldata", "storage",
+    "public", "private", "internal", "external", "view", "pure",
+    "payable", "true", "false", "new", "delete", "emit", "unchecked",
+})
+# Value-transfer sinks whose amount expression is group(1).
+_TAINT_VALUE_SINKS = (
+    (re.compile(r"\.call\s*\{\s*value\s*:\s*([^{}();]+?)\s*\}\s*\("),
+     "call{value:}"),
+    (re.compile(r"\.transfer\s*\(\s*([^,();]+?)\s*\)"), ".transfer()"),
+    (re.compile(r"\.send\s*\(\s*([^,();]+?)\s*\)"), ".send()"),
+)
+
+
+def _taint_paren_args(body: str, open_idx: int) -> tuple[str, int]:
+    """Return (arg_string, index_after_close) for the paren at open_idx."""
+    depth = 0
+    i = open_idx
+    while i < len(body):
+        ch = body[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return body[open_idx + 1:i], i + 1
+        i += 1
+    return "", len(body)
+
+
+def _taint_split_args(args: str) -> list[str]:
+    """Split an argument string on top-level commas."""
+    parts: list[str] = []
+    depth = 0
+    cur: list[str] = []
+    for ch in args:
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    parts.append("".join(cur))
+    return parts
+
+
+def _taint_idents(expr: str) -> set[str]:
+    return set(_TAINT_IDENT_RE.findall(expr)) - _TAINT_KEYWORDS
+
+
+class _SolidityTaint:
+    """Inter-procedural taint tracking for Solidity (heuristic).
+
+    Tracks which identifiers in each function are influenced by caller
+    input (parameters, ``msg.sender``), propagating through assignments.
+    Taint is *killed* when a value is derived from protocol state
+    (state variables, mapping/array reads, ``balanceOf``), because such
+    values are no longer purely attacker-controlled. Findings cover two
+    shapes the per-function detectors miss:
+
+    - **direct**: a value-transfer sink whose amount is tainted through
+      local assignment chains (``x`` -> ``y = x * 2`` -> ``call{value:
+      y}``);
+    - **flow**: a public/external entry point whose input reaches a
+      tainted sink in another function via internal call hops.
+    """
+
+    def __init__(self, content: str):
+        self.fns: list[tuple[str, str, int, str, set[str]]] = []
+        for name, body, start_line, _br, sig in _iter_braced_functions(
+                content, "solidity"):
+            self.fns.append(
+                (name, body, start_line, sig, _param_names(sig)))
+        self.by_name = {n: (b, sl, sg, p) for n, b, sl, sg, p in self.fns}
+        self.state_vars = set(_solidity_state_vars(content))
+        # influences[fn][ident] = params (or {"msg.sender"}) shaping it
+        self.influences: dict[str, dict[str, set[str]]] = {}
+        for name, body, _sl, _sg, params in self.fns:
+            self.influences[name] = self._local_influences(body, params)
+        # calls[caller] = [(callee, [arg_exprs])]
+        self.calls: dict[str, list[tuple[str, list[str]]]] = {}
+        for name, body, _sl, _sg, _p in self.fns:
+            self.calls[name] = self._call_sites(name, body)
+        # reportable taint sinks: fn -> list of (kind, line_offset_hint)
+        self.taint_sinks: dict[str, list[str]] = {}
+        for name, body, _sl, _sg, params in self.fns:
+            kinds = self._direct_taint_sinks(name, body, params)
+            if kinds:
+                self.taint_sinks[name] = kinds
+
+    def _local_influences(
+            self, body: str, params: set[str]) -> dict[str, set[str]]:
+        inf: dict[str, set[str]] = {p: {p} for p in params}
+        inf["msg.sender"] = {"msg.sender"}
+        inf["tx.origin"] = {"tx.origin"}
+        for _ in range(6):  # bounded fixpoint for loops/reassignment
+            changed = False
+            for m in re.finditer(
+                    r"(?<![\w$.])([A-Za-z_]\w*)\s*=\s*([^;{}]+);", body):
+                lhs, rhs = m.group(1), m.group(2)
+                if lhs in params:
+                    continue
+                rhs_ids = _taint_idents(rhs)
+                if "[" in rhs or rhs_ids & self.state_vars \
+                        or "balanceOf(" in rhs or "allowance(" in rhs:
+                    new = set()  # protocol-derived: taint killed
+                elif re.search(r"msg\.sender|tx\.origin", rhs):
+                    new = set().union(
+                        *(inf.get(r, set()) for r in rhs_ids),
+                        {"msg.sender"})
+                else:
+                    new = set().union(
+                        *(inf.get(r, set()) for r in rhs_ids))
+                if inf.get(lhs, set()) != new:
+                    inf[lhs] = new
+                    changed = True
+            if not changed:
+                break
+        return inf
+
+    def _call_sites(
+            self, name: str, body: str) -> list[tuple[str, list[str]]]:
+        out: list[tuple[str, list[str]]] = []
+        for m in re.finditer(r"(?<![\w$.])([A-Za-z_]\w*)\s*\(", body):
+            callee = m.group(1)
+            if callee == name or callee not in self.by_name:
+                continue
+            args_str, _ = _taint_paren_args(body, m.end() - 1)
+            out.append((callee, _taint_split_args(args_str)))
+        return out
+
+    def _influencing_params(
+            self, fn: str, expr: str) -> set[str]:
+        """Params of ``fn`` (or msg.sender) shaping ``expr``.
+
+        ``msg.sender``/``tx.origin`` count only as *value* sources, not
+        when they appear inside ``[...]`` as a mapping key
+        (``balances[msg.sender]`` is ledger-derived, not tainted).
+        """
+        inf = self.influences[fn]
+        out: set[str] = set()
+        for ident in _taint_idents(expr):
+            out |= inf.get(ident, set())
+        deindexed = re.sub(r"\[[^\[\]]*\]", "", expr)
+        if re.search(r"msg\.sender|tx\.origin", deindexed):
+            out.add("msg.sender")
+        return out
+
+    def _direct_taint_sinks(
+            self, name: str, body: str, params: set[str]) -> list[str]:
+        """Kinds of reportable tainted value sinks directly in ``body``.
+
+        Skips ledger-shaped payouts (owned by the dedicated payout
+        detector), guarded (trusted) functions, and amounts bounded by
+        an on-chain check.
+        """
+        _b, _sl, sig, _p = self.by_name[name]
+        if _PAYOUT_LEDGER_RE.search(sig + " " + body):
+            return []
+        if _GUARD_RE.search(sig + " " + body):
+            return []  # trusted path: owner/admin-only
+        # Meta-transaction pattern: parameters covered by an ecrecover
+        # signature check are signer-authorized, not attacker-controlled.
+        sig_auth_idents: set[str] = set()
+        if "ecrecover" in body:
+            for m in re.finditer(r"abi\.encode(?:Packed)?\s*\(", body):
+                window = body[m.start():m.start() + 400]
+                sig_auth_idents |= _taint_idents(window)
+        kinds: list[str] = []
+        for sink_re, kind in _TAINT_VALUE_SINKS:
+            for m in sink_re.finditer(body):
+                amount = m.group(1).strip()
+                if not amount or amount == "msg.value":
+                    continue  # plain forwarding is the safe pattern
+                idents = _taint_idents(amount)
+                shaping = self._influencing_params(name, amount)
+                if not shaping:
+                    continue
+                if idents & sig_auth_idents:
+                    continue  # signer-authorized via ecrecover, not attacker-chosen
+                # The bound check must not mistake a tainted local's own
+                # initialization (``uint y = x * 2;``) for a clamp, so
+                # mask the first assignment of each non-param ident.
+                check_body = body
+                for ident in idents - params:
+                    check_body = re.sub(
+                        rf"\b{re.escape(ident)}\b\s*=\s*[^;]+;",
+                        " ", check_body, count=1)
+                if not _payout_amount_is_unbounded(check_body, idents):
+                    continue  # bounded by an on-chain check
+                kinds.append(kind)
+                break
+        return kinds
+
+    def entry_flows(self) -> list[tuple[str, int, str, str, str]]:
+        """(entry_fn, line, entry_param, sink_fn, sink_kind) flows from
+        public/external entry points to tainted sinks via call hops."""
+        flows: list[tuple[str, int, str, str, str]] = []
+        # reaches[fn] = {param: (next_hop, sink_fn, sink_kind)}
+        reaches: dict[str, dict[str, tuple[str, str, str]]] = {
+            n: {} for n, _b, _sl, _sg, _p in self.fns}
+        for _ in range(6):
+            changed = False
+            for caller, sites in self.calls.items():
+                _b, _sl, _sg, cparams = self.by_name[caller]
+                for callee, args in sites:
+                    _gb, _gsl, _gsg, gparams = self.by_name[callee]
+                    glist = sorted(gparams)
+                    for i, gp in enumerate(glist):
+                        if i >= len(args):
+                            continue
+                        # does gp reach a taint sink in callee?
+                        hop: tuple[str, str, str] | None = None
+                        if gp in self._sink_shaping_params(callee):
+                            hop = (callee, callee,
+                                   self.taint_sinks[callee][0])
+                        elif gp in reaches[callee]:
+                            _nh, _sf, _sk = reaches[callee][gp]
+                            hop = (callee, _sf, _sk)
+                        if hop is None:
+                            continue
+                        for qp in cparams:
+                            if qp in _taint_idents(args[i]) or qp in \
+                                    self._influencing_params(
+                                        caller, args[i]):
+                                if qp not in reaches[caller]:
+                                    reaches[caller][qp] = hop
+                                    changed = True
+            if not changed:
+                break
+        for name, _body, start_line, sig, _params in self.fns:
+            if name in self.taint_sinks:
+                continue  # direct finding already reported there
+            if not re.search(r"\bexternal\b|\bpublic\b", sig):
+                continue
+            if _GUARD_RE.search(sig):
+                continue  # trusted entry: owner/admin-only
+            for qp, (_hop, sink_fn, kind) in reaches[name].items():
+                flows.append((name, start_line, qp, sink_fn, kind))
+        # keep one flow per entry function (the first is enough signal)
+        seen: set[str] = set()
+        uniq: list[tuple[str, int, str, str, str]] = []
+        for f in flows:
+            if f[0] not in seen:
+                seen.add(f[0])
+                uniq.append(f)
+        return uniq
+
+    def _sink_shaping_params(self, fn: str) -> set[str]:
+        """Params of ``fn`` shaping its reportable tainted sinks."""
+        if fn not in self.taint_sinks:
+            return set()
+        body, _sl, _sg, params = self.by_name[fn]
+        sig_auth_idents: set[str] = set()
+        if "ecrecover" in body:
+            for m in re.finditer(r"abi\.encode(?:Packed)?\s*\(", body):
+                window = body[m.start():m.start() + 400]
+                sig_auth_idents |= _taint_idents(window)
+        out: set[str] = set()
+        for sink_re, _kind in _TAINT_VALUE_SINKS:
+            for m in sink_re.finditer(body):
+                amount = m.group(1).strip()
+                if not amount or amount == "msg.value":
+                    continue
+                idents = _taint_idents(amount)
+                if idents & sig_auth_idents:
+                    continue
+                if not self._influencing_params(fn, amount):
+                    continue
+                check_body = body
+                for ident in idents - params:
+                    check_body = re.sub(
+                        rf"\b{re.escape(ident)}\b\s*=\s*[^;]+;",
+                        " ", check_body, count=1)
+                if not _payout_amount_is_unbounded(check_body, idents):
+                    continue
+                out |= (self._influencing_params(fn, amount) & params)
+        return out
+
+
+def _detect_solidity_taint(content: str, rel: str) -> list[StaticIssue]:
+    """Cross-function taint tracking for Solidity value flows."""
+    issues: list[StaticIssue] = []
+    try:
+        taint = _SolidityTaint(content)
+    except Exception:
+        return issues
+    for name, _body, start_line, _sg, _p in taint.fns:
+        kinds = taint.taint_sinks.get(name)
+        if not kinds:
+            continue
+        # Direct findings only on externally reachable functions: a
+        # private/internal function's parameters are attacker-controlled
+        # only if a public entry feeds them tainted input, which the
+        # flow findings below cover. Reporting the sink in isolation
+        # would misattribute storage-derived arguments
+        # (e.g. games[msg.sender]) as attacker-controlled.
+        _fb, _fsl, fsig, _fp = taint.by_name[name]
+        if re.search(r"\b(?:private|internal)\b", fsig) or \
+                name == "constructor":
+            continue
+        issues.append(_issue(
+            rel, start_line, "uncontrolled-payout", "HIGH",
+            "Tainted value reaches a transfer sink",
+            f"{name}() sends a value derived from caller-controlled "
+            f"input to {kinds[0]} with no on-chain bound; an attacker "
+            "chooses the amount. Bound it against an entitlement ledger "
+            "or a fixed limit.",
+            function=name, confidence=0.7))
+    for entry, line, param, sink_fn, kind in taint.entry_flows():
+        issues.append(_issue(
+            rel, line, "uncontrolled-payout", "HIGH",
+            "Caller input flows to a transfer sink via internal calls",
+            f"{entry}() takes caller-controlled '{param}' and passes it "
+            f"through internal calls to {sink_fn}(), where it reaches "
+            f"{kind} with no on-chain bound. Validate or bound the value "
+            "at the entry point.",
+            function=entry, confidence=0.65))
     return issues
 
 
@@ -534,7 +876,131 @@ def _detect_uncontrolled_payout_ts(
     return issues
 
 
+_STATE_VAR_DECL_RE = re.compile(
+    r"(?m)(?:^|[;{}])\s*(?:uint\d*|int\d*|address|bool|bytes\d*|string)"
+    r"(?:\s*\[\s*\d*\s*\])?\s+(?:public|private|internal|external)?\s*"
+    r"([A-Za-z0-9_]+)\s*(?:=[^;]*)?;")
+
+def _local_decl_names(body: str) -> set[str]:
+    """Names declared as locals in a function body.
+
+    Only the declared identifier of each declarator is returned —
+    identifiers inside initializer expressions do not count.
+    """
+    names: set[str] = set()
+    for m in re.finditer(
+            r"\b(?:uint\d*|int\d*|address|bool|bytes\d*|string)\b([^;{}]*?);",
+            body):
+        for part in m.group(1).split(","):
+            pm = re.match(
+                r"\s*(?:\[[^\]]*\]\s*)*"
+                r"(?:(?:memory|calldata|storage)\s+)?"
+                r"([A-Za-z_][A-Za-z0-9_]*)", part)
+            if pm:
+                names.add(pm.group(1))
+    return names
+
+
+def _solidity_state_vars(content: str) -> dict[str, int]:
+    """Contract-level state variables as {name: decl_line}.
+
+    Function bodies and struct/enum definitions are masked first so
+    locals and struct members are never mistaken for state.
+    """
+    masked = list(content)
+    for m in re.finditer(r"\b(?:struct|enum)\s+[A-Za-z0-9_]+\s*\{", content):
+        end = _brace_body(content, m.end() - 1)
+        for i in range(m.start(), end):
+            masked[i] = " "
+    for _n, body, _sl, brace, _sig in _iter_braced_functions(
+            content, "solidity"):
+        for i in range(brace, brace + len(body)):
+            masked[i] = " "
+    scope = "".join(masked)
+    out: dict[str, int] = {}
+    for m in _STATE_VAR_DECL_RE.finditer(scope):
+        var = m.group(1)
+        if var not in out:
+            out[var] = scope[:m.start()].count("\n") + 1
+    return out
+
+
+def _var_writes(body: str, sig: str, var: str) -> bool:
+    """True if the function assigns to the state variable ``var``.
+
+    Shadowed occurrences (a local or parameter with the same name) do
+    not count. Comparisons (==, !=, <=, >=) and ``=>`` are not writes.
+    """
+    esc = re.escape(var)
+    if var in _param_names(sig):
+        return False
+    if var in _local_decl_names(body):
+        return False
+    if re.search(rf"\b{esc}\s*(?:\+\+|--|\+=|-=|\*=|/=|%=)", body):
+        return True
+    for m in re.finditer(rf"\b{esc}(?=\s*=(?![=>]))", body):
+        j = m.end()
+        while j < len(body) and body[j] in " \t":
+            j += 1
+        k = j - 1
+        while k > m.end() and body[k] in " \t":
+            k -= 1
+        if body[k] not in ("!", "<", ">"):
+            return True
+    return False
+
+
+def _var_payment_amount(body: str, var: str) -> bool:
+    """True if ``var`` is passed as the *amount* of a value transfer.
+
+    This is the theft anchor for transaction-order dependence: the
+    contract itself decides how much the victim pays from a mutable
+    variable (``token.transferFrom(victim, owner, price)``), as opposed
+    to merely bounding ``msg.value`` (fail-safe: a moved bound reverts).
+    """
+    esc = re.escape(var)
+    if re.search(rf"\.(?:transfer|send)\s*\(\s*{esc}\b", body):
+        return True
+    if re.search(rf"\btransferFrom\s*\([^)]*\b{esc}\b", body):
+        return True
+    if re.search(rf"\.call\s*\{{\s*[^}}]*\bvalue\s*:\s*{esc}\b", body):
+        return True
+    return False
+
+
+def _var_economic_read(body: str, var: str) -> bool:
+    """True if ``var`` is read in an economic decision.
+
+    Either it is compared against the caller's committed funds
+    (``require(msg.value >= price)``), or it is passed as the amount of
+    a value transfer (transfer / send / call{value:} / transferFrom).
+    """
+    esc = re.escape(var)
+    for m in re.finditer(r"\b(?:require|if|assert)\s*\(", body):
+        depth = 1
+        j = m.end()
+        while j < len(body) and depth:
+            if body[j] == "(":
+                depth += 1
+            elif body[j] == ")":
+                depth -= 1
+            j += 1
+        cond = body[m.end():j]
+        if re.search(rf"\b{esc}\b", cond) and "msg.value" in cond:
+            return True
+    if re.search(rf"\.(?:transfer|send)\s*\(\s*{esc}\b", body):
+        return True
+    if re.search(rf"transferFrom\s*\([^)]*\b{esc}\b", body):
+        return True
+    if re.search(rf"\.call\s*\{{\s*[^}}]*\bvalue\s*:\s*{esc}\b", body):
+        return True
+    return False
+
+
 def _detect_solidity(content: str, rel: str) -> list[StaticIssue]:
+    # The RTL-override check runs on the raw source: comment stripping
+    # would eat a U+202E hiding inside a comment.
+    raw_content = content
     content = _clean_code(content, "solidity")
     issues: list[StaticIssue] = []
     has_owner = bool(_OWNER_VAR_RE.search(content))
@@ -545,6 +1011,9 @@ def _detect_solidity(content: str, rel: str) -> list[StaticIssue]:
     contract_names = {
         m.group(1) for m in re.finditer(r"\bcontract\s+([A-Za-z0-9_]+)", content)
     }
+    # File-level facts reused by the SWC batch below.
+    _is_pre05 = bool(re.search(r"pragma\s+solidity\s*[^;]*0\.[0-4]\b", content))
+    _struct_names = set(re.findall(r"\bstruct\s+([A-Za-z0-9_]+)", content))
 
     for name, body, start_line, _, sig in _iter_braced_functions(content, "solidity"):
         lines = body.splitlines()
@@ -919,6 +1388,168 @@ def _detect_solidity(content: str, rel: str) -> list[StaticIssue]:
                 "address is attacker-controllable the whole storage layout "
                 "is compromised.", function=name, confidence=0.7))
 
+        # 11. Conventional weakness shapes (SWC batch).
+        # 11a. Deprecated idioms (SWC-111): throw / suicide / sha3 /
+        # block.blockhash are removed or discouraged; their presence
+        # signals unmaintained, pre-best-practice code.
+        if re.search(r"(?<![A-Za-z0-9_.])throw\s*;|"
+                     r"(?<![A-Za-z0-9_])suicide\s*\(|"
+                     r"(?<![A-Za-z0-9_.])sha3\s*\(|"
+                     r"block\.blockhash\s*\(", body):
+            issues.append(_issue(
+                rel, start_line, "deprecated", "LOW",
+                "Deprecated Solidity idiom",
+                f"{name}() uses a deprecated idiom (throw / suicide / "
+                "sha3 / block.blockhash); migrate to revert/require, "
+                "selfdestruct, keccak256, blockhash.",
+                function=name, confidence=0.9))
+        # 11b. Uninitialized storage pointer (SWC-109): pre-0.5, a local
+        # struct/array declared without a data location or initializer
+        # points at storage slot 0 and silently overwrites state
+        # (including ownership slots).
+        if _is_pre05:
+            stor_hit = False
+            for sname in _struct_names:
+                if re.search(rf"(?:^|[;{{}}])\s*{re.escape(sname)}\s+"
+                             r"[A-Za-z0-9_]+\s*;", body):
+                    stor_hit = True
+                    break
+            if not stor_hit and re.search(
+                    r"(?:^|[;{}])\s*(?:uint\d*|int\d*|address|bytes\d*)\s*"
+                    r"\[\s*\d*\s*\]\s+[A-Za-z0-9_]+\s*;", body):
+                stor_hit = True
+            if stor_hit:
+                issues.append(_issue(
+                    rel, start_line, "uninitialized-storage", "HIGH",
+                    "Uninitialized storage pointer",
+                    f"{name}() declares a local struct/array without a "
+                    "data location or initializer; pre-0.5 Solidity "
+                    "points it at storage slot 0, so writes silently "
+                    "corrupt contract state.",
+                    function=name, confidence=0.7))
+        # 11c. Arbitrary storage write via assembly (SWC-124): sstore to
+        # a slot that is a bare variable or derived from calldata can
+        # clobber any storage, including ownership slots. Slots
+        # computed with keccak256/add (normal mapping math) are out of
+        # scope.
+        for _m in re.finditer(r"\bsstore\s*\(\s*([^,)]+)", body):
+            slot = _m.group(1).strip()
+            if re.fullmatch(r"0[xX][0-9a-fA-F]+|\d+", slot):
+                continue
+            if re.search(r"keccak256|sha3|\badd\s*\(|\bmul\s*\(", slot):
+                continue
+            issues.append(_issue(
+                rel, start_line + body[:_m.start()].count("\n"),
+                "arbitrary-storage-write", "HIGH",
+                "Assembly sstore to a non-constant slot",
+                f"{name}() writes storage slot '{slot}' from inline "
+                "assembly; if the slot is attacker-influenced (calldata "
+                "or an unconstrained variable) any storage — including "
+                "ownership — can be overwritten.",
+                function=name, confidence=0.65))
+            break
+        # 11d. Hash collision via abi.encodePacked (SWC-133):
+        # keccak256(abi.encodePacked(a, b)) can collide when two or more
+        # *dynamically-sized* arguments sit adjacently (e.g. ("ab","c")
+        # vs ("a","bc")); fixed-size arguments (address, uint, bytes32)
+        # cannot collide, so they are out of scope. Use abi.encode.
+        _hcm = re.search(r"keccak256\s*\(\s*abi\.encodePacked\s*\(", body)
+        if _hcm:
+            _depth, _j = 1, _hcm.end()
+            while _j < len(body) and _depth:
+                if body[_j] == "(":
+                    _depth += 1
+                elif body[_j] == ")":
+                    _depth -= 1
+                _j += 1
+            _args = body[_hcm.end():_j - 1]
+            # split on top-level commas only
+            _parts: list[str] = []
+            _d = 0
+            _cur: list[str] = []
+            for _ch in _args:
+                if _ch in "([":
+                    _d += 1
+                elif _ch in ")]":
+                    _d -= 1
+                if _ch == "," and _d == 0:
+                    _parts.append("".join(_cur))
+                    _cur = []
+                else:
+                    _cur.append(_ch)
+            _parts.append("".join(_cur))
+            # Resolve bare identifiers against the function's parameter
+            # types: `encodePacked(a, b)` is only dangerous when a and b
+            # are dynamically-sized (e.g. string params).
+            _ptypes: dict[str, str] = {}
+            _pm = re.search(r"\((.*?)\)", sig)
+            if _pm:
+                for _pp in _pm.group(1).split(","):
+                    _ptm = re.match(
+                        r"\s*([A-Za-z0-9_\[\]]+)", _pp.strip())
+                    if _ptm:
+                        _pwords = _pp.strip().split()
+                        _pname = _pwords[-1] if _pwords else ""
+                        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", _pname):
+                            _ptypes[_pname] = _ptm.group(1)
+
+            def _is_dynamic_arg(p: str, _pt: dict[str, str] = _ptypes) -> bool:
+                p = p.strip()
+                if re.search(r"\bstring\b|\bbytes(?!\d)|\[", p):
+                    return True
+                m_id = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)", p)
+                if m_id:
+                    t = _pt.get(m_id.group(1), "")
+                    if re.search(r"string|\bbytes(?!\d)|\[", t):
+                        return True
+                return False
+
+            _dynamic = [p for p in _parts if _is_dynamic_arg(p)]
+            if len(_dynamic) >= 2:
+                issues.append(_issue(
+                    rel, start_line, "hash-collision", "MEDIUM",
+                    "keccak256(abi.encodePacked(...)) with dynamic args",
+                    f"{name}() hashes adjacent dynamically-sized "
+                    "arguments with abi.encodePacked; their boundaries "
+                    "blur and distinct inputs can collide (e.g. "
+                    "(\"ab\", \"c\") vs (\"a\", \"bc\")). Use abi.encode.",
+                    function=name, confidence=0.7))
+        # 11e. Hardcoded gas stipend (SWC-134): .gas(N) breaks when
+        # opcode costs change (EIP-150 class); forward all gas or make
+        # the stipend configurable.
+        if re.search(r"\.\s*gas\s*\(\s*\d+\s*\)", body):
+            issues.append(_issue(
+                rel, start_line, "hardcoded-gas", "LOW",
+                "Hardcoded gas stipend in .gas(N)",
+                f"{name}() hardcodes a gas stipend; opcode repricing "
+                "can break the call. Forward all gas or make the "
+                "stipend configurable.",
+                function=name, confidence=0.8))
+        # 11f. Probable typographical error (SWC-129): '=+' / '=!' are
+        # never legitimate ('= -' with a space is unary negation and is
+        # left alone as ambiguous).
+        if re.search(r"=[+!]", body):
+            issues.append(_issue(
+                rel, start_line, "typographical-error", "MEDIUM",
+                "Probable typographical error (=+ / =!)",
+                f"{name}() contains '=+' or '=!' — almost certainly a "
+                "typo for '+=' / '!=' or '= !'.",
+                function=name, confidence=0.6))
+        # 11g. Signature malleability (SWC-117): ecrecover without an
+        # s-value range check accepts both (r, s) and (r, n-s) as valid
+        # signatures for the same message.
+        if re.search(r"\becrecover\s*\(", body) and not re.search(
+                r"7fffffffffffffffffffffffffffffff5d576e7357a450abbdabb9edd4968b47|"
+                r"secp256k1n|half_n|ECDSA", content, re.IGNORECASE):
+            issues.append(_issue(
+                rel, start_line, "signature-malleability", "MEDIUM",
+                "ecrecover without s-value malleability check",
+                f"{name}() recovers a signer with ecrecover but never "
+                "constrains s to the lower half of the curve order; "
+                "both (r, s) and (r, n-s) validate, enabling signature "
+                "replay within the same chain.",
+                function=name, confidence=0.7))
+
         # 12. Short-address attack exposure (SWC-127): a state-changing
         # (address, uint) entrypoint that moves value, on pre-0.5 code —
         # the era where the ABI encoder accepted right-padded addresses
@@ -985,6 +1616,202 @@ def _detect_solidity(content: str, rel: str) -> list[StaticIssue]:
                 "front-run a new approval and spend both the old and the "
                 "new allowance (use increaseAllowance/decreaseAllowance).",
                 function=name, confidence=0.7))
+
+    # ---- Cross-function state analysis --------------------------------
+    # The per-function loop above cannot see races where function A acts
+    # on a state value that a *different* function B can move between the
+    # user's signing and the transaction's mining.
+    fns = [(n, b, sl, sg)
+           for n, b, sl, _br, sg in _iter_braced_functions(content, "solidity")]
+    state_vars = _solidity_state_vars(content)
+
+    # ---- File-level conventional shapes -------------------------------
+    def _line_at(idx: int) -> int:
+        return content[:idx].count("\n") + 1
+
+    # 15. Floating pragma (SWC-103): an unlocked version range lets a
+    # future (or past) compiler with known bugs build this code.
+    _pm = re.search(r"pragma\s+solidity\s*([^;]+);", content)
+    if _pm and re.search(r"[\^><]", _pm.group(1)):
+        issues.append(_issue(
+            rel, _line_at(_pm.start()), "floating-pragma", "LOW",
+            "Floating pragma (unlocked compiler version)",
+            "The pragma allows a range of compiler versions; lock it to "
+            "a single tested release.",
+            confidence=0.9))
+    # 16. Right-to-left override (SWC-130): an invisible Unicode control
+    # character that flips displayed code order — a trojan-source
+    # vector that hides malicious logic from reviewers.
+    if "\u202e" in raw_content:
+        issues.append(_issue(
+            rel, raw_content[:raw_content.find("\u202e")].count("\n") + 1,
+            "rtl-override", "HIGH",
+            "Right-to-left override character in source",
+            "The source contains U+202E, which reverses displayed text "
+            "order and can hide malicious logic from reviewers.",
+            confidence=0.95))
+    # 17. Function default visibility (SWC-100): pre-0.5 functions
+    # without an explicit visibility default to public.
+    if _is_pre05:
+        for name, _b, start_line, sig in fns:
+            if name in contract_names or \
+                    name in ("constructor", "fallback", "receive"):
+                continue
+            if not re.search(r"\b(?:public|private|internal|external)\b", sig):
+                issues.append(_issue(
+                    rel, start_line, "default-visibility", "LOW",
+                    "Function without explicit visibility (defaults public)",
+                    f"{name}() declares no visibility; pre-0.5 Solidity "
+                    "defaults it to public. Declare it explicitly.",
+                    function=name, confidence=0.85))
+    # 18. Shadowing (SWC-119): a parameter or local reusing a state
+    # variable name — code inside the function silently touches the
+    # wrong variable.
+    for var in state_vars:
+        esc = re.escape(var)
+        for name, body, start_line, sig in fns:
+            if var in _param_names(sig) or var in _local_decl_names(body):
+                issues.append(_issue(
+                    rel, start_line, "shadowing", "LOW",
+                    f"'{var}' shadowed in {name}()",
+                    f"{name}() declares '{var}' as a parameter/local, "
+                    "shadowing the state variable; code inside the "
+                    "function touches the wrong variable.",
+                    function=name, confidence=0.75))
+                break
+    # 19. Unencrypted private data (SWC-136): `private` is not secret —
+    # all chain state is readable. Flag secret-looking names.
+    for _m in re.finditer(
+            r"(?m)(?:^|[;{}])\s*(?:uint\d*|int\d*|address|bool|bytes\d*|string)"
+            r"(?:\s*\[\s*\d*\s*\])?\s+private\s+([A-Za-z0-9_]*(?:password|"
+            r"secret|seed|private[_ ]?key|mnemonic|pin)[A-Za-z0-9_]*)\s*"
+            r"(?:=[^;]*)?;", content, re.IGNORECASE):
+        issues.append(_issue(
+            rel, _line_at(_m.start()), "private-data", "LOW",
+            f"Secret-looking private state '{_m.group(1)}'",
+            f"State variable '{_m.group(1)}' looks like a secret, but "
+            "`private` only hides it from other contracts — anyone can "
+            "read it from chain state. Commit/reveal or encrypt.",
+            confidence=0.6))
+    # 20. Strict ether-balance equality (SWC-132): `== this.balance`
+    # breaks when anyone force-feeds ether via selfdestruct.
+    _bm = re.search(
+        r"address\s*\(\s*this\s*\)\s*\.balance\s*==|"
+        r"==\s*address\s*\(\s*this\s*\)\s*\.balance|"
+        r"\bthis\.balance\s*==|==\s*this\.balance\b", content)
+    if _bm:
+        issues.append(_issue(
+            rel, _line_at(_bm.start()), "strict-balance-equality", "MEDIUM",
+            "Strict equality on contract ether balance",
+            "Comparing `this.balance` with `==` assumes the balance only "
+            "changes via payable functions; anyone can force-feed ether "
+            "with selfdestruct and break the invariant. Use `>=`.",
+            confidence=0.75))
+    # 21. Strict timestamp equality (SWC-116): miners control
+    # block.timestamp within a window, so `==` can be dodged forever.
+    _tm = re.search(
+        r"block\.timestamp\s*==|==\s*block\.timestamp|"
+        r"\bnow\s*==|==\s*now\b", content)
+    if _tm:
+        issues.append(_issue(
+            rel, _line_at(_tm.start()), "timestamp-dependence", "MEDIUM",
+            "Strict equality on block.timestamp",
+            "Branching on `block.timestamp == X` assumes exact miner "
+            "behavior; miners can shift timestamps and dodge the "
+            "condition forever. Use a range.",
+            confidence=0.7))
+
+    # 13. Privileged mutable payment amount — transaction-order
+    # dependence (SWC-114): a state variable is used as the *amount* of
+    # a value transfer in an unguarded function A (the victim's path),
+    # but a different, privileged function B can rewrite it.
+    # (RaceCondition: the owner front-runs buy() with changePrice() so
+    # the victim's transferFrom pays the raised price.) Bounds checked
+    # against msg.value are deliberately excluded: moving a bound is
+    # fail-safe (the victim's transaction reverts); moving the amount
+    # actually steals. Constructor / initializer writes are
+    # deployment-time, not races.
+    for var in state_vars:
+        for name, body, start_line, sig in fns:
+            if name in contract_names or name in ("constructor", "initialize"):
+                continue
+            if _GUARD_RE.search(sig + body):
+                continue  # privileged reader: no victim
+            if not _var_payment_amount(body, var):
+                continue
+            for w_name, w_body, _w_sl, w_sig in fns:
+                if w_name == name or w_name in contract_names or \
+                        w_name in ("constructor", "initialize"):
+                    continue
+                if "private" in w_sig or "internal" in w_sig:
+                    continue
+                if not _GUARD_RE.search(w_sig + w_body):
+                    continue  # writer must be privileged for this shape
+                if not _var_writes(w_body, w_sig, var):
+                    continue
+                issues.append(_issue(
+                    rel, start_line, "front-running", "MEDIUM",
+                    "Privileged mutable payment amount (order dependence)",
+                    f"{name}() transfers an amount taken from state "
+                    f"variable '{var}', but privileged {w_name}() can "
+                    "rewrite it; a watcher can front-run the victim's "
+                    "transaction with a state change so the victim pays "
+                    "or transfers an unexpected amount.",
+                    function=name, confidence=0.7))
+                break
+            else:
+                continue
+            break
+
+    # 14. Plaintext game-move front-running (odds_and_evens class,
+    # SWC-114): a payable entrypoint records (msg.sender, uint-param)
+    # moves in plaintext while a payout is decided from those stored
+    # moves, and the file has no commit-reveal scheme. A mempool
+    # watcher sees the first player's move and submits a winning move
+    # with a higher gas price.
+    if not re.search(r"keccak256|sha3", content):
+        storing: tuple[str, int, str] | None = None  # (fn, line, container)
+        for name, body, start_line, sig in fns:
+            if "payable" not in sig:
+                continue
+            uint_params = [
+                p for p in _param_names(sig)
+                if re.search(rf"\buint\d*\s+{re.escape(p)}\b", sig)]
+            for p in uint_params:
+                esc = re.escape(p)
+                m_struct = re.search(
+                    r"([A-Za-z0-9_]+)\s*\[\s*[^\]\n]{0,40}\s*\]\s*=\s*"
+                    rf"[A-Za-z0-9_]+\s*\([^)\n]{{0,120}}msg\.sender"
+                    rf"[^)\n]{{0,120}}{esc}\b", body)
+                m_map = re.search(
+                    rf"([A-Za-z0-9_]+)\s*\[\s*msg\.sender\s*\]\s*=\s*{esc}\b",
+                    body)
+                m_store = m_struct or m_map
+                if m_store:
+                    storing = (name, start_line, m_store.group(1))
+                    break
+            if storing:
+                break
+        if storing:
+            s_name, s_line, container = storing
+            payout_reads_container = any(
+                re.search(r"\.send\s*\(|\.transfer\s*\(|\.call\s*(?:\{|\()", b)
+                and re.search(rf"\b{re.escape(container)}\b", b)
+                for _n, b, _sl, _sg in fns)
+            if payout_reads_container:
+                issues.append(_issue(
+                    rel, s_line, "front-running", "HIGH",
+                    "Plaintext game move (front-runnable, no commit-reveal)",
+                    f"{s_name}() records a player's move as a plaintext "
+                    "uint while a payout is decided from those stored "
+                    "moves, and the contract has no commit-reveal scheme; "
+                    "a watcher seeing the first move in the mempool can "
+                    "submit a winning move with a higher gas price.",
+                    function=s_name, confidence=0.65))
+    # 8b2. Cross-function taint tracking: caller-controlled values
+    # reaching value-transfer sinks through assignment chains or
+    # internal call hops (module-level analysis, runs once per file).
+    issues.extend(_detect_solidity_taint(content, rel))
     return issues
 
 
@@ -1055,6 +1882,51 @@ def _detect_move(content: str, rel: str) -> list[StaticIssue]:
             "A struct holding privileged state has the `copy` ability, so "
             "it can be duplicated and exfiltrated.",
             confidence=0.6))
+    for name, body, start_line, _, sig in _iter_braced_functions(content, "move"):
+        decl = f"{sig} {body[:200]}"
+        # Move-A1. State-mutating entry point with no signer: `entry`
+        # functions are directly transaction-callable, so global state
+        # writes without a signer are unauthenticated.
+        if re.search(r"entry\s+fun", decl) \
+                and "&signer" not in sig \
+                and re.search(r"borrow_global_mut\s*<|move_to\s*\(|"
+                             r"move_from\s*<", body):
+            issues.append(_issue(
+                rel, start_line, "access-control", "HIGH",
+                "Entry function mutates global state without a signer",
+                f"{name}() is a public entry point that writes global "
+                "state but takes no &signer, so anyone can invoke it and "
+                "the writes are unauthenticated. Require a signer and "
+                "authorize against it.",
+                function=name, confidence=0.75))
+        # Move-A2. move_from without an exists<> guard aborts when the
+        # resource was never published (robustness / griefing surface).
+        if re.search(r"move_from\s*<", body) \
+                and not re.search(r"exists\s*<", body):
+            issues.append(_issue(
+                rel, start_line, "denial-of-service", "LOW",
+                "move_from without an exists<> guard",
+                f"{name}() removes a resource with move_from but never "
+                "checks exists<> first; the transaction aborts if the "
+                "resource was never published. Guard with an exists<> "
+                "check for a clean error path.",
+                function=name, confidence=0.7))
+        # Move-A3. Unrestricted mint: a transaction-reachable function
+        # that mints coins without demanding a MintCapability lets anyone
+        # inflate the supply.
+        if re.search(rf"(?:public|entry)\s+(?:entry\s+)?fun\s+{re.escape(name)}\b",
+                     content) \
+                and re.search(r"::mint\s*\(|::burn\s*\(", body) \
+                and "MintCapability" not in sig \
+                and "BurnCapability" not in sig:
+            issues.append(_issue(
+                rel, start_line, "access-control", "HIGH",
+                "Unrestricted coin mint/burn",
+                f"{name}() is public and mints or burns coins without "
+                "requiring a MintCapability/BurnCapability, so anyone can "
+                "inflate or destroy supply. Gate minting behind the "
+                "capability.",
+                function=name, confidence=0.7))
     return issues
 
 
@@ -1091,6 +1963,36 @@ def _detect_cairo(content: str, rel: str) -> list[StaticIssue]:
                 "This l1_handler processes inbound messages with no nonce "
                 "or deduplication, so an L1 message can be re-executed.",
                 confidence=0.65))
+    # Cairo-A1. Ownership takeover: an external entry point writes the
+    # owner/admin field without checking who is calling.
+    for m in re.finditer(r"#\[external[^\]]*\]", content):
+        line = content[: m.start()].count("\n") + 1
+        segment = content[m.start(): m.start() + 1500]
+        if re.search(r"self\.(?:owner|admin|authority)\.write\s*\(",
+                     segment) \
+                and not re.search(r"caller", segment, re.IGNORECASE):
+            issues.append(_issue(
+                rel, line, "access-control", "HIGH",
+                "External function rewrites owner without caller check",
+                "An external entry point writes the owner/admin storage "
+                "field with no caller authorization, so anyone can seize "
+                "ownership. Check get_caller_address() against the current "
+                "owner first.",
+                confidence=0.75))
+    # Cairo-A2. Block timestamp feeding randomness (modulo / lottery):
+    # sequencers influence timestamps, so winners are manipulable.
+    for m in re.finditer(r"get_block_timestamp\s*\(\s*\)", content):
+        line = content[: m.start()].count("\n") + 1
+        window = content[max(0, m.start() - 300): m.start() + 500]
+        if re.search(r"%|lotter|winner|dice|\brand\b", window,
+                     re.IGNORECASE):
+            issues.append(_issue(
+                rel, line, "randomness", "MEDIUM",
+                "Block timestamp used as randomness",
+                "get_block_timestamp() feeds a modulo/lottery decision; "
+                "the sequencer can nudge timestamps and bias the outcome. "
+                "Use a VRF or commit-reveal scheme instead.",
+                confidence=0.7))
     return issues
 
 
@@ -1153,6 +2055,61 @@ def _detect_clarity(content: str, rel: str) -> list[StaticIssue]:
             "Public functions do not define post-conditions, so callers "
             "cannot enforce transfer limits inside the transaction "
             "envelope.", confidence=0.4))
+    # Clarity-A1. unwrap-panic inside a public function: anyone can feed
+    # input that trips the panic and grief the contract (DoS).
+    for m in re.finditer(r"\(unwrap-panic\b", content):
+        line = content[: m.start()].count("\n") + 1
+        # only meaningful when reachable from a public entry point
+        head = content[: m.start()]
+        pub = head.rfind("(define-public")
+        priv = head.rfind("(define-private")
+        if pub > priv:
+            issues.append(_issue(
+                rel, line, "denial-of-service", "MEDIUM",
+                "unwrap-panic reachable from a public function",
+                "unwrap-panic aborts the whole transaction on unexpected "
+                "input; inside define-public an attacker can deliberately "
+                "trigger it to grief callers. Handle the none case "
+                "explicitly instead.",
+                confidence=0.65))
+    # Clarity-A2. Discarded transfer response: (stx-transfer? ...) whose
+    # response is thrown away ((ok true) follows) hides failures.
+    for m in re.finditer(r"\((?:stx|ft|nft)-transfer\?", content):
+        line = content[: m.start()].count("\n") + 1
+        tail = content[m.start(): m.start() + 900]
+        head = content[max(0, m.start() - 120): m.start()]
+        next_def = re.search(r"\(define-", tail)
+        window = tail[: next_def.start()] if next_def else tail
+        # a wrapping try!/asserts!/unwrap!/match before or after the call
+        # means the response is handled
+        handled = re.search(
+            r"asserts!|try!|unwrap!|unwrap-panic|is-ok|match\b",
+            head + window)
+        if re.search(r"\(ok\b", window) and not handled:
+            issues.append(_issue(
+                rel, line, "unchecked-external-call", "MEDIUM",
+                "Token transfer response is discarded",
+                "The transfer's response is ignored and the function "
+                "returns (ok ...) anyway, so a failed transfer looks "
+                "successful. Check the response with try!/asserts!.",
+                confidence=0.7))
+    # Clarity-A3. Privileged var-set in a public function with no
+    # caller check: anyone can rewrite admin state.
+    for m in re.finditer(r"\(define-public\s+\(([\w-]+)", content):
+        fname = m.group(1)
+        line = content[: m.start()].count("\n") + 1
+        tail = content[m.start(): m.start() + 1500]
+        next_def = re.search(r"\(define-", tail[20:])
+        window = tail[: 20 + next_def.start()] if next_def else tail
+        if re.search(r"\(var-set\s+", window) \
+                and not re.search(r"tx-sender|contract-caller", window):
+            issues.append(_issue(
+                rel, line, "access-control", "MEDIUM",
+                "Privileged var-set without caller authorization",
+                f"define-public {fname} rewrites a data-var with no "
+                "tx-sender/contract-caller check, so anyone can change "
+                "privileged state. Authorize against the owner first.",
+                function=fname, confidence=0.7))
     return issues
 
 
@@ -1186,6 +2143,32 @@ def _detect_func(content: str, rel: str) -> list[StaticIssue]:
             "Possible slice underflow / TL-B parse abort",
             "Unbounded load_uint on message slices can abort the contract "
             "on malformed input (DoS).", confidence=0.5))
+    # FunC-A1. Funds leave the contract without a sender check: anyone's
+    # message can trigger payouts.
+    for m in re.finditer(r"recv_internal", content):
+        line = content[: m.start()].count("\n") + 1
+        tail = content[m.start(): m.start() + 1500]
+        if re.search(r"send_raw_message|send_message", tail) \
+                and not re.search(r"sender\(\)|sender_address", tail):
+            issues.append(_issue(
+                rel, line, "access-control", "HIGH",
+                "recv_internal sends funds without a sender check",
+                "recv_internal() triggers send_raw_message/send_message "
+                "but never inspects sender(), so any crafted message can "
+                "move funds out. Verify the sender against the owner or "
+                "an allowlist first.",
+                confidence=0.75))
+    # FunC-A2. Outbound transfers with no bounce handling: bounced TON
+    # is silently lost instead of being refunded/retried.
+    if re.search(r"send_raw_message|send_message", content) \
+            and not re.search(r"bounced|is_bounced|flags\s*&\s*1", content):
+        issues.append(_issue(
+            rel, 1, "denial-of-service", "MEDIUM",
+            "No bounce handling for outbound transfers",
+            "The contract sends messages but never checks the bounced "
+            "flag, so TON from failed deliveries is silently lost. "
+            "Handle bounced messages and refund or retry.",
+            confidence=0.65))
     return issues
 
 
@@ -1236,6 +2219,63 @@ def _detect_rust_solana(content: str, rel: str) -> list[StaticIssue]:
             "Closing account that still holds lamports",
             "An account is closed without first clearing its lamports, "
             "stranding value.", confidence=0.7))
+    # Solana-A1. State-changing instruction with no signer in its
+    # Accounts struct: anyone can invoke it and the effects are
+    # unauthenticated.
+    _signer_structs: set[str] = set()
+    for _m in re.finditer(
+            r"#\[derive\(Accounts\)\]\s*pub\s+struct\s+(\w+)", content):
+        _sname = _m.group(1)
+        _send = content.find("#[derive(Accounts)]", _m.end())
+        if _send == -1:
+            _send = len(content)
+        _sseg = content[_m.start():_send]
+        if re.search(r"Signer<'info>", _sseg):
+            _signer_structs.add(_sname)
+    for _m in re.finditer(
+            r"pub\s+fn\s+(\w+)\s*\(\s*ctx\s*:\s*Context<(\w+)>", content):
+        _hname, _aname = _m.group(1), _m.group(2)
+        if _aname in _signer_structs:
+            continue
+        _hseg = content[_m.start(): _m.start() + 2500]
+        if re.search(r"try_borrow_mut_lamports|set_inner|\.owner\s*=|"
+                     r"\.amount\s*=|close\s*=", _hseg):
+            _hline = content[: _m.start()].count("\n") + 1
+            issues.append(_issue(
+                rel, _hline, "access-control", "HIGH",
+                "Instruction mutates state with no signer account",
+                f"{_hname}() changes account state (lamports/owner/close) "
+                f"but its Context<{_aname}> has no Signer<'info>, so "
+                "anyone can invoke it. Add a signer and authorize it.",
+                function=_hname, confidence=0.75))
+    # Solana-A2. PDA seeds without a bump: without bump canonicalization
+    # an attacker can find a colliding off-curve address.
+    for _m in re.finditer(r"seeds\s*=\s*\[", content):
+        _line = content[: _m.start()].count("\n") + 1
+        _attr = content[max(0, _m.start() - 400): _m.start() + 400]
+        if "bump" not in _attr:
+            issues.append(_issue(
+                rel, _line, "access-control", "MEDIUM",
+                "PDA seeds without bump canonicalization",
+                "A program-derived address uses seeds= without bump, so "
+                "the address is not canonicalized; attackers can search "
+                "for colliding addresses. Add bump to the seeds and the "
+                "account constraints.",
+                confidence=0.7))
+    # Solana-A3. Unbounded Vec in an #[account] struct without max_len:
+    # account size (and rent) can be griefed.
+    for _m in re.finditer(r"#\[account\]", content):
+        _seg = content[_m.start(): _m.start() + 1200]
+        if re.search(r"pub\s+\w+\s*:\s*Vec<", _seg) \
+                and "max_len" not in _seg:
+            _line = content[: _m.start()].count("\n") + 1
+            issues.append(_issue(
+                rel, _line, "denial-of-service", "MEDIUM",
+                "Unbounded Vec in account struct (missing max_len)",
+                "An #[account] struct holds a Vec without #[max_len]; "
+                "callers can bloat the account and grief rent/size "
+                "accounting. Bound it with #[max_len(N)].",
+                confidence=0.65))
     return issues
 
 
@@ -1331,6 +2371,68 @@ def _detect_ts_sdk(content: str, rel: str) -> list[StaticIssue]:
             "Permit submission (front-runnable)",
             "EIP-2612 permit submissions are public; consider expiry and "
             "relay protections.", confidence=0.4))
+    # TS-A1. Hardcoded private key / mnemonic in source: anyone with
+    # read access owns the account. Env references are fine.
+    for m in re.finditer(
+            r"(?i)(?:private[_-]?key|secret[_-]?key|mnemonic|"
+            r"seed[_-]?phrase)\s*[:=]\s*[\"']([^\"']+)[\"']", content):
+        if _in_line_comment(content, m.start()):
+            continue
+        val = m.group(1)
+        words = val.split()
+        if re.fullmatch(r"(?:0x)?[0-9a-fA-F]{64}", val) \
+                or len(words) in (12, 15, 18, 21, 24):
+            line = content[: m.start()].count("\n") + 1
+            issues.append(_issue(
+                rel, line, "access-control", "CRITICAL",
+                "Hardcoded private key / mnemonic in source",
+                "A private key or seed phrase is embedded literally in the "
+                "code; anyone with read access can drain the account. Load "
+                "it from a secret manager or environment at runtime.",
+                confidence=0.9))
+    # TS-A2. Math.random() near key material: not cryptographically
+    # secure, so generated secrets are predictable.
+    for m in re.finditer(r"Math\.random\s*\(\s*\)", content):
+        if _in_line_comment(content, m.start()):
+            continue
+        window = content[max(0, m.start() - 250): m.start() + 250]
+        if re.search(r"key|secret|nonce|salt|private|mnemonic|sign\b",
+                     window, re.IGNORECASE):
+            line = content[: m.start()].count("\n") + 1
+            issues.append(_issue(
+                rel, line, "randomness", "HIGH",
+                "Math.random() used for secrets",
+                "Math.random() is not cryptographically secure; keys, "
+                "nonces or signatures derived from it are predictable. Use "
+                "crypto.getRandomValues / randomBytes.",
+                confidence=0.75))
+    # TS-A3. Hardcoded API key in an RPC URL: leaks quota/billing and
+    # identifies the project's infrastructure.
+    for m in re.finditer(
+            r"[\"']https?://[^\"']*/v[23]/([A-Za-z0-9_-]{16,})[\"']",
+            content):
+        if _in_line_comment(content, m.start()):
+            continue
+        line = content[: m.start()].count("\n") + 1
+        issues.append(_issue(
+            rel, line, "secret-leak", "LOW",
+            "Hardcoded API key in RPC URL",
+            "An RPC endpoint embeds a literal API key; it leaks in logs, "
+            "bundles and repos, exposing quota and billing. Inject it "
+            "from configuration instead.",
+            confidence=0.8))
+    for m in re.finditer(
+            r"[\"']https?://[^\"']*[?&](?:api[_-]?key|key)="
+            r"[^\"'&]{8,}[\"']", content):
+        if _in_line_comment(content, m.start()):
+            continue
+        line = content[: m.start()].count("\n") + 1
+        issues.append(_issue(
+            rel, line, "secret-leak", "LOW",
+            "Hardcoded API key in URL",
+            "A URL embeds a literal API key; it leaks in logs, bundles "
+            "and repos. Inject it from configuration instead.",
+            confidence=0.8))
     return issues
 
 
