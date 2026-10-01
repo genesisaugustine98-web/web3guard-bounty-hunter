@@ -363,6 +363,50 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "memory": {
         "enabled": True,                      # durable evidence reuse
     },
+    # Hunt pipeline (Phase 7: `web3guard hunt`). One command that runs
+    # static scan -> invariant synthesis + fuzz -> AI red-team ->
+    # verification -> version history -> plain-English report.
+    # Every stage is optional and independently skippable via flags
+    # (--skip-static, --skip-invariants, --skip-redteam, --skip-verify,
+    # --skip-history) or via the switches below.
+    "hunt": {
+        # Master switches for each stage. "auto" means: run when the
+        # prerequisites are present (API keys for the red-team; git tags
+        # and/or an audit report for history), skip loudly otherwise.
+        "enable_static": True,
+        "enable_invariants": True,
+        "enable_verify": True,
+        "redteam": "auto",            # auto | on | off (AI red-team)
+        "history": "auto",            # auto | on | off (version comparison)
+        # Per-target caps so one huge repo cannot dominate the machine.
+        "max_invariant_contracts": 5,  # contracts fuzzed per target
+        "max_redteam_files": 5,        # files red-teamed per target
+        "redteam_min_severity": "MEDIUM",
+        "min_severity": "LOW",
+        # Verification: max findings sent through the LLM debate round
+        # (machine-evidence replays are local and unbounded).
+        "verify_max_llm_findings": 64,
+        # Where the dropped-findings audit ledger lives; "" = default
+        # (~/.web3guard/verification_ledger.jsonl).
+        "verification_ledger_path": "",
+        # Default audit report for version verdicts; "" = none unless
+        # --history-report is passed.
+        "audit_report": "",
+        # Fuzz bounds forwarded to the invariant pipeline (see
+        # FuzzBounds; also settable via an "invariants:" config block).
+        "fuzz_runs": 256,
+        "fuzz_depth": 15,
+        "fuzz_timeout_s": 300,
+        # Report formats written by `web3guard hunt`: md (plain English),
+        # txt (chat-friendly), json (machine evidence).
+        "report_formats": ["md", "txt", "json"],
+        # Safety rules. never_auto_submit is hard-wired True and cannot
+        # be disabled: the hunt pipeline only writes local report files.
+        "roe": {
+            "require_authorized_scope": False,
+            "never_auto_submit": True,
+        },
+    },
 }
 
 

@@ -184,7 +184,84 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Scheme for target URLs (http only for local/test servers)")
     recon.add_argument("--dry-run", action="store_true",
                        help="Validate the authorization and print the plan "
-                            "without contacting anything")    # ---- bench ----------------------------------------------------------
+                            "without contacting anything")    # ---- hunt -----------------------------------------------------------
+    # Phase 7: end-to-end hunt pipeline. Static scan -> invariant
+    # synthesis + fuzz -> AI red-team -> verification -> version
+    # history -> plain-English report. Every stage optional.
+    hunt = sub.add_parser(
+        "hunt",
+        help=(
+            "Run the full hunt pipeline on a target: static scan, "
+            "invariant fuzzing, AI red-team, verification, version "
+            "history, plain-English report"
+        ),
+    )
+    hunt.add_argument(
+        "target",
+        help="Target to hunt: local path, git URL, archive, or 0x address "
+             "(same shapes as `scan`)",
+    )
+    hunt.add_argument("--min-severity", default="LOW",
+                      choices=["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"])
+    hunt.add_argument("--formats", nargs="+", default=None,
+                      help="Report formats: md txt json (default from config)")
+    hunt.add_argument("--out", type=Path, default=None,
+                      help="Output directory for the hunt reports "
+                           "(default: <workdir>/hunt-reports/<target>-<time>)")
+    hunt.add_argument("--skip-static", action="store_true",
+                      help="Skip the static pattern scan")
+    hunt.add_argument("--skip-invariants", action="store_true",
+                      help="Skip invariant synthesis + fuzzing")
+    hunt.add_argument("--skip-redteam", action="store_true",
+                      help="Skip the AI red-team layer")
+    hunt.add_argument("--skip-verify", action="store_true",
+                      help="Skip the verification / false-positive filter "
+                           "(AI findings shown unreviewed)")
+    hunt.add_argument("--skip-history", action="store_true",
+                      help="Skip version-history comparison")
+    hunt.add_argument("--redteam", choices=["auto", "on", "off"], default=None,
+                      help="AI red-team mode (default: auto = on when API "
+                           "keys are present, off otherwise)")
+    hunt.add_argument("--history", choices=["auto", "on", "off"], default=None,
+                      help="Version-history mode (default: auto = on when "
+                           "git tags and/or an audit report are available)")
+    hunt.add_argument("--history-report", type=Path, default=None,
+                      help="Audit report (.md/.txt/.pdf) for per-version "
+                           "fix verdicts")
+    hunt.add_argument("--since-tag", default=None,
+                      help="Only compare versions newer than this git tag")
+    hunt.add_argument("--max-invariant-contracts", type=int, default=None,
+                      help="Cap on contracts fuzzed per target "
+                           "(default from config)")
+
+    # ---- watch ----------------------------------------------------------
+    # Phase 7: trigger consumer. Drains the phase-5 upgrade-trigger
+    # queue and runs the hunt pipeline on each new trigger.
+    watch = sub.add_parser(
+        "watch",
+        help=(
+            "Drain the upgrade-trigger queue: run the hunt pipeline on "
+            "each new trigger (safe to re-run; never auto-submits)"
+        ),
+    )
+    watch.add_argument("--max-triggers", type=int, default=0,
+                       help="Process at most N triggers (0 = whole queue)")
+    watch.add_argument("--skip-invariants", action="store_true")
+    watch.add_argument("--skip-redteam", action="store_true")
+    watch.add_argument("--skip-verify", action="store_true")
+    watch.add_argument("--skip-history", action="store_true")
+    watch.add_argument("--history-report", type=Path, default=None)
+    watch.add_argument("--min-severity", default="LOW",
+                       choices=["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"])
+
+    # ---- history --------------------------------------------------------
+    # Phase 4 hook: audit-report ingestion, version diffs, fix verdicts,
+    # re-dive queue. Registers `web3guard history ...` subcommands.
+    from web3guard.history.__main__ import register_history_parser
+
+    register_history_parser(sub)
+
+    # ---- bench ----------------------------------------------------------
     bench = sub.add_parser(
         "bench",
         help=(
@@ -300,6 +377,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_scope(args)
     if args.command == "recon":
         return _cmd_recon(args)
+    if args.command == "hunt":
+        return _cmd_hunt(args)
+    if args.command == "watch":
+        return _cmd_watch(args)
     parser.print_help()
     return 1
 
@@ -1019,6 +1100,132 @@ def _cmd_price() -> int:
     e = compute_estimate(num_chunks=200, model="deepseek-ai/deepseek-v4-flash-0731")
     print(f"  estimated cost: ${e.estimated_cost_usd:.4f}")
     print(f"  estimated time: {e.estimated_seconds:.0f}s")
+    return 0
+
+
+def _cmd_hunt(args: argparse.Namespace) -> int:
+    """End-to-end hunt pipeline (Phase 7).
+
+    Runs: static scan -> invariant synthesis + fuzz -> AI red-team ->
+    verification -> version history -> plain-English report.
+    """
+    import datetime as _dt
+
+    from web3guard.hunt import run_hunt
+    from web3guard.scanner import load_config
+
+    cfg = load_config(args.config)
+    if args.max_invariant_contracts is not None:
+        cfg.setdefault("hunt", {})["max_invariant_contracts"] = \
+            args.max_invariant_contracts
+
+    slug = "".join(
+        c if (c.isalnum() or c in "-_") else "-"
+        for c in Path(args.target).name or "target")[:40] or "target"
+    stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    out_dir = args.out or (args.workdir / "hunt-reports" / f"{slug}-{stamp}")
+
+    def _say(msg: str) -> None:
+        print(f"[hunt] {msg}", flush=True)
+
+    result = run_hunt(
+        args.target,
+        cfg,
+        workdir=args.workdir,
+        out_dir=out_dir,
+        formats=args.formats,
+        skip_static=args.skip_static,
+        skip_invariants=args.skip_invariants,
+        skip_redteam=args.skip_redteam,
+        skip_verify=args.skip_verify,
+        skip_history=args.skip_history,
+        history_report=args.history_report,
+        since_tag=args.since_tag,
+        min_severity=args.min_severity,
+        redteam=args.redteam,
+        history=args.history,
+        progress=_say,
+    )
+
+    print("=" * 66)
+    print(f"  Web3Guard Hunt — {args.target}")
+    print("=" * 66)
+    if result.error:
+        print(f"  ERROR: {result.error}", file=sys.stderr)
+        for fmt, path in (result.report_paths or {}).items():
+            print(f"  {fmt}: {path}")
+        # A target that was never scanned must never look like a clean
+        # scan: exit 3, same convention as `scan`.
+        return 3
+    print(f"  Findings: {len(result.findings)} "
+          f"({len(result.rejected)} rejected by verification)")
+    for stage in result.stages:
+        if stage.ran:
+            extra = (f", {stage.findings} thrown away"
+                     if stage.name == "verify" else
+                     f", {stage.findings} finding(s)")
+            print(f"  [ran]     {stage.name}{extra}")
+        else:
+            print(f"  [skipped] {stage.name}: {stage.skipped_reason}")
+    if not result.ai_active:
+        print("  Note: AI stages were OFF (no API keys) — see the report "
+              "for how to enable them.")
+    print(f"  Cost: ${result.cost_usd:.4f}")
+    print("  Reports written:")
+    for fmt, path in (result.report_paths or {}).items():
+        print(f"    - {fmt}: {path}")
+    print("  Nothing was sent anywhere: hunt reports are local files only; "
+          "this tool never submits findings to bounty programs.")
+    return 0
+
+
+def _cmd_watch(args: argparse.Namespace) -> int:
+    """Drain the upgrade-trigger queue through the hunt pipeline.
+
+    Safe to run repeatedly (queue claim + per-trigger dedupe); never
+    auto-submits anything.
+    """
+    from web3guard.hunt import drain_trigger_queue
+    from web3guard.scanner import load_config
+
+    cfg = load_config(args.config)
+
+    def _say(msg: str) -> None:
+        print(f"[watch] {msg}", flush=True)
+
+    summary = drain_trigger_queue(
+        args.workdir,
+        cfg,
+        max_triggers=args.max_triggers,
+        hunt_kwargs={
+            "skip_static": False,
+            "skip_invariants": args.skip_invariants,
+            "skip_redteam": args.skip_redteam,
+            "skip_verify": args.skip_verify,
+            "skip_history": False,
+            "history_report": args.history_report,
+            "min_severity": args.min_severity,
+        },
+        progress=_say,
+    )
+    print("=" * 66)
+    print("  Web3Guard Watch — trigger queue drained")
+    print("=" * 66)
+    print(f"  requeued orphans (crash recovery): {summary['requeued_orphans']}")
+    print(f"  triggers hunted:   {summary['processed']}")
+    print(f"  skipped:           {summary['skipped']}")
+    print(f"  errors:            {summary['errors']}")
+    for record in summary["results"]:
+        status = record.get("status", "?")
+        detail = ""
+        if status == "completed":
+            detail = (f"{record.get('findings', 0)} findings, "
+                      f"{record.get('rejected', 0)} rejected")
+        else:
+            detail = str(record.get("reason", record.get("error", "")))[:100]
+        print(f"    - {record.get('project')} "
+              f"({record.get('old_version')} -> {record.get('new_version')}): "
+              f"{status} {detail}".rstrip())
     return 0
 
 
