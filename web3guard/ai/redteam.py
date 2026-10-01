@@ -390,6 +390,19 @@ class RedTeamAnalyzer:
         survivors = [h for h in hypotheses if h.status == "surviving"]
         if survivors and self.config["redteam_enable_triage"]:
             self._triage(survivors, report)
+
+        # ---- Phase 3 hook: post-finalization verification of the red-team
+        # output. A caller (e.g. the scan pipeline's verification gate) may
+        # pass config["redteam_post_verify"] = callable(report) to run extra
+        # checks over the finalized report — refuting or downgrading
+        # hypotheses before they become findings. Off by default; a failing
+        # hook can never break the red-team loop.
+        post_verify = self.config.get("redteam_post_verify")
+        if callable(post_verify):
+            try:
+                post_verify(report)
+            except Exception as e:  # noqa: BLE001
+                report.errors.append(f"post-verification hook failed: {e}")
         return report
 
     # ---- stages --------------------------------------------------------
