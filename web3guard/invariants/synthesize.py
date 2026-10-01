@@ -105,52 +105,134 @@ def _getter_pat(name: str) -> str:
     return rf"(?:\bpublic\b[^\n;{{}}]*\b{name}\b|\b{name}\s*\(\s*\))"
 
 
-GENERIC_TEMPLATES: list[_Template] = [
-    _Template(
-        id="tmpl-solvency-1-1",
-        statement="For a 1:1 vault, totalSupply must always equal totalAssets: "
-                  "every share in existence is backed by exactly one unit of assets.",
-        requires=[_getter_pat("totalSupply"), _getter_pat("totalAssets")],
-        assertion="target.totalSupply() == target.totalAssets()",
-        rationale="A mismatch means shares were minted without backing "
-                  "(free mint / donation-inflation hole) or assets left "
-                  "without burning shares — the classic vault accounting "
-                  "desync behind share-price manipulation exploits.",
-        bug_class="accounting-desync",
-        severity="HIGH",
-        variables=["totalSupply", "totalAssets"],
-    ),
-    _Template(
-        id="tmpl-share-price-positive",
-        statement="The reported share price must always be strictly positive.",
-        requires=[_getter_pat("sharePrice")],
-        assertion="target.sharePrice() > 0",
-        rationale="A zero (or underflowing) share price breaks every "
-                  "deposit/withdraw quote; attackers abuse rounding to push "
-                  "it to zero and mint shares for free.",
-        bug_class="rounding",
-        severity="MEDIUM",
-        variables=["sharePrice"],
-    ),
-    _Template(
-        id="tmpl-owner-nonzero",
-        statement="The contract owner must never be the zero address.",
-        requires=[_getter_pat("owner")],
-        assertion="target.owner() != address(0)",
-        rationale="Ownership silently landing on address(0) bricks admin "
-                  "functions or, worse, signals a broken access-control "
-                  "handoff an attacker can race.",
-        bug_class="access-control",
-        severity="MEDIUM",
-        variables=["owner"],
-    ),
-]
+# Vyper: ``total_supply: public(uint256)`` or ``def total_supply(``.
+def _vyper_getter_pat(name: str) -> str:
+    return rf"(?:\b{name}\s*:\s*public\s*\(|\bdef\s+{name}\s*\()"
 
 
-def template_invariants(source: str) -> list[Invariant]:
+# Cairo: ``fn total_supply(`` inside the contract or its interface trait.
+def _cairo_getter_pat(name: str) -> str:
+    return rf"\bfn\s+{name}\s*\("
+
+
+def _mk_templates(
+    *,
+    supply: str,
+    assets: str,
+    price: str,
+    owner: str,
+    solvency_assert: str,
+    share_price_assert: str,
+    owner_assert: str,
+    solvency_requires: list[str],
+    share_price_requires: list[str],
+    owner_requires: list[str],
+) -> list[_Template]:
+    return [
+        _Template(
+            id="tmpl-solvency-1-1",
+            statement=f"For a 1:1 vault, {supply} must always equal {assets}: "
+                      "every share in existence is backed by exactly one unit of assets.",
+            requires=solvency_requires,
+            assertion=solvency_assert,
+            rationale="A mismatch means shares were minted without backing "
+                      "(free mint / donation-inflation hole) or assets left "
+                      "without burning shares — the classic vault accounting "
+                      "desync behind share-price manipulation exploits.",
+            bug_class="accounting-desync",
+            severity="HIGH",
+            variables=[supply, assets],
+        ),
+        _Template(
+            id="tmpl-share-price-positive",
+            statement=f"The reported share price ({price}) must always be "
+                      "strictly positive.",
+            requires=share_price_requires,
+            assertion=share_price_assert,
+            rationale="A zero (or underflowing) share price breaks every "
+                      "deposit/withdraw quote; attackers abuse rounding to push "
+                      "it to zero and mint shares for free.",
+            bug_class="rounding",
+            severity="MEDIUM",
+            variables=[price],
+        ),
+        _Template(
+            id="tmpl-owner-nonzero",
+            statement=f"The contract owner ({owner}) must never be the zero address.",
+            requires=owner_requires,
+            assertion=owner_assert,
+            rationale="Ownership silently landing on address(0) bricks admin "
+                      "functions or, worse, signals a broken access-control "
+                      "handoff an attacker can race.",
+            bug_class="access-control",
+            severity="MEDIUM",
+            variables=[owner],
+        ),
+    ]
+
+
+GENERIC_TEMPLATES: list[_Template] = _mk_templates(
+    supply="totalSupply",
+    assets="totalAssets",
+    price="sharePrice",
+    owner="owner",
+    solvency_assert="target.totalSupply() == target.totalAssets()",
+    share_price_assert="target.sharePrice() > 0",
+    owner_assert="target.owner() != address(0)",
+    solvency_requires=[_getter_pat("totalSupply"), _getter_pat("totalAssets")],
+    share_price_requires=[_getter_pat("sharePrice")],
+    owner_requires=[_getter_pat("owner")],
+)
+
+#: Vyper template variants (snake_case getters; assertions in the Python
+#: dialect the Vyper driver evaluates).
+VYPER_TEMPLATES: list[_Template] = _mk_templates(
+    supply="total_supply",
+    assets="total_assets",
+    price="share_price",
+    owner="owner",
+    solvency_assert="target.total_supply() == target.total_assets()",
+    share_price_assert="target.share_price() > 0",
+    owner_assert="target.owner() != address(0)",
+    solvency_requires=[
+        _vyper_getter_pat("total_supply"), _vyper_getter_pat("total_assets")
+    ],
+    share_price_requires=[_vyper_getter_pat("share_price")],
+    owner_requires=[_vyper_getter_pat("owner")],
+)
+
+#: Cairo template variants (snake_case getters; assertions in the neutral
+#: ``target.`` dialect that ``translate_assertion_to_cairo`` consumes —
+#: it rewrites ``target.`` to ``dispatcher.`` and ``address(0)`` to the
+#: zero contract address).
+CAIRO_TEMPLATES: list[_Template] = _mk_templates(
+    supply="total_supply",
+    assets="total_assets",
+    price="share_price",
+    owner="owner",
+    solvency_assert="target.total_supply() == target.total_assets()",
+    share_price_assert="target.share_price() > 0",
+    owner_assert="target.owner() != address(0)",
+    solvency_requires=[
+        _cairo_getter_pat("total_supply"), _cairo_getter_pat("total_assets")
+    ],
+    share_price_requires=[_cairo_getter_pat("share_price")],
+    owner_requires=[_cairo_getter_pat("owner")],
+)
+
+_TEMPLATES_BY_LANGUAGE: dict[str, list[_Template]] = {
+    "solidity": GENERIC_TEMPLATES,
+    "vyper": VYPER_TEMPLATES,
+    "cairo": CAIRO_TEMPLATES,
+}
+
+
+def template_invariants(
+    source: str, language: str = "solidity",
+) -> list[Invariant]:
     """Return every generic template whose required getters exist in ``source``."""
     out: list[Invariant] = []
-    for tmpl in GENERIC_TEMPLATES:
+    for tmpl in _TEMPLATES_BY_LANGUAGE.get(language, []):
         try:
             if tmpl.applies(source):
                 out.append(tmpl.to_invariant())
@@ -195,13 +277,89 @@ rounding, share-price, other
 4. Prefer 3-8 invariants. Quality over quantity.
 """
 
+# Assertion dialects per language: the model must write assertions the
+# corresponding campaign driver can actually evaluate.
+_ASSERTION_RULES = {
+    "solidity": (
+        "ONE Solidity boolean expression evaluated against the contract's "
+        "PUBLIC interface. The contract instance is named `target`. Example: "
+        '"target.totalSupply() == target.totalAssets()". No ghost state, no '
+        "new variables, no semicolons, single line."
+    ),
+    "vyper": (
+        "ONE Python boolean expression evaluated against the deployed "
+        "contract object named `target` (its ABI functions are called like "
+        '`target.total_supply()`). Example: '
+        '"target.total_supply() == target.total_assets()". Write the zero '
+        "address as `address(0)`, True/False capitalized, `and`/`or`/`not` "
+        "for logic — Python syntax, NOT Solidity. No ghost state, no new "
+        "variables, no semicolons, single line."
+    ),
+    "cairo": (
+        "ONE boolean expression in a RESTRICTED grammar: comparisons "
+        "(`==`, `!=`, `<`, `>`, `<=`, `>=`) between `target.<getter>()` calls "
+        "(the contract instance is named `target`), integer literals, or the "
+        "zero address written as `address(0)` — optionally joined by `&&` / "
+        "`||`. Examples: `target.total_supply() == target.total_assets()`, "
+        "`target.owner() != address(0)`. Use ONLY getters that EXIST in the "
+        "source, snake_case names as written. No other syntax — no arithmetic, "
+        "no function calls besides the getters, no semicolons, single line."
+    ),
+}
 
-def _build_user_prompt(contract_name: str, source: str) -> str:
+_LANGUAGE_LABEL = {
+    "solidity": "Solidity",
+    "vyper": "Vyper",
+    "cairo": "Cairo (Starknet)",
+}
+
+
+def _system_prompt_for(language: str) -> str:
+    if language == "solidity":
+        return _SYSTEM_PROMPT
+    label = _LANGUAGE_LABEL.get(language, language)
+    return f"""\
+You are a smart-contract security auditor drafting FUZZING INVARIANTS \
+(PROMFUZZ pattern) for {label} contracts.
+
+An invariant is a property that must hold after EVERY possible sequence of \
+transactions. You are given {label} source. Draft invariants an attacker \
+would love to break, focusing on these bug classes:
+
+- accounting-desync: token/vault balances vs recorded totals drifting apart
+- access-control: privileged actions reachable by the wrong caller, ownership intent
+- oracle-price: assumptions about prices, TWAPs, or external price feeds
+- rounding: dust amounts, division order, zero-share edge cases
+- share-price: share price monotonicity, donation/inflation games
+
+RULES (strict):
+1. Output ONLY a JSON array. No prose, no markdown fences.
+2. Each element MUST have exactly these fields:
+   - "id": short slug, e.g. "no-free-mint"
+   - "statement": one-sentence natural-language property
+   - "assertion": {_ASSERTION_RULES[language]}
+   - "variables": array of state variable names involved (may be [])
+   - "functions": array of function names involved (may be [])
+   - "rationale": one sentence on why it matters
+   - "bug_class": one of accounting-desync, access-control, oracle-price, \
+rounding, share-price, other
+3. Only use getters/functions that EXIST in the source. Never invent them.
+4. Prefer 3-8 invariants. Quality over quantity.
+"""
+
+
+def _build_user_prompt(
+    contract_name: str, source: str, language: str = "solidity",
+) -> str:
     trimmed = source[:_MAX_SOURCE_CHARS]
     clipped = len(source) > _MAX_SOURCE_CHARS
+    label = _LANGUAGE_LABEL.get(language, language)
+    fence = {"solidity": "solidity", "vyper": "python", "cairo": "cairo"}.get(
+        language, ""
+    )
     return (
-        f"Contract `{contract_name}` (Solidity). Draft fuzzing invariants.\n\n"
-        f"```solidity\n{trimmed}\n```\n"
+        f"Contract `{contract_name}` ({label}). Draft fuzzing invariants.\n\n"
+        f"```{fence}\n{trimmed}\n```\n"
         + ("(source truncated to 12000 chars)\n" if clipped else "")
         + "\nReturn the JSON array now."
     )
@@ -269,6 +427,7 @@ def synthesize_invariants(
     config: Mapping[str, Any] | None,
     *,
     contract_name: str = "Target",
+    language: str = "solidity",
 ) -> SynthesisResult:
     """Draft invariants for ``contract_source``.
 
@@ -277,7 +436,7 @@ def synthesize_invariants(
     returns the templates alone — it never fails the scan.
     """
     result = SynthesisResult()
-    templates = template_invariants(contract_source)
+    templates = template_invariants(contract_source, language=language)
     result.invariants.extend(templates)
     existing_ids = {inv.id for inv in templates}
 
@@ -298,8 +457,8 @@ def synthesize_invariants(
 
     try:
         resp = client.chat(
-            _SYSTEM_PROMPT,
-            _build_user_prompt(contract_name, contract_source),
+            _system_prompt_for(language),
+            _build_user_prompt(contract_name, contract_source, language),
             max_tokens=2000,
             temperature=0.0,
             role="analysis",
