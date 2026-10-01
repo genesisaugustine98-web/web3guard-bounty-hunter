@@ -27,6 +27,25 @@ from web3guard.ai.provider import (
     OpenAICompatibleProvider,
     ProviderError,
 )
+from web3guard.ai.router import (
+    FREE_PRICING,
+    PROVIDER_CHAIN,
+    PROVIDER_LIMITS,
+    AIUnavailableError,
+    AnyRouterClient,
+    DiscoveredProvider,
+    NullClient,
+    ProviderLimit,
+    ProviderSpec,
+    RouterClient,
+    build_router_client,
+    discover_providers,
+    emit_offline_warning,
+    offline_report_note,
+    offline_warning_text,
+    refresh_provider_limits,
+    skipped_providers,
+)
 
 __all__ = [
     "AIProvider",
@@ -37,4 +56,22 @@ __all__ = [
     "AIClient",
     "CostTracker",
     "CostRecord",
+    # Phase 1: free-tier router
+    "AIUnavailableError",
+    "AnyRouterClient",
+    "DiscoveredProvider",
+    "FREE_PRICING",
+    "NullClient",
+    "PROVIDER_CHAIN",
+    "PROVIDER_LIMITS",
+    "ProviderLimit",
+    "ProviderSpec",
+    "RouterClient",
+    "build_router_client",
+    "discover_providers",
+    "emit_offline_warning",
+    "offline_report_note",
+    "offline_warning_text",
+    "refresh_provider_limits",
+    "skipped_providers",
 ]
