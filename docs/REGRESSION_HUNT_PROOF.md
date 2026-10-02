@@ -55,7 +55,7 @@
 | Batch | What it tests | Before (pass / fail) | After (pass / fail) | Verdict |
 |---|---|---|---|---|
 | 01 | Classic bugs vs invariant pipeline (50) | 36 / 14 | **30 / 20** | See honest accounting below — the oracle score dropped but genuine catches ROSE to 42/50 |
-| 02 | Subtle bugs, low+medium budget (96) | 72 / 24 | **82 / 24→14** | **+10 net**: all 8 compromised-key fixed, both lottery fixed, no new regressions |
+| 02 | Subtle bugs, low+medium budget (96) | 72 / 24 | **82 / 14** | **+10 net**: all 8 compromised-key fixed, both lottery fixed, no new regressions |
 
 ### Batch 01 honest accounting (the 30/20 needs explanation)
 
