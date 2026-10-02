@@ -130,10 +130,26 @@ _VAULT_V3 = _VAULT_V2.replace(
         require(ok, "send fail");""",
 )
 
-# v3.1: regression — withdrawAll loses its guard again.
-_VAULT_V31 = _VAULT_V3.replace(
-    "function withdrawAll() external nonReentrant {",
-    "function withdrawAll() external {",
+# v3.1: regression — withdrawAll loses its guard AND the state update moves
+# back after the external call, genuinely reintroducing the hole. (Under
+# the hardened property semantics, merely dropping the nonReentrant marker
+# from CEI-ordered code is not a regression — the textbook fix without a
+# marker reads FIXED — so the fixture reintroduces the actual vulnerable
+# shape.)
+_VAULT_V31 = (
+    _VAULT_V3.replace(
+        "function withdrawAll() external nonReentrant {",
+        "function withdrawAll() external {",
+    ).replace(
+        """        uint256 amount = balances[msg.sender];
+        balances[msg.sender] = 0;
+        (bool ok,) = msg.sender.call{value: amount}("");
+        require(ok, "send fail");""",
+        """        uint256 amount = balances[msg.sender];
+        (bool ok,) = msg.sender.call{value: amount}("");
+        require(ok, "send fail");
+        balances[msg.sender] = 0;""",
+    )
 )
 
 

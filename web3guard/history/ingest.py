@@ -53,6 +53,18 @@ _ANY_FILE_RE = re.compile(
 _FUNC_DEF_RE = re.compile(r"\bfunction\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 _FUNC_CALL_RE = re.compile(r"`([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 _DOTTED_FUNC_RE = re.compile(r"\b([A-Z][A-Za-z0-9_]*)\.([a-z_][A-Za-z0-9_]*)\s*\(")
+# Hedged audit language: "may be at risk", "could be vulnerable", ... Auditors
+# hedge real caveats; dropping them means a real warning never enters the
+# pipeline. These become low-severity, low-confidence findings rather than
+# being silently skipped — but only when the section also names code
+# (a function or file), so generic "no potential issues" summaries don't
+# turn into findings.
+_HEDGED_RE = re.compile(
+    r"\b(may be at risk|may be vulnerable|could be vulnerable|"
+    r"could be at risk|might be vulnerable|might be exploitable|"
+    r"potential vulnerability|potentially vulnerable|at risk of)\b",
+    re.IGNORECASE,
+)
 _AUDITOR_RES = (
     re.compile(r"(?im)^(?:auditor|audit\s+firm|audited\s+by|prepared\s+by)\s*[:\-–—]\s*(.+)$"),
     re.compile(r"(?im)\baudit(?:ed)?\s+by\s+([A-Z][A-Za-z0-9 .&'-]{2,60})"),
@@ -235,10 +247,25 @@ def _parse_section(
     probe = f"{heading}\n{body[:800]}"
     sev_match = _SEVERITY_RE.search(probe)
     id_match = _FINDING_ID_RE.search(heading) or _FINDING_ID_RE.search(body[:200])
+    hedged = False
     if not sev_match and not id_match:
-        return None
+        # Hedged audit language ("may be at risk") with no severity or ID:
+        # keep it as a low-confidence finding rather than silently dropping
+        # a real caveat — but only when the section names actual code, so
+        # generic "no potential issues" summaries don't become findings.
+        text = f"{heading}\n{body}"
+        if _HEDGED_RE.search(probe) and (
+            _extract_functions(text) or _extract_files(text)
+        ):
+            hedged = True
+        else:
+            return None
 
-    severity = _normalise_severity(sev_match.group(1)) if sev_match else "unknown"
+    severity = (
+        "low"
+        if hedged
+        else (_normalise_severity(sev_match.group(1)) if sev_match else "unknown")
+    )
     fid = _normalise_id(id_match) if id_match else "AUTO"
     title = _clean_title(heading, fid, severity)
     description = _first_paragraphs(body)
@@ -253,6 +280,10 @@ def _parse_section(
         confidence += 0.15
     if files or functions:
         confidence += 0.1
+    if hedged:
+        # Hedged language is weak evidence by definition: cap it below
+        # every confidently-parsed finding.
+        confidence = min(confidence, 0.3)
     confidence = min(confidence, 0.95)
 
     return AuditFinding(

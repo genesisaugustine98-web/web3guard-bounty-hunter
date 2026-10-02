@@ -53,6 +53,12 @@ def _add_history_subcommands(parser: argparse.ArgumentParser) -> None:
     p.add_argument("--reason", default="")
     p.add_argument("--by", default="")
     p.add_argument("--note", default="")
+    p.add_argument(
+        "--outcome",
+        default="resolved:fixed",
+        choices=["resolved:fixed", "resolved:accepted-risk", "still-open"],
+        help="Explicit resolved state for 'queue resolve' (default: resolved:fixed)",
+    )
     p.add_argument("--path", default=None, help="Queue file path override")
 
     p = sub.add_parser("report", help="'What was fixed in which version' summary")
@@ -157,8 +163,10 @@ def _cmd_queue(args: argparse.Namespace) -> int:
         item = queue.claim(args.item_id, args.by, args.note)
         print(f"Claimed {item.id} by {args.by}")
     elif args.op == "resolve":
-        item = queue.resolve(args.item_id, args.note or args.reason, args.by)
-        print(f"Resolved {item.id}")
+        item = queue.resolve(
+            args.item_id, args.note or args.reason, args.by, args.outcome
+        )
+        print(f"Resolved {item.id} ({item.outcome})")
     return 0
 
 
