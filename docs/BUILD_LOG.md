@@ -233,3 +233,15 @@ Technical notes: full test suite 735 passed / 4 failed / 16 skipped — all 4 fa
 **Proof it works.** 5 new regression tests, all passing: suspicious names sort first, invariant-referenced functions outrank merely-suspicious ones, both engines render the sweep infrastructure (cursor, guard, piggybacked calls), and a live campaign on a many-function contract compiles and runs with the sweep active. Full suite: 774 passed (was 735), same 4 pre-existing environment failures, 0 new failures; ruff + mypy clean.
 
 **Honest residual risk.** The sweep guarantees each function is *called* at least once, not that it's called with the *right arguments* to trigger a bug — argument coverage still depends on the fuzzer. On a 1,504-function contract, the first full sweep takes 1,504 actions; with typical budgets that's fine, but very tight budgets might only complete part of the sweep (suspicious-first ordering mitigates this).
+
+## 2026-10-02 — Regression hunt: 13 of the 14 fixed (plain-language note)
+
+You said "hunt those 14 next" — the 14 regressions the weakness-hunt round introduced. Five fix engineers plus the coordinator landed the fixes; the proof is in `docs/REGRESSION_HUNT_PROOF.md`.
+
+**What was wrong (the 14).** (1–8) The neutral-deployer fix overcorrected: the fuzzer could never call owner-only functions, so 8 cases where the bug *is* the owner misbehaving went dark. (9–12) The always-on donation attacker force-fed ETH into clean vaults, tripping 4 false alarms. (13–14) Two lottery cases were caught but mislabeled "did not compile" because output truncation destroyed the evidence. Plus: resource-kills (out-of-memory) were mislabeled "did not compile."
+
+**What changed.** (Fix A) A separate "compromised-key" test leg now impersonates the owner on demand, so owner-gated bugs are testable without reintroducing false alarms. (Fix B) The donation attacker only deploys when the target has real share-price mechanics; otherwise it stands down. (Fix C) The parser reads forge's machine-readable failure events (which survive truncation) as the primary signal. (Fix D) Out-of-memory/timeout kills get their own honest label (RESOURCE_EXHAUSTED), never "did not compile." (Fix E, bonus) The reentrancy attacker now handles more vault shapes, and a pre-existing gap that silently rejected genuine reentrancy proof was fixed — 8 reentrancy cases are now caught via real demonstrated heists. (Coordinator) PoC call sequences now show the address the target actually saw, not forge's outer account.
+
+**Proof it works.** Adversarial batches 01+02 re-run: batch_02 went 72/24 → **82/14** with zero new regressions; batch_01's 8 reentrancy cases now caught via genuine heists. 13 of 14 fixed. Full suite: **884 passed** (was 774), same 4 pre-existing environment failures, ruff + mypy clean.
+
+**Honest residuals.** `b02-clean2-low` is a corpus contradiction (identical to `b02-c2` which must stay caught — documented known false positive). `r2` is unexploitable at any budget (its oracle is a tautology). 12 batch_01 cases are genuinely caught but the batch's own answer key is stale (expects old invariant IDs). All documented in the proof doc.
