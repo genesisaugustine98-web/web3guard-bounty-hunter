@@ -421,9 +421,13 @@ class RedTeamAnalyzer:
         system = RedTeamPrompts.attacker_system(language)
         user = RedTeamPrompts.hypothesis_user(code, context, n, file)
         try:
+            # NOTE: generous token budgets are deliberate. Reasoning
+            # models (gemini-2.5-flash, gpt-oss) spend completion tokens
+            # on hidden thinking first; a tight budget truncates the
+            # visible JSON mid-object and the hypothesis is lost.
             resp = client.chat(
                 system, user,
-                max_tokens=2500, temperature=0.4, role="redteam_attack",
+                max_tokens=8000, temperature=0.4, role="redteam_attack",
             )
             report.llm_calls += 1
         except Exception as e:  # noqa: BLE001
@@ -469,7 +473,7 @@ class RedTeamAnalyzer:
         try:
             resp = client.chat(
                 system, user,
-                max_tokens=1500, temperature=0.0, role="redteam_defense",
+                max_tokens=6000, temperature=0.0, role="redteam_defense",
             )
             report.llm_calls += 1
         except Exception as e:  # noqa: BLE001
@@ -503,7 +507,7 @@ class RedTeamAnalyzer:
         try:
             resp = client.chat(
                 system, user,
-                max_tokens=1200, temperature=0.0, role="redteam_triage",
+                max_tokens=6000, temperature=0.0, role="redteam_triage",
             )
             report.llm_calls += 1
         except Exception as e:  # noqa: BLE001
