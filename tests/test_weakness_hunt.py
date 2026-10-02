@@ -138,6 +138,19 @@ def test_mined_senders_extracted_from_source() -> None:
     ) == []
 
 
+def test_mined_senders_ignores_longer_hex_literals() -> None:
+    # Self-improvement loop iteration 1: a 64-char bytes32 constant used to
+    # donate its first 40 chars as a bogus sender, wasting a mined-sender
+    # slot and letting the fuzzer prank as a meaningless address.
+    src = (
+        "bytes32 constant SLOT = "
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;\n"
+        "address public owner = 0x1234567890123456789012345678901234567890;"
+    )
+    mined = extract_mined_senders(src)
+    assert mined == ["0x1234567890123456789012345678901234567890"]
+
+
 def test_sender_pool_contains_mined_and_configured() -> None:
     bounds = FuzzBounds.from_config(
         {"invariants": {"impersonate_senders": ["0x1111111111111111111111111111111111111111"]}})
@@ -681,6 +694,29 @@ def test_infer_temporal_scope_for_llm_rules() -> None:
         id="llm-2", statement="Total supply equals sum of balances",
         assertion="target.totalSupply() == target.sumBalances()", source="llm")
     assert infer_temporal_scope(permanent) == "permanent"
+
+
+def test_infer_temporal_scope_vesting_phrasing() -> None:
+    # Self-improvement loop iteration 1: vesting/lockup phrasing is now
+    # caught by the widened time-limited matcher.
+    from web3guard.invariants.models import Invariant
+    from web3guard.invariants.templates import infer_temporal_scope
+
+    vesting = Invariant(
+        id="llm-3",
+        statement="Vesting must not release tokens before the cliff ends",
+        assertion="target.released() == 0",
+        source="llm",
+    )
+    assert infer_temporal_scope(vesting) == "time-limited"
+
+    lockup = Invariant(
+        id="llm-4",
+        statement="Withdrawals are locked during the lockup period",
+        assertion="target.balanceOf(user) >= target.locked(user)",
+        source="llm",
+    )
+    assert infer_temporal_scope(lockup) == "time-limited"
 
 
 def test_ghost_attack_omits_warp_when_time_limited() -> None:

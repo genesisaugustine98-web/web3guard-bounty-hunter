@@ -272,7 +272,12 @@ NEUTRAL_DEPLOYER = "0x00000000000000000000000000000000DeaDBeef"
 #: Cheat-code address: never mined as a sender.
 _VM_ADDRESS = "0x7109709ecfa91a80626ff3989d68f67f5b1dd12d"
 
-_MINED_ADDR_RE = re.compile(r"0x[0-9a-fA-F]{40}")
+#: 40-hex-char address literals. The negative lookarounds are load-bearing:
+#: without them a 64-char ``bytes32`` constant (e.g. a storage slot) would
+#: donate its first 40 chars as a bogus "sender" — wasting one of the 8
+#: mined-sender slots and, worse, letting the fuzzer prank as an address
+#: that has no meaning in the contract. Self-improvement loop, iteration 1.
+_MINED_ADDR_RE = re.compile(r"(?<![0-9a-fA-F])0x[0-9a-fA-F]{40}(?![0-9a-fA-F])")
 
 
 def extract_mined_senders(source: str, limit: int = 8) -> list[str]:

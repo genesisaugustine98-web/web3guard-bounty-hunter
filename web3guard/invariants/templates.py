@@ -187,10 +187,15 @@ def _sanitize(name: str) -> str:
 
 #: Weakness-hunt round, target 5: regexes that mark an invariant as
 #: time-limited (only meaningful within a time window). Matched against
-#: the statement + assertion of LLM/sharp-rule invariants.
+#: the statement + assertion of LLM/sharp-rule invariants. The second line
+#: was widened by self-improvement loop iteration 1: the false-negative
+#: direction (a genuinely time-dependent rule missed as "permanent") causes
+#: bogus time-warp false alarms, while a false positive only skips the warp
+#: move, so the matcher errs toward coverage.
 _TIME_LIMITED_RE = re.compile(
     r"block\.timestamp|deadline|expir|fresh|stale|updatedAt|"
-    r"no older than|within \d+ (day|hour|minute|second)",
+    r"no older than|within \d+ (day|hour|minute|second)|"
+    r"timeout|cooldown|lock.?up|vest|grace|cliff|unlock|time.?lock",
     re.IGNORECASE,
 )
 

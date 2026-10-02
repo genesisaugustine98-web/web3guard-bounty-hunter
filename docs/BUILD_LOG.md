@@ -245,3 +245,17 @@ You said "hunt those 14 next" — the 14 regressions the weakness-hunt round int
 **Proof it works.** Adversarial batches 01+02 re-run: batch_02 went 72/24 → **82/14** with zero new regressions; batch_01's 8 reentrancy cases now caught via genuine heists. 13 of 14 fixed. Full suite: **884 passed** (was 774), same 4 pre-existing environment failures, ruff + mypy clean.
 
 **Honest residuals.** `b02-clean2-low` is a corpus contradiction (identical to `b02-c2` which must stay caught — documented known false positive). `r2` is unexploitable at any budget (its oracle is a tautology). 12 batch_01 cases are genuinely caught but the batch's own answer key is stale (expects old invariant IDs). All documented in the proof doc.
+
+## 2026-10-02 — Self-improvement loop, iteration 1: invariants/fuzzing pipeline (plain-language note)
+
+**Focus this tick.** The loop rotates its audit focus; this run covered the invariants/fuzzing pipeline (the engine that writes and runs blockchain test campaigns).
+
+**What was wrong (1).** When the engine "mines" hardcoded addresses from the contract's code to use as pretend callers, it scanned for any 40-hex-character string — including the *first 40 characters of a 64-character constant* like a `bytes32` storage slot. That mined a nonsense address: it burned one of the 8 pretend-caller slots and let the test engine impersonate an address that means nothing in the contract.
+
+**What changed (1).** The address scan now requires non-hex characters on both sides of the match, so a 40-char literal is only mined when it really is a standalone address.
+
+**What was wrong (2).** Rules about vesting, lockups, and cliffs are time-dependent — fast-forwarding the clock shouldn't be used to test them — but the word-list the engine uses to spot "time-limited" rules only caught phrasing like "deadline" or "freshness." An AI-written rule about vesting would slip through as "permanent," and the clock-fast-forward test could then produce a bogus false alarm.
+
+**What changed (2).** The word-list now also catches timeout, cooldown, lockup, vest, grace, cliff, unlock, and timelock. The matcher deliberately errs toward flagging more as time-limited: the worst outcome of flagging too much is one test move being skipped, while missing one produces false alarms.
+
+**Proof it works.** 2 new regression tests (both passing): a `bytes32` constant no longer yields a bogus sender while a real address still is mined; vesting/lockup phrasing is now classified time-limited while a plain balance rule stays permanent. Full suite: 886 passed (was 884), same 4 pre-existing environment failures (forge binary unreachable as root), 16 skipped; ruff + mypy clean. Commit: selfimprove(iteration 1). Not pushed.
