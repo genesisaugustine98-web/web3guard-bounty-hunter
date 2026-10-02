@@ -429,6 +429,31 @@ def test_parse_snforge_output_compile_failure_is_honest() -> None:
     assert campaign.compile_ok is False
 
 
+def test_parse_snforge_output_zero_tests_is_not_clean() -> None:
+    # A harness that ran but executed 0 tests is INCONCLUSIVE — never clean.
+    stdout = "Running 0 test(s) from tests/\nTests: 0 passed, 0 failed, 0 ignored, 0 filtered out\n"
+    findings, campaign = parse_snforge_output(stdout, [_inv()])
+    assert findings == []
+    assert campaign.clean is False
+    # compile_ok stays False so the pipeline marks this "cause unknown"
+    # instead of silently passing it.
+    assert campaign.compile_ok is False
+
+
+def test_parse_vyper_output_zero_runs_is_not_clean() -> None:
+    # A driver summary claiming clean with zero runs is an un-executed
+    # campaign — never a clean verdict.
+    stdout = json.dumps({"type": "summary", "runs": 0, "calls": 0,
+                         "reverts": 0, "violations": 0,
+                         "compile_ok": True, "clean": True, "notes": []})
+    findings, campaign = parse_vyper_output(stdout, [_inv()])
+    assert findings == []
+    assert campaign.clean is False
+    # compile_ok stays False so the pipeline marks this "cause unknown"
+    # instead of silently passing it.
+    assert campaign.compile_ok is False
+
+
 # ---------------------------------------------------------------------------
 # LANGUAGE_GAPS.md completeness: every language must be accounted for
 # ---------------------------------------------------------------------------

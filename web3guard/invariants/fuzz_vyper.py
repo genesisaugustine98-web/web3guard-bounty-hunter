@@ -138,10 +138,23 @@ def parse_vyper_output(
         )
         return [], campaign
     campaign.compile_ok = bool(summary.get("compile_ok", False))
-    campaign.clean = bool(summary.get("clean", False)) and not violations
     campaign.runs = int(summary.get("runs", 0) or 0)
     campaign.calls = int(summary.get("calls", 0) or 0)
     campaign.reverts = int(summary.get("reverts", 0) or 0)
+    # A summary claiming clean with zero runs is an un-executed campaign —
+    # never a clean verdict, even if no violations were recorded. Keep
+    # compile_ok False as well so the pipeline marks this "cause unknown"
+    # instead of silently passing it.
+    if campaign.runs == 0 and not violations:
+        campaign.clean = False
+        campaign.compile_ok = False
+        LOGGER.warning(
+            "vyper campaign for %s reported a summary with 0 runs; "
+            "inconclusive, not clean",
+            target_label or contract_name,
+        )
+    else:
+        campaign.clean = bool(summary.get("clean", False)) and not violations
     for note in summary.get("notes", []) or []:
         LOGGER.info("vyper campaign note for %s: %s", target_label, note)
 
@@ -315,8 +328,12 @@ def run_vyper_campaign(
             "vyper invariant fuzzing broke %d invariant(s) for %s",
             len(findings), label,
         )
-    else:
+    elif campaign.clean:
         LOGGER.info("vyper invariant fuzzing clean for %s (%.1fs)", label, elapsed)
+    else:
+        # Non-clean, non-violating outcomes (compile failure,
+        # inconclusive runs) must not be logged as "clean".
+        LOGGER.info("vyper invariant fuzzing ended without a clean verdict for %s (%.1fs)", label, elapsed)
     if notes is not None and not campaign.compile_ok and not campaign.clean:
         # Fix D: "did not compile" requires actual compiler-failure
         # evidence — provable or absent. Signal/timeout kills already

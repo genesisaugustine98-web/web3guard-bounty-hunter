@@ -275,3 +275,35 @@ You said "hunt those 14 next" — the 14 regressions the weakness-hunt round int
 **Proof it works.** 2 new regression tests (both passing): a recently-claimed old item is no longer flagged stale; syncing one finding's timeline ignores other findings' verdicts. The existing stale-claims test was updated to the corrected semantics (backdates the claim event, not the item). Full suite: 888 passed (was 886), same 4 pre-existing environment failures (forge binary unreachable as root), 16 skipped; ruff + mypy clean. Commit: selfimprove(iteration 2). Not pushed.
 
 **Honest residual risk.** None significant — both fixes are narrowly scoped to the queue's own logic and don't touch verdict computation.
+
+## 2026-10-02 — Self-improvement loop, iteration 3: discovery + hunt CLI (plain-language note)
+
+**Focus this tick.** The loop rotates its audit focus; this run covered the discovery + hunt CLI area (the "fresh code targeting" machinery: deployer watcher, upgrade watcher, trigger queue, and the long-tail sweep runner). The trigger queue's crash-recovery and the `run_hunt` report renderers survived the audit intact — no cheap shot there, so nothing changed.
+
+**What was wrong (1).** The long-tail sweep runner's `plan()` — documented as passive and safe to preview — called the deny-list host check on each target without catching the refusal. A single misconfigured target entry (a `localhost` or metadata URL, even listed by mistake) raised out of `plan()` and aborted the *entire* run: every other target's planning, execution, and audit entries were lost, contradicting the documented "every per-target decision recorded" behavior.
+
+**What changed (1).** A deny-listed target now becomes a `skipped` job in the plan with the refusal reason in its detail, and `run()` processes the remaining targets normally. One bad entry can no longer take the whole sweep down. The exec-time re-check still fires, so a plan-only preview and a real run agree.
+
+**What was wrong (2).** Both chain watchers stored the chain head as their "last scanned block" cursor on first run — but the first real scan starts at *cursor + 1*. Any deployment (deployer watcher) or proxy upgrade (upgrade watcher) landing exactly in the baseline block was skipped silently and forever: a missed fresh deployment is a missed hunt target.
+
+**What changed (2).** The first-run baseline is now one block *before* the head (clamped at 0), so the first real scan covers the baseline block itself. Ancient history still isn't replayed — only that one boundary block was ever at risk. (Git-tag baselining is tag-name based and intentionally skips the newest tag at setup; unchanged.)
+
+**Proof it works.** 3 new regression tests + 2 updated (both passing): a deny-listed target plans as `skipped` while a good target in the same config still runs to `done`; a deployment at the baseline head block is found on the second poll; a proxy upgrade at the baseline head block triggers on the second poll. The two old deny-list tests were updated to the corrected "skip, don't abort" semantics. Full suite: 891 passed (was 888), same 4 pre-existing environment failures (forge binary permission-denied as root), 16 skipped; ruff + mypy clean. Commit: selfimprove(iteration 3). Not pushed.
+
+**Honest residual risk.** None significant — both fixes are narrowly scoped to the targeting modules and don't touch verdict computation or any network behavior.
+
+## 2026-10-02 — Self-improvement loop, iteration 4: LLM router + multi-language harnesses (plain-language note)
+
+**Focus this tick.** The loop rotates its audit focus; this run covered the LLM router + multi-language invariant harnesses area (the free-tier failover chain, the titanoboa/Vyper and snforge/Cairo campaign runners and their output parsers). The router itself survived the audit intact — the failover, 429 backoff, auth parking, and offline-degrade paths all behave as documented, and a parallel audit of router/client/provider found no additional cheap shots (its report, if it names anything new, goes to the improvement backlog rather than this run).
+
+**What was wrong (1).** The Cairo output parser treated snforge's "Tests: 0 passed, 0 failed" as a CLEAN verdict — a harness that ran but executed zero invariant tests would be reported as "nothing violated", silently implying the contract was checked when it wasn't. The Vyper parser had the same bug class (a driver summary claiming clean with `runs: 0` would mark the campaign clean).
+
+**What changed (1).** Both parsers now require at least one executed test/run before anything can be marked clean. A zero-test Cairo run keeps `compile_ok=False` so the pipeline labels it "cause unknown" (inconclusive) instead of silently passing; a zero-run Vyper summary does the same. A loud warning is logged in both cases.
+
+**What was wrong (2).** Both campaign runners logged "invariant fuzzing clean for X" whenever no findings were produced — even when the campaign had not compiled or ended inconclusively. A quick log scan could read that as "the contract passed" when it only meant "nothing broke the invariants".
+
+**What changed (2).** The "clean" log line now fires only when the campaign actually completed clean; non-clean endings log "ended without a clean verdict". Report verdicts were already correct — this only fixed the misleading log wording.
+
+**Proof it works.** 2 new regression tests (both passing): a "0 passed, 0 failed" snforge line parses as inconclusive (not clean); a Vyper summary with `clean: True` but `runs: 0` parses as inconclusive. The existing clean-path tests still pass unchanged (real clean runs with actual executions still verdict clean). Full suite: 893 passed (was 891), same 4 pre-existing environment failures (forge/vyper-venv permission-denied as root, sandbox-killed toolchains — both e2e multilang tests verified failing on pristine code too, environmental), 16 skipped; ruff + mypy clean. Commit: selfimprove(iteration 4). Not pushed.
+
+**Honest residual risk.** None significant — both fixes only touch verdict/log labeling in the two parser/runner modules; verdict computation for real campaigns is unchanged, and the changes are covered by regression tests.

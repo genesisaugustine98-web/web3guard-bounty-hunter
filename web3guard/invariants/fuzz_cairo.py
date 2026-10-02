@@ -175,8 +175,19 @@ def parse_snforge_output(
     suite = _SUITE_RE.search(output)
     failing = _extract_failure_blocks(output)
     if suite and int(suite.group(2)) == 0 and not failing:
-        campaign.compile_ok = True
-        campaign.clean = True
+        if int(suite.group(1)) > 0:
+            campaign.compile_ok = True
+            campaign.clean = True
+            return [], campaign
+        # A "Tests: 0 passed, 0 failed" line means the harness ran but no
+        # invariant test was discovered/executed — an INCONCLUSIVE run,
+        # never a clean verdict. compile_ok stays False so downstream
+        # labels this "cause unknown" instead of silently passing.
+        LOGGER.warning(
+            "snforge executed 0 invariant tests for %s; inconclusive, "
+            "not clean",
+            target_label or contract_name,
+        )
         return [], campaign
 
     campaign.compile_ok = True
@@ -393,8 +404,13 @@ def run_cairo_campaign(
             "cairo invariant fuzzing broke %d invariant(s) for %s",
             len(findings), label,
         )
-    else:
+    elif campaign.clean:
         LOGGER.info("cairo invariant fuzzing clean for %s (%.1fs)", label, elapsed)
+    else:
+        # Non-clean, non-violating outcomes (compile failure, resource
+        # exhaustion handled above, inconclusive runs) must not be
+        # logged as "clean".
+        LOGGER.info("cairo invariant fuzzing ended without a clean verdict for %s (%.1fs)", label, elapsed)
     if notes is not None and not campaign.compile_ok and not campaign.clean:
         # Fix D: "did not compile" requires actual compiler-failure
         # evidence — provable or absent. Signal/timeout kills already
