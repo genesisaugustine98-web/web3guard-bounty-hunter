@@ -715,14 +715,50 @@ def test_stale_claims_watchdog(tmp_path: Path) -> None:
     item = queue.add("H-01", "t", "r")
     queue.claim(item.id, by="AG BABY")
     assert queue.stale_claims(max_age_days=14) == []
-    # Backdate the claim: the watchdog must flag it.
-    item.created_at = time.time() - 20 * 86400
+    # Backdate the *claim*: the watchdog must flag it.
+    for e in item.events:
+        if e.get("event") == "claimed":
+            e["at"] = time.time() - 20 * 86400
     queue._save()
     queue2 = RediveQueue(tmp_path / "q.json")
     stale = queue2.stale_claims(max_age_days=14)
     assert [i.id for i in stale] == [item.id]
     # Claimed items are unresolved until an explicit outcome is recorded.
     assert [i.id for i in queue2.unresolved()] == [item.id]
+
+
+def test_stale_claims_measures_claim_age_not_item_age(
+    tmp_path: Path,
+) -> None:
+    """An item created 30 days ago but claimed yesterday is a fresh
+    promise — the watchdog must NOT flag it (regression: the old code
+    compared ``created_at``)."""
+    queue = RediveQueue(tmp_path / "q.json")
+    item = queue.add("H-01", "t", "r")
+    item.created_at = time.time() - 30 * 86400
+    queue.claim(item.id, by="AG BABY")
+    queue._save()
+    queue2 = RediveQueue(tmp_path / "q.json")
+    assert queue2.stale_claims(max_age_days=14) == []
+
+
+def test_sync_from_history_ignores_other_findings_verdicts(
+    tmp_path: Path,
+) -> None:
+    """sync_from_history(finding_id=...) reconciles ONE finding's timeline:
+    BAND-AID/REGRESSED verdicts for *other* findings must not leak into
+    this finding's queue additions (regression: the full list was passed
+    to add_from_verdicts unfiltered)."""
+    queue = RediveQueue(tmp_path / "q.json")
+    finding = _finding(severity="low")  # H-01, low: STILL OPEN not queued
+    verdicts = [
+        VersionVerdict("H-01", "v1", STILL_OPEN, "high", ["e1"]),
+        VersionVerdict("H-99", "v2", BAND_AID, "high", ["not mine"]),
+        VersionVerdict("H-99", "v3", REGRESSED, "high", ["not mine"]),
+    ]
+    added = queue.sync_from_history("H-01", verdicts, finding)
+    assert added == []
+    assert queue.list() == []
 
 
 def test_queue_survives_roundtrip_with_outcomes(tmp_path: Path) -> None:

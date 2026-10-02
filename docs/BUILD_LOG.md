@@ -259,3 +259,19 @@ You said "hunt those 14 next" — the 14 regressions the weakness-hunt round int
 **What changed (2).** The word-list now also catches timeout, cooldown, lockup, vest, grace, cliff, unlock, and timelock. The matcher deliberately errs toward flagging more as time-limited: the worst outcome of flagging too much is one test move being skipped, while missing one produces false alarms.
 
 **Proof it works.** 2 new regression tests (both passing): a `bytes32` constant no longer yields a bogus sender while a real address still is mined; vesting/lockup phrasing is now classified time-limited while a plain balance rule stays permanent. Full suite: 886 passed (was 884), same 4 pre-existing environment failures (forge binary unreachable as root), 16 skipped; ruff + mypy clean. Commit: selfimprove(iteration 1). Not pushed.
+
+## 2026-10-02 — Self-improvement loop, iteration 2: verification + history engine (plain-language note)
+
+**Focus this tick.** The loop rotates its audit focus; this run covered the verification + history engine (the second-opinion/false-positive machinery and the audit-timeline trackers). The verification ensemble itself (prosecutor → defense → two-judge panel, calibration checks, phantom-confirmation hardening) survived the audit intact — no cheap shot there, so nothing changed.
+
+**What was wrong (1).** The re-dive queue's "stale claims" watchdog — which flags items someone claimed to look at but never resolved — measured staleness from when the *item was created*, not when the *claim was made*. An item added 30 days ago but claimed yesterday (a fresh promise to look) would be wrongly flagged as stale, crying wolf at the human reviewer.
+
+**What changed (1).** The watchdog now measures from the latest "claimed" event timestamp (falling back to creation time for legacy items that predate event logging).
+
+**What was wrong (2).** `sync_from_history(finding_id, ...)` — the entry point that reconciles the queue against *one* finding's verdict timeline — passed the entire unfiltered verdict list to the item builder. Any direct caller passing a multi-finding list would queue another finding's band-aids and regressions under this finding's sync. (The live hunt pipeline already pre-filters, so production was unaffected — this closed the trapdoor for the API contract.)
+
+**What changed (2).** The verdicts are now filtered to the given `finding_id` before queueing; the docstring contract is now enforced by the code.
+
+**Proof it works.** 2 new regression tests (both passing): a recently-claimed old item is no longer flagged stale; syncing one finding's timeline ignores other findings' verdicts. The existing stale-claims test was updated to the corrected semantics (backdates the claim event, not the item). Full suite: 888 passed (was 886), same 4 pre-existing environment failures (forge binary unreachable as root), 16 skipped; ruff + mypy clean. Commit: selfimprove(iteration 2). Not pushed.
+
+**Honest residual risk.** None significant — both fixes are narrowly scoped to the queue's own logic and don't touch verdict computation.

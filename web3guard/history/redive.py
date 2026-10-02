@@ -72,6 +72,23 @@ VALID_OUTCOMES = (RESOLVED_FIXED, RESOLVED_ACCEPTED_RISK, RESOLVED_STILL_OPEN)
 _BuiltinList = list
 
 
+def _last_claim_at(item: RediveItem) -> float:
+    """Timestamp of the latest 'claimed' event; ``created_at`` fallback.
+
+    A claim is a promise to look, not a resolution — so the watchdog
+    measures how long ago the promise was made, not how long ago the
+    item was created. An item added 30 days ago but claimed yesterday
+    is a fresh promise, not a stale one.
+    """
+    stamps: list[float] = []
+    for e in item.events:
+        if e.get("event") == "claimed":
+            at = e.get("at")
+            if isinstance(at, (int, float)):
+                stamps.append(float(at))
+    return max(stamps) if stamps else item.created_at
+
+
 def default_queue_path(workdir: str | Path | None = None) -> Path:
     """Queue location following the ``<workdir>/.web3guard/`` convention."""
     base = Path(workdir) if workdir is not None else Path.cwd()
@@ -287,16 +304,19 @@ class RediveQueue:
         return item
 
     def stale_claims(self, max_age_days: float = 14.0) -> _BuiltinList[RediveItem]:
-        """Claimed-but-never-resolved items older than ``max_age_days``.
+        """Claimed-but-never-resolved items claimed more than
+        ``max_age_days`` ago.
 
         The watchdog for "nothing is silently dropped": a claim is a
-        promise to look, not a resolution.
+        promise to look, not a resolution. Age is measured from the
+        latest 'claimed' event — an item created long ago but claimed
+        recently is a fresh promise, not a stale one.
         """
         cutoff = time.time() - max_age_days * 86400
         return [
             i
             for i in self.list(status=STATUS_CLAIMED)
-            if i.created_at < cutoff
+            if _last_claim_at(i) < cutoff
         ]
 
     def _require(self, item_id: str) -> RediveItem:
@@ -353,7 +373,8 @@ class RediveQueue:
 
         Idempotent: re-running never duplicates or drops items.
         """
-        added = self.add_from_verdicts(verdicts)
+        mine = [v for v in verdicts if v.finding_id == finding_id]
+        added = self.add_from_verdicts(mine)
         title = finding.title if finding else finding_id
         severity = str(finding.severity).lower() if finding else ""
 
