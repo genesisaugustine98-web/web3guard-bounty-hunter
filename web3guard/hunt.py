@@ -438,11 +438,20 @@ def _git_tags(repo: Path) -> list[str]:
 
 
 def _version_key(tag: str) -> tuple:
-    """Best-effort ordering for version-like tags (v1.2.3, 2.0, ...)."""
-    parts: list[Any] = []
-    for chunk in re.split(r"[.\-+_]", tag.lstrip("vV")):
-        parts.append(int(chunk) if chunk.isdigit() else chunk)
-    return (0, tuple(parts)) if parts and isinstance(parts[0], int) else (1, tag)
+    """Best-effort ordering for version-like tags (v1.2.3, 2.0, ...).
+
+    Each chunk is encoded as ``(0, int)`` for numeric parts and
+    ``(1, str)`` for the rest, so two tags can never raise
+    ``TypeError`` when compared. Tags like ``v1.2`` vs ``v1.x``
+    (or ``2.0`` vs ``2.0rc1``) used to crash ``sorted()`` here and
+    silently drop the whole version-history stage.
+    """
+    chunks = re.split(r"[.\-+_]", tag.lstrip("vV"))
+    keyed: list[tuple[int, Any]] = [
+        (0, int(c)) if c.isdigit() else (1, c) for c in chunks]
+    if keyed and keyed[0][0] == 0:
+        return (0, tuple(keyed))
+    return (1, tag)
 
 
 def _history_stage(repo: Path, cfg: dict[str, Any], workdir: Path,

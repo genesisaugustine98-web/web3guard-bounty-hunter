@@ -675,3 +675,50 @@ def test_write_hunt_report_formats(tmp_path: Path) -> None:
     assert len(payload["findings"]) == 1
     with pytest.raises(ValueError):
         write_hunt_report(result, tmp_path, formats=["pdf"])
+
+
+# ---------------------------------------------------------------------------
+# Self-improvement loop, iteration 7 (discovery + hunt CLI):
+# mixed tag sorting must never crash the history stage.
+# ---------------------------------------------------------------------------
+
+
+def test_version_key_mixed_tags_sort_without_crash() -> None:
+    from web3guard.hunt import _version_key
+
+    tags = ["v1.2", "v1.x", "v1.10", "2.0rc1", "v2.0", "not-a-version",
+            "v1.2-beta", "1.9"]
+    ordered = sorted(tags, key=_version_key)  # must not raise TypeError
+    # Numeric ordering still holds for pure version tags.
+    assert ordered.index("v1.2") < ordered.index("v1.10")
+    assert ordered.index("v1.2") < ordered.index("1.9")
+    assert ordered.index("v1.10") < ordered.index("v2.0")
+    # Non-version tags sort after the version-like ones, not crashing.
+    assert ordered.index("not-a-version") > ordered.index("v2.0")
+
+
+def test_cli_hunt_max_redteam_files_wired(tmp_path: Path) -> None:
+    """--max-redteam-files reaches run_hunt's config like its sibling flag."""
+    import web3guard.hunt
+    from web3guard.cli import main
+
+    captured: dict[str, Any] = {}
+
+    def _fake_run_hunt(target: str, config: Any, **kwargs: Any):
+        captured["max_redteam_files"] = dict(config).get(
+            "hunt", {}).get("max_redteam_files")
+        captured["target"] = target
+        return web3guard.hunt.HuntResult(target=target, stages=[])
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(web3guard.hunt, "run_hunt", _fake_run_hunt)
+    try:
+        rc = main(["--workdir", str(tmp_path), "hunt", str(tmp_path),
+                   "--out", str(tmp_path / "reports"),
+                   "--max-redteam-files", "3",
+                   "--skip-static", "--skip-invariants", "--skip-redteam",
+                   "--skip-verify", "--skip-history"])
+    finally:
+        monkey.undo()
+    assert rc == 0
+    assert captured["max_redteam_files"] == 3

@@ -233,6 +233,9 @@ def build_parser() -> argparse.ArgumentParser:
     hunt.add_argument("--max-invariant-contracts", type=int, default=None,
                       help="Cap on contracts fuzzed per target "
                            "(default from config)")
+    hunt.add_argument("--max-redteam-files", type=int, default=None,
+                      help="Cap on files the AI red-team reviews per target "
+                           "(default from config)")
 
     # ---- watch ----------------------------------------------------------
     # Phase 7: trigger consumer. Drains the phase-5 upgrade-trigger
@@ -1118,6 +1121,9 @@ def _cmd_hunt(args: argparse.Namespace) -> int:
     if args.max_invariant_contracts is not None:
         cfg.setdefault("hunt", {})["max_invariant_contracts"] = \
             args.max_invariant_contracts
+    if args.max_redteam_files is not None:
+        cfg.setdefault("hunt", {})["max_redteam_files"] = \
+            args.max_redteam_files
 
     slug = "".join(
         c if (c.isalnum() or c in "-_") else "-"
