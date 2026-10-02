@@ -203,3 +203,13 @@ Technical notes: full test suite 735 passed / 4 failed / 16 skipped — all 4 fa
 **Proof it works.** 4 new regression tests, all passing: parsing keeps `("address payable", "to")`, both renderers emit the right signature, and a live forge run on the exact contract shape from the attack test library compiles and runs cleanly. Full suite still green; ruff + mypy clean.
 
 **Honest residual risk.** None significant — this was a pure parsing bug with a complete fix. Exotic parameter types (function types, nested structs) were already out of the fuzzable set and remain skipped with a note.
+
+## 2026-10-02 — Weakness hunt, fix 4 of 6: attacker contracts now run inside ghost mode (plain-language note)
+
+**What was wrong.** The machine has two engines: the "attack" engine (which deploys hacker contracts that try reentrancy, forced donations, etc.) and the "ghost" engine (which tracks the contract's internal accounting to catch subtle money bugs). The problem: they never ran together. When the ghost engine was active, the attacker contracts were never deployed — so the entire reentrancy family of bugs, which the attack engine was specifically built to catch, slipped through the main pipeline uncaught.
+
+**What changed.** The ghost engine now deploys the attacker contracts alongside the target and exposes the attack actions (reentrancy strike, multi-step heist, forced-ETH donation, time-warp, adaptive assault, approval drain) — but routed through the ghost engine's own tracked calls, so every attacker-driven action is accounted for exactly like a regular test call. A new "attacker no-profit" check asserts the hackers never end up with more money than they were given. This is on by default and can be turned off.
+
+**Proof it works.** 4 new regression tests, all passing: the ghost+attack project renders the attacker contracts and actions, the reentrancy is armed with the ghost-tracked call signature, the no-profit check is present and active, and a live forge run on a classic reentrancy-vulnerable vault now catches the theft (broken money-flow invariants + attacker profit). Full suite still green; ruff + mypy clean.
+
+**Honest residual risk.** The scripted reentrancy only fires on the classic vault shape (payable deposit taking no arguments + withdraw of a single amount); exotic vault interfaces still rely on the fuzzer stumbling into the right sequence. The attacker-profit check can only catch theft that actually moves money — a reentrancy that merely freezes the contract (denial of service) won't trip it, though the money-flow invariants may still catch the accounting break.

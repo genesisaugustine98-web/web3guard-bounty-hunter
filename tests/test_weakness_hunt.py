@@ -556,6 +556,102 @@ def test_e2e_multi_contract_file_compiles_and_bug_caught(forge_env: dict) -> Non
         f"expected the fee-accounting bug to be caught, got {sorted(by_id)}")
 
 
+# ---------------------------------------------------------------------------
+# Target 4: attacker contracts run inside ghost mode
+# ---------------------------------------------------------------------------
+
+_REENTER_SRC = """\
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+// Stale-snapshot reentrancy (same shape as test_simulator_attack.py).
+contract ReenterVault {
+    mapping(address => uint256) public balances;
+    uint256 public totalDeposited;
+    uint256 public totalWithdrawn;
+    function deposit() external payable {
+        balances[msg.sender] += msg.value;
+        totalDeposited += msg.value;
+    }
+    function withdraw(uint256 amount) external {
+        uint256 bal = balances[msg.sender];
+        require(bal >= amount, "insufficient");
+        (bool ok, ) = msg.sender.call{value: amount}("");
+        require(ok, "transfer failed");
+        balances[msg.sender] = bal - amount;
+        totalWithdrawn += amount;
+    }
+}
+"""
+
+
+def _ghost_files(source: str, name: str, *, attack: bool = True):
+    invs = [i for i in tmpl.template_invariants(source)
+            if i.id in tmpl.GHOST_TEMPLATE_IDS]
+    assert invs, "expected ghost templates to apply"
+    kept, _ = tmpl.resolve_ghost_templates(invs, source)
+    return tmpl.render_ghost_project(source, name, kept, FuzzBounds(), attack=attack)
+
+
+def test_ghost_attack_renders_attacker_contracts() -> None:
+    files, notes = _ghost_files(_REENTER_SRC, "ReenterVault", attack=True)
+    test_src = files["test/Invariant.t.sol"]
+    # Attacker contracts deployed and driven through passthroughs.
+    assert "DonationAttacker public donationAttacker" in test_src
+    assert "ReentrancyAttacker public reenterAttacker" in test_src
+    assert "function act_attack_reenter(" in test_src
+    assert "function act_heist(" in test_src
+    assert "function act_donateForcedEth(" in test_src
+    assert "function act_adaptiveAssault(" in test_src
+    # Armed with the *passthrough* signature (ghost-tracked reentry).
+    assert 'abi.encodeWithSignature("withdraw(uint256,uint256)"' in test_src
+    # Attacker-no-profit invariant present and not commented out.
+    assert "\n    function invariant_attacker_no_profit() public view {" in test_src
+    # Attacker sources shipped.
+    assert "test/attackers/ReentrancyAttacker.sol" in files
+    assert "test/attackers/DonationAttacker.sol" in files
+    assert any("attacker contracts deployed inside ghost mode" in n for n in notes)
+
+
+def test_ghost_attack_disabled_without_flag() -> None:
+    files, _ = _ghost_files(_REENTER_SRC, "ReenterVault", attack=False)
+    test_src = files["test/Invariant.t.sol"]
+    assert "reenterAttacker" not in test_src
+    assert "act_attack_reenter" not in test_src
+    assert "invariant_attacker_no_profit" not in test_src
+    assert "test/attackers/ReentrancyAttacker.sol" not in files
+
+
+def test_ghost_attack_follows_bounds_by_default() -> None:
+    # attack=None follows bounds.attack_enabled (ON by default).
+    files, _ = _ghost_files(_REENTER_SRC, "ReenterVault")
+    assert "function act_attack_reenter(" in files["test/Invariant.t.sol"]
+    files_off, _ = tmpl.render_ghost_project(
+        _REENTER_SRC, "ReenterVault",
+        [i for i in tmpl.template_invariants(_REENTER_SRC) if i.id in tmpl.GHOST_TEMPLATE_IDS][:1],
+        FuzzBounds(attack_enabled=False), attack=None)
+    assert "act_attack_reenter" not in files_off["test/Invariant.t.sol"]
+
+
+@needs_forge
+def test_e2e_ghost_attack_catches_reentrancy(forge_env: dict) -> None:
+    """Target 4: the reentrancy family is caught through the main (ghost)
+    pipeline — the attacker contracts run inside ghost mode. The theft shows
+    up as broken flow invariants (withdrawals > deposits) and, when the
+    fuzzer schedules the scripted strike, as attacker profit."""
+    res = _run_pipeline(_REENTER_SRC, "ReenterVault", runs=64)
+    assert res.campaign is not None and res.campaign.compile_ok, (
+        f"ghost+attack project must compile: {res.notes}")
+    by_id = {f.metadata.get("invariant_id") for f in res.findings}
+    caught = by_id & {
+        "invariant_attacker_no_profit",
+        "tmpl-cum-withdraw-lte-deposit",
+        "tmpl-cum-flow-conservation",
+        "tmpl-total-deposited-gte-withdrawn",
+    }
+    assert caught, (
+        f"expected the reentrancy to be caught in ghost mode, got {sorted(by_id)}")
+
+
 @needs_forge
 def test_e2e_payable_param_contract_compiles_and_runs(forge_env: dict) -> None:
     """Target 3: the batch_01 payable-param regression — the campaign must

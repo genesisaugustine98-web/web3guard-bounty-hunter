@@ -891,11 +891,21 @@ def render_ghost_project(
     contract_name: str,
     invariants: list[Invariant],
     bounds: FuzzBounds,
+    *,
+    attack: bool | None = None,
 ) -> tuple[dict[str, str], list[str]]:
     """Render a Foundry project with the ghost-state handler harness.
 
     Returns (files, notes). Raises ValueError when no usable ghost template
     survived resolution (caller falls back to an honest skip).
+
+    ``attack`` (weakness-hunt round, target 4): when True (default follows
+    ``bounds.attack_enabled``, ON by default), the ghost handler ALSO
+    deploys the Phase-1 attacker contracts and exposes the attack actions
+    — but routed through the handler's own passthroughs, so ghost
+    accounting stays in lockstep. This closes the integration gap where
+    ghost (temporal) templates disabled the attack simulator and the
+    reentrancy family stayed uncaught through the main pipeline.
     """
     from web3guard.invariants.harness import (
         NEUTRAL_DEPLOYER,
@@ -938,6 +948,44 @@ def render_ghost_project(
         notes.append(
             "ghost harness sender impersonation: mined from source: "
             + ", ".join(mined)
+        )
+    # Weakness-hunt round, target 4: run the attacker contracts INSIDE
+    # ghost mode. `use_attack` follows bounds.attack_enabled by default.
+    use_attack = bounds.attack_enabled if attack is None else bool(attack)
+    atk_specs: list = []
+    atk_vault = None
+    atk_eth_vault = False
+    atk_approve_fn = None
+    if use_attack:
+        from web3guard.invariants import attackers as _attackers
+
+        pragma = extract_pragma(contract_source)
+        atk_specs, atk_notes = _attackers.select_attackers(pragma, sigs)
+        notes.extend(f"ghost harness: {n}" for n in atk_notes)
+        atk_vault = _attackers.detect_vault_interface(sigs)
+        by_name = {fn.name: fn for fn in sigs}
+        dep_fn = by_name.get(atk_vault.deposit_fn) if atk_vault else None
+        atk_eth_vault = bool(
+            atk_vault is not None
+            and dep_fn is not None
+            and dep_fn.mutability == "payable"
+            and not dep_fn.params
+        )
+        atk_approve_fn = next(
+            (
+                fn
+                for fn in sigs
+                if fn.name.lower() == "approve"
+                and len(fn.params) == 2
+                and fn.params[0][0] == "address"
+                and fn.params[1][0].startswith("uint")
+            ),
+            None,
+        )
+        notes.append(
+            "ghost harness: attacker contracts deployed inside ghost mode "
+            f"({', '.join(s.name for s in atk_specs)}); attack actions route "
+            "through the ghost passthroughs so accounting stays in lockstep."
         )
     seen_names: set[str] = set()
     passthroughs: list[str] = []
@@ -1024,6 +1072,7 @@ def render_ghost_project(
         "    function deal(address account, uint256 newBalance) external;",
         "    function prank(address msgSender) external;",
         "    function prank(address msgSender, address txOrigin) external;",
+        "    function warp(uint256 newTimestamp) external;",
         "}",
         "WgVm constant WGVM = WgVm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);",
         f"address constant WG_NEUTRAL_DEPLOYER = address({NEUTRAL_DEPLOYER});",
@@ -1038,6 +1087,40 @@ def render_ghost_project(
         "    address internal _wgTxOrigin;",
         "",
     ]
+    if use_attack:
+        # Attacker-contract imports (target 4): deployed below, driven
+        # through the ghost passthroughs.
+        handler_parts.insert(
+            handler_parts.index(f'import "../src/{contract_name}.sol";') + 1,
+            'import "./attackers/DonationAttacker.sol";\n'
+            'import "./attackers/ReentrancyAttacker.sol";\n'
+            'import "./attackers/ApprovalDrainer.sol";',
+        )
+        handler_parts.extend([
+            "    // --- attacker contracts (weakness-hunt round, target 4) ---",
+            "    DonationAttacker public donationAttacker;",
+            "    ReentrancyAttacker public reenterAttacker;",
+            "    ApprovalDrainer public approvalDrainer;",
+            "    // Ghost accounting for attacker funding (see the",
+            "    // invariant_attacker_no_profit invariant in the test).",
+            "    uint256 public totalAttackerFunding;",
+            "    // Sender-pool slots for the attacker contracts (appended",
+            "    // after users/mined senders; indices fixed at render time).",
+            f"    uint256 constant WG_SENDER_DONATION = {len(pool_addrs)};",
+            f"    uint256 constant WG_SENDER_REENTER = {len(pool_addrs) + 1};",
+            f"    uint256 constant WG_SENDER_DRAINER = {len(pool_addrs) + 2};",
+            "    uint256 constant WG_MAX_CALL_VALUE = "
+            f"{bounds.attack_max_value_wei};",
+            "    // On-chain epsilon-greedy bandit state (adaptive strategy).",
+            "    uint256[4] public wgModeScore;",
+            "    uint256 public wgModePulls;",
+            "",
+        ])
+        pool_addrs.extend([
+            "address(donationAttacker)",
+            "address(reenterAttacker)",
+            "address(approvalDrainer)",
+        ])
     for vname, vtype in var_decls.items():
         handler_parts.append(f"    {vtype} public {vname};")
     if var_decls:
@@ -1046,11 +1129,26 @@ def render_ghost_project(
     handler_parts.append("        WGVM.prank(WG_NEUTRAL_DEPLOYER);")
     handler_parts.append(f"        target = new {contract_name}();")
     handler_parts.append("        wgNeutralDeployer = WG_NEUTRAL_DEPLOYER;")
+    if use_attack:
+        handler_parts.append("        donationAttacker = new DonationAttacker();")
+        if any(s.name == "ReentrancyAttacker" for s in atk_specs):
+            handler_parts.append("        reenterAttacker = new ReentrancyAttacker();")
+        if any(s.name == "ApprovalDrainer" for s in atk_specs):
+            handler_parts.append("        approvalDrainer = new ApprovalDrainer();")
     for a in pool_addrs:
         handler_parts.append(f"        wgSenderPool.push({a});")
     handler_parts.append("        for (uint256 _wgi = 0; _wgi < wgSenderPool.length; _wgi++) {")
     handler_parts.append("            WGVM.deal(wgSenderPool[_wgi], 10000 ether);")
     handler_parts.append("        }")
+    if use_attack:
+        # The attacker contracts sit in the sender pool (so the harness can
+        # prank as them) but must NOT start with 10000 ETH — that would
+        # break invariant_attacker_no_profit by construction. They start at
+        # zero; _wgFundAttacker is the only funding source the invariant
+        # counts. (deal on address(0) for an undeployed attacker is a no-op.)
+        handler_parts.append("        WGVM.deal(address(donationAttacker), 0);")
+        handler_parts.append("        WGVM.deal(address(reenterAttacker), 0);")
+        handler_parts.append("        WGVM.deal(address(approvalDrainer), 0);")
     for stmt in setup_all:
         handler_parts.append(f"        {stmt}")
     handler_parts.append("    }")
@@ -1080,6 +1178,150 @@ def render_ghost_project(
         "",
         _render_entry_dispatcher(contract_name, sigs, via_passthrough=True),
     ])
+    # Weakness-hunt round, target 4: the attack actions, routed through the
+    # ghost passthroughs (this.deposit(...)/this.withdraw(...)) so every
+    # attacker-driven call is ghost-tracked exactly like a fuzzer call.
+    if use_attack:
+        _atk_lines: list[str] = [
+            "    // --- attack actions (weakness-hunt round, target 4) ---",
+            "    // Routed through the ghost passthroughs above, so attacker-",
+            "    // driven calls are ghost-tracked exactly like fuzzer calls.",
+            "    function _wgCap(uint256 v) internal view returns (uint256) {",
+            "        return v > WG_MAX_CALL_VALUE ? WG_MAX_CALL_VALUE : v;",
+            "    }",
+            "",
+            "    function _wgFundAttacker(address a, uint256 v) internal {",
+            "        if (v == 0 || a == address(0)) return;",
+            "        WGVM.deal(a, a.balance + v);",
+            "        totalAttackerFunding += v;",
+            "    }",
+            "",
+            "    function _wgAttackerFunds() internal view returns (uint256) {",
+            "        return address(donationAttacker).balance",
+            "            + address(reenterAttacker).balance",
+            "            + address(approvalDrainer).balance;",
+            "    }",
+            "",
+        ]
+        if atk_eth_vault and atk_vault is not None:
+            _dep, _wd = atk_vault.deposit_fn, atk_vault.withdraw_fn
+            _atk_lines.extend([
+                "    // Scripted reentrancy: the attacker is armed with the",
+                "    // *passthrough* signature, so the reentrant call is ghost-",
+                "    // tracked exactly like a fuzzer call.",
+                "    function _wgDoReenter(uint256 v, uint256 userSeed) internal {",
+                "        if (address(reenterAttacker) == address(0) || v == 0) return;",
+                f"        this.{_dep}{{value: v}}(userSeed);",
+                "        _wgFundAttacker(address(reenterAttacker), v);",
+                "        reenterAttacker.arm(",
+                "            address(this),",
+                f'            abi.encodeWithSignature("{_wd}(uint256,uint256)", v, WG_SENDER_REENTER),',
+                "            3",
+                "        );",
+                f"        this.{_dep}{{value: v}}(WG_SENDER_REENTER);",
+                f"        this.{_wd}(v, WG_SENDER_REENTER);",
+                "        reenterAttacker.disarm();",
+                "    }",
+                "",
+                "    function act_attack_reenter(uint256 _wgValue, uint256 _wgSeed) public {",
+                "        _wgDoReenter(_wgCap(_wgValue), _wgSeed);",
+                "    }",
+                "",
+                "    // Multi-step heist: deposit, warp time, reenter, donate dust.",
+                "    function _wgDoHeist(uint256 v, uint256 warpDays, uint256 userSeed) internal {",
+                "        if (v == 0) return;",
+                f"        this.{_dep}{{value: v}}(userSeed);",
+                "        WGVM.warp(block.timestamp + ((warpDays % 30) * 1 days));",
+                "        _wgDoReenter(v, userSeed + 1);",
+                "        uint256 dust = v / 100;",
+                "        if (dust > 0 && address(donationAttacker).balance == 0) {",
+                "            _wgFundAttacker(address(donationAttacker), dust);",
+                "            donationAttacker.donate(payable(address(target)));",
+                "        }",
+                "    }",
+                "",
+                "    function act_heist(uint256 _wgValue, uint256 _wgA, uint256 _wgSeed) public {",
+                "        _wgDoHeist(_wgCap(_wgValue), _wgA, _wgSeed);",
+                "    }",
+                "",
+                "    // Deposit + withdraw cycle through the passthroughs.",
+                "    function act_vaultCycle(uint256 _wgValue, uint256 _wgW, uint256 _wgUser) public {",
+                "        uint256 v = _wgCap(_wgValue);",
+                f"        this.{_dep}{{value: v}}(_wgUser);",
+                f"        this.{_wd}(v > _wgW ? _wgW : v, _wgUser);",
+                "    }",
+                "",
+            ])
+        # Forced-ETH donation (needs no vault shape).
+        _atk_lines.extend([
+            "    // Forced-ETH donation: selfdestruct-style value injection",
+            "    // that bypasses the target's own accounting (deliberately",
+            "    // NOT ghost-tracked — that is the point).",
+            "    function act_donateForcedEth(uint256 _wgValue, uint256 _wgSeed) public {",
+            "        uint256 v = _wgCap(_wgValue);",
+            "        if (v == 0) return;",
+            "        _wgFundAttacker(address(donationAttacker), v);",
+            "        donationAttacker.donate(payable(address(target)));",
+            "        _wgSeed; // (seed kept for fuzzer arity)",
+            "    }",
+            "",
+            "    // Time-warp: advances the clock so deadline/vesting logic",
+            "    // runs against future timestamps.",
+            "    function act_warpTime(uint256 _wgDays) public {",
+            "        WGVM.warp(block.timestamp + ((_wgDays % 3650) * 1 days));",
+            "    }",
+            "",
+        ])
+        if atk_approve_fn is not None:
+            _ap = atk_approve_fn.name
+            _atk_lines.extend([
+                "    // Approval drain: approve max to the drainer, then drain.",
+                "    function act_approvalDrain(uint256 _wgSeed) public {",
+                "        if (address(approvalDrainer) == address(0)) return;",
+                f"        this.{_ap}(address(approvalDrainer), type(uint256).max, _wgSeed);",
+                "        approvalDrainer.drain(address(target));",
+                "    }",
+                "",
+            ])
+        # Adaptive bandit: four modes, epsilon-greedy over observed profit.
+        _atk_lines.extend([
+            "    // Adaptive assault: on-chain epsilon-greedy bandit over four",
+            "    // attack modes, reinforced by observed attacker profit.",
+            "    function act_adaptiveAssault(uint256 _wgSeed, uint256 _wgA, uint256 _wgB) public {",
+            "        uint256 before = _wgAttackerFunds();",
+            "        uint256 mode = 0;",
+            "        wgModePulls += 1;",
+            "        if (wgModePulls % 5 == 0) {",
+            "            mode = (uint256(keccak256(abi.encodePacked(block.timestamp, _wgSeed))) % 4);",
+            "        } else {",
+            "            uint256 best = 0;",
+            "            for (uint256 _wgm = 1; _wgm < 4; _wgm++) {",
+            "                if (wgModeScore[_wgm] > wgModeScore[best]) { best = _wgm; }",
+            "            }",
+            "            mode = best;",
+            "        }",
+        ])
+        if atk_eth_vault and atk_vault is not None:
+            _dep2, _wd2 = atk_vault.deposit_fn, atk_vault.withdraw_fn
+            _atk_lines.extend([
+                f"        if (mode == 0) {{ this.{_dep2}{{value: _wgCap(_wgB)}}(_wgA); }}",
+                "        else if (mode == 1) { _wgDoReenter(_wgCap(_wgA), _wgB); }",
+                f"        else if (mode == 2) {{ WGVM.warp(block.timestamp + ((_wgA % 30) * 1 days)); this.{_dep2}{{value: _wgCap(_wgA)}}(_wgB); }}",
+                "        else { _wgDoHeist(_wgCap(_wgA), _wgB, _wgSeed); }",
+            ])
+        else:
+            _atk_lines.extend([
+                "        if (mode == 0 || mode == 1) { act_donateForcedEth(_wgA, _wgB); }",
+                "        else if (mode == 2) { act_warpTime(_wgA); }",
+                "        else { _wgCallEntry(_wgSeed, address(0), _wgA, _wgB, _wgSeed); }",
+            ])
+        _atk_lines.extend([
+            "        uint256 afterProfit = _wgAttackerFunds();",
+            "        if (afterProfit > before) { wgModeScore[mode] += (afterProfit - before); }",
+            "    }",
+            "",
+        ])
+        handler_parts.extend(_atk_lines)
     handler_parts.append("")
     for fn in extra_fns:
         handler_parts.append(f"    {fn}")
@@ -1120,6 +1362,18 @@ def render_ghost_project(
     for inv in plain:
         test_parts.append(_render_plain_invariant(inv))
         test_parts.append("")
+    if use_attack:
+        # Attacker-no-profit invariant (target 4): the attacker contracts
+        # must never end up holding more than they were funded with.
+        test_parts.append(
+            "    // --- attacker no-profit invariant (target 4) ---\n"
+            "    function invariant_attacker_no_profit() public view {\n"
+            "        uint256 held = address(handler.donationAttacker()).balance\n"
+            "            + address(handler.reenterAttacker()).balance\n"
+            "            + address(handler.approvalDrainer()).balance;\n"
+            "        assert(held <= handler.totalAttackerFunding());\n"
+            "    }\n"
+        )
     test_parts.append("}")
     # Single-file project: the handler contract (with its own header) goes
     # first, then the test contract body above.
@@ -1140,18 +1394,29 @@ fs_permissions = []
 
 [invariant]
 runs = {bounds.runs}
-depth = {bounds.depth}
+depth = {bounds.effective_depth if use_attack else bounds.depth}
 fail_on_revert = {"true" if bounds.fail_on_revert else "false"}
 """
 
-    return (
-        {
-            "foundry.toml": foundry_toml,
-            f"src/{contract_name}.sol": contract_source,
-            "test/Invariant.t.sol": test_src,
-        },
-        notes,
-    )
+    files: dict[str, str] = {
+        "foundry.toml": foundry_toml,
+        f"src/{contract_name}.sol": contract_source,
+        "test/Invariant.t.sol": test_src,
+    }
+    if use_attack:
+        from web3guard.invariants import attackers as _attackers
+
+        pragma = extract_pragma(contract_source)
+        files["test/attackers/DonationAttacker.sol"] = (
+            _attackers.donation_attacker_source(pragma)
+        )
+        files["test/attackers/ReentrancyAttacker.sol"] = (
+            _attackers.reentrancy_attacker_source(pragma)
+        )
+        files["test/attackers/ApprovalDrainer.sol"] = (
+            _attackers.approval_drainer_source(pragma)
+        )
+    return (files, notes)
 
 
 def _render_ghost_invariant(
