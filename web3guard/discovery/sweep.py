@@ -270,9 +270,16 @@ class SweepRunner:
                 continue
             if kind == "repo":
                 # Deny-list is checked at plan time, even for local-only
-                # runs: a listed-but-denied host must fail loudly, not
-                # silently pass.
-                _check_url_host(target.repo_url, target.name)
+                # runs: a listed-but-denied host must be reported as a
+                # skipped job, not silently pass. It must also not abort
+                # the whole plan — one bad target entry must never take
+                # the other targets down with it.
+                try:
+                    _check_url_host(target.repo_url, target.name)
+                except SweepScopeError as e:
+                    jobs.append(SweepJob(target, kind, status="skipped",
+                                         detail=str(e)))
+                    continue
             jobs.append(SweepJob(target, kind))
         return jobs
 

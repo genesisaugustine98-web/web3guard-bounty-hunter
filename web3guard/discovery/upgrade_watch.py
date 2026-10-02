@@ -261,7 +261,11 @@ class ProxyUpgradeWatcher:
             return []
         last = self._state.get(self._block_key)
         if last is None:
-            self._state.set(self._block_key, head)
+            # Baseline one block *before* the head: the cursor stores the
+            # last scanned block, so the first real scan still covers the
+            # baseline block itself (an upgrade landing there must not be
+            # skipped forever). Don't replay older history on first run.
+            self._state.set(self._block_key, max(0, head - 1))
             return []  # baseline: don't replay history on first run
         from_block = int(last) + 1
         if from_block > head:

@@ -32,7 +32,6 @@ from web3guard.discovery import (
     RpcChainClient,
     SweepConfig,
     SweepRunner,
-    SweepScopeError,
     SweepTarget,
     TriggerQueue,
     UpgradeTrigger,
@@ -183,6 +182,21 @@ def test_deployer_watcher_first_run_baselines_without_replay(tmp_path: Path) -> 
     assert watcher.poll_once() == []
 
 
+def test_deployer_watcher_baseline_block_still_scanned(tmp_path: Path) -> None:
+    # A deployment landing in the baseline head block itself must not be
+    # skipped forever (the cursor stores the last *scanned* block).
+    dep = ContractDeployment(deployer=DEPLOYER, contract_address="0x" + "99" * 20,
+                             block_number=105, tx_hash="0x" + "aa" * 32)
+    client = FakeChainClient(head=105, deployments=[dep])
+    watcher = DeployerWatcher(
+        DeployerWatchConfig(deployers=[WatchedDeployer(address=DEPLOYER)]),
+        client, state=open_targeting_state(tmp_path), workdir=tmp_path)
+    assert watcher.poll_once() == []  # first run baselines
+    found = watcher.poll_once()       # second run scans the baseline block
+    assert len(found) == 1
+    assert found[0].block_number == 105
+
+
 def test_deployer_watcher_offline_by_default(tmp_path: Path) -> None:
     watcher = DeployerWatcher(
         DeployerWatchConfig(deployers=[WatchedDeployer(address=DEPLOYER)]),
@@ -286,6 +300,20 @@ def test_proxy_upgrade_watcher_first_run_baselines(tmp_path: Path) -> None:
     assert watcher.poll_once() == []
 
 
+def test_proxy_upgrade_watcher_baseline_block_still_scanned(tmp_path: Path) -> None:
+    # An upgrade landing in the baseline head block itself must not be
+    # skipped forever (the cursor stores the last *scanned* block).
+    client = FakeChainClient(head=110, logs=[_upgraded_log(110, NEW_IMPL)])
+    state = open_targeting_state(tmp_path)
+    watcher = ProxyUpgradeWatcher(PROXY, "demo", client, state)
+    assert watcher.poll_once() == []  # first run baselines
+    state.set(f"upgrade_watch:proxy_impl:{PROXY.lower()}", OLD_IMPL)
+    triggers = watcher.poll_once()    # second run scans the baseline block
+    assert len(triggers) == 1
+    assert triggers[0].block_number == 110
+    assert triggers[0].new_implementation.lower() == NEW_IMPL.lower()
+
+
 def test_proxy_upgrade_watcher_offline_by_default(tmp_path: Path) -> None:
     watcher = ProxyUpgradeWatcher(PROXY, "demo", NoopChainClient(),
                                   open_targeting_state(tmp_path))
@@ -357,8 +385,10 @@ def test_sweep_denies_localhost_even_when_listed(tmp_path: Path) -> None:
         SweepTarget(name="evil", repo_url="http://localhost:8080/repo.git"),
     ], min_interval_seconds=0)
     runner = SweepRunner(cfg, state=open_targeting_state(tmp_path), workdir=tmp_path)
-    with pytest.raises(SweepScopeError, match="deny-listed"):
-        runner.plan()
+    jobs = runner.plan()
+    assert len(jobs) == 1
+    assert jobs[0].status == "skipped"
+    assert "deny-listed" in jobs[0].detail
 
 
 def test_sweep_denies_metadata_ip(tmp_path: Path) -> None:
@@ -366,8 +396,27 @@ def test_sweep_denies_metadata_ip(tmp_path: Path) -> None:
         SweepTarget(name="evil", repo_url="http://169.254.169.254/latest"),
     ], min_interval_seconds=0)
     runner = SweepRunner(cfg, state=open_targeting_state(tmp_path), workdir=tmp_path)
-    with pytest.raises(SweepScopeError, match="deny-listed"):
-        runner.plan()
+    jobs = runner.plan()
+    assert len(jobs) == 1
+    assert jobs[0].status == "skipped"
+    assert "deny-listed" in jobs[0].detail
+
+
+def test_sweep_denied_target_does_not_abort_plan(tmp_path: Path) -> None:
+    cfg = SweepConfig(targets=[
+        SweepTarget(name="evil", repo_url="http://localhost:8080/repo.git"),
+        SweepTarget(name="good", repo_url="https://github.com/example/fine"),
+    ], min_interval_seconds=0)
+    runner = SweepRunner(cfg, state=open_targeting_state(tmp_path), workdir=tmp_path)
+    jobs = runner.plan()
+    assert [j.target.name for j in jobs] == ["evil", "good"]
+    assert jobs[0].status == "skipped"
+    assert "deny-listed" in jobs[0].detail
+    assert jobs[1].status == "pending"
+    # run() must handle the skipped job without raising.
+    jobs = runner.run()
+    assert jobs[0].status == "skipped"
+    assert jobs[1].status == "done"
 
 
 def test_sweep_respects_per_run_budget(tmp_path: Path) -> None:

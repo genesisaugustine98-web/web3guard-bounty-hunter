@@ -386,8 +386,13 @@ class DeployerWatcher:
             last = self.state.get(key)
             if last is None:
                 # First run: baseline at the head (or the configured
-                # start block) so we don't replay ancient history.
-                baseline = deployer.start_block or head
+                # start block) so we don't replay ancient history. The
+                # cursor stores the last *scanned* block, so baseline one
+                # block *before* the first unscanned block — otherwise a
+                # deployment landing in the baseline block itself would
+                # never be scanned (the first real scan starts at
+                # cursor + 1).
+                baseline = max(0, (deployer.start_block or head) - 1)
                 self.state.set(key, baseline)
                 self.state.record_event(
                     "deployer_watch_baseline",
