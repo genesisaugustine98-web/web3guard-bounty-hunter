@@ -343,3 +343,21 @@ You said "hunt those 14 next" — the 14 regressions the weakness-hunt round int
 **Proof it works.** 4 new regression tests (all passing): band-aid items carry the finding's title; the no-finding fallback still uses the id; the bottom line reports "fully fixed" for an open-then-fixed timeline and "1 issue still needs attention" when an issue is genuinely open at the latest version. Full suite: 900 passed (was 896), same 4 pre-existing environment failures (forge binary permission-denied as root — environmental, unchanged), 16 skipped; ruff + mypy clean. Commit: selfimprove(iteration 6). Not pushed.
 
 **Honest residual risk.** None significant — both fixes are narrowly scoped to queue-item titles and report wording; verdict computation is untouched.
+
+## 2026-10-02 — Self-improvement loop, iteration 7 (FINAL): discovery + hunt CLI (plain-language note)
+
+**Setup first.** Working tree was clean on main; no recovery needed. This is the 7th and final loop iteration — the bounded authorization expires here, and the next tick self-removes the loop.
+
+**Focus this tick.** The loop rotates its audit focus; this run covered discovery + the hunt CLI (targeting state, sweep, variant sweep, deployer/upgrade watchers, trigger queue draining, hunt report writing, CLI wiring). The sweep ROE gates, trigger-queue crash recovery, and report renderers survived the audit intact. Two small, real issues found:
+
+**What was wrong (1).** The version-history tag sorter crashed with `TypeError` on repos whose tags mix numbers and text in one segment (e.g. `v1.2` vs `v1.x`, or `2.0` vs `2.0rc1`). The crash was caught one level up and reported as "history stage crashed", so the whole version-history comparison was silently skipped for any repo with such tags. Confirmed by reproduction before fixing.
+
+**What changed (1).** Each tag chunk is now encoded as `(0, number)` or `(1, text)` before comparing, so mixed tags can never raise; numeric ordering for ordinary `v1.2.3`-style tags is unchanged.
+
+**What was wrong (2).** The CLI had `--max-invariant-contracts` but no `--max-redteam-files`, even though the config option it mirrors (`hunt.max_redteam_files`) is fully supported by the hunt pipeline — the cap was config-file-only with no way to override it from the command line.
+
+**What changed (2).** Added `--max-redteam-files` to the `hunt` command, wired through to config exactly like its sibling flag.
+
+**Proof it works.** 2 new regression tests (mixed tag lists sort without crashing with correct numeric order; the CLI flag reaches `run_hunt`'s config). Full suite: 902 passed (was 900), same 4 pre-existing environment failures (forge/vyper-venv permission-denied as root, sandbox-killed toolchains — verified failing on pristine code too), 16 skipped; ruff + mypy clean. Commit: selfimprove(iteration 7) (e7f415d). Not pushed — nothing in this loop was ever pushed.
+
+**Honest residual risk.** None significant — both fixes are narrowly scoped; tag sort order for ordinary tags is bit-identical, and the new CLI flag is purely additive.
