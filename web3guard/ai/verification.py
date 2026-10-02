@@ -280,6 +280,24 @@ class VerificationEnsemble:
 # Cost: zero marginal cost by default. LLM calls happen only when keys are
 # present and AI is enabled; ledger writes are local-only. Prompts are kept
 # short on purpose — cost matters even on free tiers.
+#
+# PHASE 4 HARDENING (2026-10-02) — the lie detector got teeth, without
+# flipping fail-open:
+#   * Two-judge panel: every judge output is schema-validated and
+#     calibration-checked (confidence >= 0.9 with no cited evidence is
+#     discarded as uncalibrated). The second judge (role verify_judge_2)
+#     runs a deliberately different decision contract. Both usable judges
+#     must agree to reject; on disagreement, machine evidence arbitrates;
+#     with no/inconclusive machine evidence the finding is ESCALATED —
+#     kept visible for a human, never CONFIRMED, never silently dropped.
+#   * Timeouts / kills / crashes are UNKNOWN, never evidence: the sandbox
+#     timeout sentinel (exit 124) and signal deaths map to reproduced=None
+#     in the command and forge_replay checkers, and a forge run must show
+#     test-execution markers before a nonzero exit counts as a reproduced
+#     failure. A typo'd expect= value is UNKNOWN, not a silent "pass".
+#   * CONFIRMED EXPLOIT is minted only on reproducible machine evidence
+#     (tier-1 replay, or machine arbitration of a judge disagreement).
+#     Judges alone can never confirm. AI hiccups keep findings visible.
 
 # -- lazily imported to avoid import cycles at module load -----------------
 # (router pulls in provider/client machinery; verification must stay
@@ -306,6 +324,42 @@ class MachineCheckResult:
                                 # could not run (e.g. forge not installed)
     detail: str = ""            # one-line human summary of what happened
     checker: str = ""           # check type that ran
+
+
+#: Exit code ``run_sandboxed`` returns when it kills a subprocess tree on
+#: timeout. It is *reserved* for that purpose: a checker must never read it
+#: as a test result (a killed fuzz run is not a reproduced bug, and a
+#: killed replay is not negative evidence either).
+_TIMEOUT_EXIT = 124
+
+
+def _killed_by_infrastructure(rc: int) -> str | None:
+    """Return a human reason when ``rc`` means "the process was killed",
+    not "the test produced a result".
+
+    Timeout kills, OOM kills and signal deaths are infrastructure noise.
+    Reading them as evidence mints phantom CONFIRMED verdicts (a timed-out
+    *failing* test looks "reproduced") or phantom rejections (a timed-out
+    *passing* replay looks "not reproduced"). Both directions map to
+    UNKNOWN instead.
+    """
+    if rc == _TIMEOUT_EXIT:
+        return ("killed by timeout (exit 124) — infrastructure failure, "
+                "not evidence")
+    if rc < 0:
+        return f"killed by signal {-rc} — infrastructure failure, not evidence"
+    if rc > 128:
+        return (f"killed by signal {rc - 128} (exit {rc}) — infrastructure "
+                "failure, not evidence")
+    return None
+
+
+#: Markers proving a forge run actually *executed* tests (as opposed to
+#: dying in compilation, RPC setup, or argument parsing and exiting
+#: nonzero for a boring reason). A nonzero exit with none of these markers
+#: is infrastructure noise, never a reproduced bug.
+_FORGE_RAN_RE = re.compile(r"(?i)\bran \d+ tests?\b|suite result:")
+_FORGE_FAILED_RE = re.compile(r"(?i)\[fail|suite result:\s*failed")
 
 
 def _check_text_marker(params: dict[str, Any]) -> MachineCheckResult:
@@ -362,6 +416,16 @@ def _check_command(params: dict[str, Any]) -> MachineCheckResult:
             detail=f"checker error (infrastructure): {e}"[:300],
             checker="command",
         )
+    killed = _killed_by_infrastructure(rc)
+    if killed is not None:
+        # A timed-out / signal-killed replay is UNKNOWN — never negative
+        # evidence (a slow genuine replay must not read as "did not
+        # reproduce" and get the finding rejected).
+        return MachineCheckResult(
+            reproduced=None,
+            detail=f"command check {killed}",
+            checker="command",
+        )
     combined = (out or "") + "\n" + (err or "")
     ok_exit = rc == expect_exit
     ok_output = True
@@ -391,6 +455,17 @@ def _check_forge_replay(params: dict[str, Any]) -> MachineCheckResult:
     """
     from web3guard.security.sandbox_guard import run_sandboxed
 
+    expect = str(params.get("expect", "fail") or "fail").lower()
+    if expect not in ("fail", "pass"):
+        # A typo'd expect (e.g. "fial") used to silently mean "pass" and
+        # kill true findings. Validate the spec before touching the
+        # environment: it is UNKNOWN, loudly.
+        return MachineCheckResult(
+            reproduced=None,
+            detail=f"invalid expect={expect!r}; must be 'fail' or 'pass' — "
+                   "evidence spec not interpretable",
+            checker="forge_replay",
+        )
     if shutil.which("forge") is None:
         return MachineCheckResult(
             reproduced=None,
@@ -411,7 +486,6 @@ def _check_forge_replay(params: dict[str, Any]) -> MachineCheckResult:
     extra = params.get("extra_args")
     if isinstance(extra, (list, tuple)):
         argv += [str(a) for a in extra]
-    expect = str(params.get("expect", "fail") or "fail").lower()
     timeout = int(params.get("timeout_s", 600) or 600)
     timeout = max(30, min(timeout, 3600))
     try:
@@ -424,10 +498,44 @@ def _check_forge_replay(params: dict[str, Any]) -> MachineCheckResult:
             detail=f"checker error (infrastructure): {e}"[:300],
             checker="forge_replay",
         )
-    failed = rc != 0
-    reproduced = failed if expect == "fail" else not failed
-    tail = ((out or "") + "\n" + (err or "")).strip().splitlines()
+    killed = _killed_by_infrastructure(rc)
+    if killed is not None:
+        # THE phantom-CONFIRMED fix: a timed-out forge run exits 124,
+        # which is nonzero, which the old code read as "the invariant
+        # broke again" under expect="fail". A killed run proves nothing.
+        return MachineCheckResult(
+            reproduced=None,
+            detail=f"forge replay {killed}",
+            checker="forge_replay",
+        )
+    combined = (out or "") + "\n" + (err or "")
+    ran = bool(_FORGE_RAN_RE.search(combined))
+    failed_markers = bool(_FORGE_FAILED_RE.search(combined))
+    tail = combined.strip().splitlines()
     tail_txt = "\n".join(tail[-6:])[:600]
+    if not ran:
+        # Nonzero exit with no test-execution markers = compile error,
+        # bad --match-test, RPC failure... infrastructure noise, not a
+        # reproduced bug (and not negative evidence either).
+        return MachineCheckResult(
+            reproduced=None,
+            detail=f"forge exited {rc} without running tests "
+                   f"(expected {'failure' if expect == 'fail' else 'success'}); "
+                   f"no test-execution markers in output. tail: {tail_txt}",
+            checker="forge_replay",
+        )
+    if expect == "fail":
+        reproduced: bool | None = True if failed_markers else (
+            False if rc == 0 else None)
+        # rc != 0 with tests run but no failure markers is ambiguous
+        # (harness error mid-run) -> UNKNOWN, not a confirmed bug.
+    else:
+        if rc == 0:
+            reproduced = True
+        elif failed_markers:
+            reproduced = False  # tests ran and failed: expected pass absent
+        else:
+            reproduced = None
     return MachineCheckResult(
         reproduced=reproduced,
         detail=f"forge test exit={rc} (expected "
@@ -441,6 +549,9 @@ def _check_forge_replay(params: dict[str, Any]) -> MachineCheckResult:
 #: may register additional checkers via ``register_machine_checker``.
 _MACHINE_CHECKERS: dict[str, Any] = {
     "text_marker": _check_text_marker,
+    # Alias: older docs/examples spell the type "text". Without the alias,
+    # evidence built from the docs silently never ran (unknown type).
+    "text": _check_text_marker,
     "command": _check_command,
     "forge_replay": _check_forge_replay,
 }
@@ -546,8 +657,50 @@ _JUDGE_SYSTEM = (
     "specific control or precondition that blocks the attack, or the "
     "prosecution's steps are speculative.\n"
     "Respond with exactly one JSON object and nothing else:\n"
-    '{"decision": "keep|reject", "reason": "<one sentence>"}'
+    '{"decision": "keep|reject", '
+    '"confidence": <0.0-1.0, how sure you are>, '
+    '"reason": "<one sentence>", '
+    '"cited_evidence": ["<exact code fact, control, or exploit step you '
+    'relied on>", "..."]}\n'
+    "Calibration rule: if your confidence is 0.9 or above you MUST list "
+    "the cited_evidence — an unsupported high-confidence verdict is "
+    "discarded as uncalibrated."
 )
+
+#: Role + system prompt for the INDEPENDENT SECOND OPINION (Phase 4
+#: hardening). Deliberately a different contract from the first judge:
+#: it assumes the first judge may be wrong, re-derives from scratch, and
+#: only counts a defense refutation when it names a *specific* control.
+#: Routed per-role so operators can pin it to a different model.
+_JUDGE_ROLE_2 = "verify_judge_2"
+
+_JUDGE_SYSTEM_2 = (
+    "You are the SECOND judge — a skeptical senior auditor giving an "
+    "independent second opinion. Assume the first judge may be wrong; do "
+    "not defer to it. Re-derive everything yourself:\n"
+    "1. Walk each prosecution exploit step and mark it feasible or "
+    "blocked, citing the EXACT code fact (function, modifier, check, "
+    "line) behind your mark.\n"
+    "2. The defense's refutation only counts if it names a SPECIFIC "
+    "control (modifier, access check, guard, invariant) that blocks a "
+    "specific step. Vague doubt ('might be safe', 'probably guarded') "
+    "counts as NO refutation.\n"
+    "3. Decide: KEEP only if every exploit step is feasible on the cited "
+    "facts; REJECT if any step is specifically blocked or speculative.\n"
+    "Respond with exactly one JSON object and nothing else:\n"
+    '{"decision": "keep|reject", '
+    '"confidence": <0.0-1.0, how sure you are>, '
+    '"reason": "<one sentence>", '
+    '"cited_evidence": ["<exact code fact you relied on>", "..."]}\n'
+    "Calibration rule: if your confidence is 0.9 or above you MUST list "
+    "the cited_evidence — an unsupported high-confidence verdict is "
+    "discarded as uncalibrated."
+)
+
+#: A judge verdict at or above this confidence with no cited evidence is
+#: rejected outright as uncalibrated (rogue/misbehaving judges love to
+#: sound certain). The verdict is discarded; it never decides a finding.
+_JUDGE_OVERCONFIDENT_MIN = 0.9
 
 
 def _extract_json(text: str) -> dict[str, Any] | None:
@@ -570,24 +723,92 @@ def _extract_json(text: str) -> dict[str, Any] | None:
 
 
 @dataclass
+class JudgeVerdict:
+    """One schema-validated, calibration-checked judge verdict."""
+    decision: str                    # keep | reject
+    confidence: float = 0.5
+    reason: str = ""
+    cited_evidence: list[str] = field(default_factory=list)
+    model: str = ""
+
+
+def _validate_judge_output(content: str) -> tuple[JudgeVerdict | None, str]:
+    """Schema-validate + calibrate one judge's raw output.
+
+    Returns ``(verdict, "")`` when the output is a well-formed, calibrated
+    verdict, else ``(None, reason)`` describing why it was discarded.
+    Malformed verdicts, non-dict JSON, missing/empty reasons, unknown
+    decisions, and overconfident-but-uncited verdicts are ALL rejected
+    outright here — a rogue or mumbling judge never gets to decide a
+    finding on a technicality.
+    """
+    parsed = _extract_json(content or "")
+    if not parsed:
+        return None, "judge output unparseable (no JSON object)"
+    decision = str(parsed.get("decision", "")).lower().strip()
+    if decision not in ("keep", "reject"):
+        return None, f"judge decision {parsed.get('decision')!r} not in keep|reject"
+    reason = str(parsed.get("reason", "") or "").strip()
+    if not reason:
+        return None, "judge verdict has no reason (malformed)"
+    try:
+        confidence = max(0.0, min(1.0, float(parsed.get("confidence", 0.5))))
+    except (TypeError, ValueError):
+        confidence = 0.5
+    cited = parsed.get("cited_evidence")
+    cited_evidence = ([str(c).strip() for c in cited if str(c).strip()]
+                      if isinstance(cited, list) else [])
+    if confidence >= _JUDGE_OVERCONFIDENT_MIN and not cited_evidence:
+        return None, (
+            f"judge verdict discarded as uncalibrated: confidence "
+            f"{confidence:.2f} >= {_JUDGE_OVERCONFIDENT_MIN} with no cited "
+            f"evidence")
+    return JudgeVerdict(
+        decision=decision, confidence=confidence, reason=reason,
+        cited_evidence=cited_evidence[:8]), ""
+
+
+@dataclass
 class AdversarialOutcome:
     """Result of the prosecutor -> defense -> judge round."""
-    decision: str = "unavailable"   # keep | reject | unavailable
+    decision: str = "unavailable"   # keep | reject | escalate | unavailable
     reason: str = ""
     prosecution: str = ""
     defense_refutation: str = ""
     model: str = ""
     injection_skipped: bool = False
     llm_calls: int = 0               # LLM calls actually attempted
+    # Phase 4 hardening fields:
+    judges_consulted: int = 0       # how many judges rendered usable verdicts
+    judge_disagreement: bool = False
+    second_opinion: str = ""        # what happened with the second judge
+    machine_confirmed: bool = False  # judges disagreed; machine evidence
+                                    # reproduced -> CONFIRMED EXPLOIT
+    machine_decided: bool = False    # machine evidence settled a disagreement
+    uncertainty: str = ""           # plain-language note for the human when
+                                   # decision == "escalate"
 
 
 class AdversarialFilter:
     """Napalm-pattern false-positive filter for non-machine evidence.
 
-    Per finding: prosecutor makes the case -> defense rebuts -> judge
-    decides. Only ``keep`` verdicts survive. Never raises out of the
-    per-finding path: LLM failures degrade to ``unavailable`` (fail-open:
-    the finding is kept, flagged, and logged).
+    Per finding: prosecutor makes the case -> defense rebuts -> judge(s)
+    decide. Phase 4 hardening: the judge stage is now a TWO-JUDGE panel.
+    A lone judge no longer has absolute power — a rogue or misbehaving
+    judge cannot single-handedly confirm or kill a finding when a second
+    opinion is available:
+
+    - every judge output is schema-validated AND calibration-checked
+      (overconfident verdicts with no cited evidence are discarded);
+    - the second judge uses a deliberately different decision contract
+      (role ``verify_judge_2`` — pin it to a different model per role);
+    - when both judges are usable they must AGREE to reject; on
+      disagreement, machine evidence arbitrates, and with no (or
+      inconclusive) machine evidence the finding is ESCALATED — kept
+      visible for a human, never confirmed, never silently dropped.
+
+    Never raises out of the per-finding path: LLM failures degrade to
+    ``unavailable`` (fail-open: the finding is kept, flagged, logged).
     """
 
     def __init__(
@@ -599,6 +820,8 @@ class AdversarialFilter:
         max_tokens_defense: int = 600,
         max_tokens_judge: int = 250,
         max_evidence_chars: int = 4000,
+        second_judge: bool = True,
+        judge2_temperature: float = 0.2,
     ) -> None:
         self._client = ai_client
         self._guard = injection_guard or PromptInjectionGuard()
@@ -606,6 +829,8 @@ class AdversarialFilter:
         self._tok_d = max_tokens_defense
         self._tok_j = max_tokens_judge
         self._max_ev = max_evidence_chars
+        self._second_judge = second_judge
+        self._judge2_temperature = judge2_temperature
 
     # -- prompt building (all finding content quarantined) ------------------
 
@@ -639,7 +864,7 @@ class AdversarialFilter:
             scan.sanitized_text, source_label="finding_evidence")
 
     def _chat(self, system: str, user: str, *, max_tokens: int,
-              role: str) -> Any | None:
+              role: str, temperature: float = 0.0) -> Any | None:
         try:
             # Same quarantine discipline as AIClient.chat: the system
             # prompt carries the quarantine contract; the user content is
@@ -648,12 +873,19 @@ class AdversarialFilter:
                 "", source_label="placeholder")
             resp = self._client.chat(
                 system_q, user, max_tokens=max_tokens,
-                temperature=0.0, role=role)
+                temperature=temperature, role=role)
         except Exception as e:  # noqa: BLE001
             LOGGER.warning("adversarial filter LLM call (%s) failed: %s",
                            role, e)
             return None
         content = getattr(resp, "content", "") or ""
+        if not content.strip():
+            # Empty / whitespace-only answers are a failed call, not a
+            # verdict: they map to UNKNOWN downstream, never CONFIRMED.
+            LOGGER.warning(
+                "adversarial filter: empty %s response; treating as "
+                "failed call", role)
+            return None
         clean, reason = self._guard.validate_response(content)
         if not clean:
             LOGGER.warning(
@@ -662,10 +894,55 @@ class AdversarialFilter:
             return None
         return resp
 
+    def _judge_call(
+        self,
+        system: str,
+        case_text: str,
+        d_parsed: dict[str, Any],
+        *,
+        role: str,
+        temperature: float,
+    ) -> tuple[JudgeVerdict | None, str, Any | None]:
+        """Call one judge and validate its verdict.
+
+        Returns ``(verdict_or_None, unusable_reason, raw_response)``.
+        """
+        refutation = str(d_parsed.get("refutation", ""))[:1500]
+        controls = d_parsed.get("benign_explanations")
+        controls_txt = ""
+        if isinstance(controls, list) and controls:
+            controls_txt = "\n".join(f"- {c}" for c in controls[:6])
+        resp = self._chat(
+            system,
+            f"Prosecution:\n{case_text}\n\nDefense "
+            f"(verdict={d_parsed.get('verdict', '')}):\n"
+            f"{refutation}"
+            + (f"\n\nDefense's claimed benign controls:\n{controls_txt}"
+               if controls_txt else ""),
+            max_tokens=self._tok_j, role=role, temperature=temperature)
+        if resp is None:
+            return None, "judge LLM call failed or returned empty", None
+        verdict, why = _validate_judge_output(
+            str(getattr(resp, "content", "") or ""))
+        if verdict is None:
+            LOGGER.warning("adversarial filter: discarding %s verdict: %s",
+                           role, why)
+        else:
+            verdict.model = str(getattr(resp, "model", "") or "")
+        return verdict, why, resp
+
     # -- the round ----------------------------------------------------------
 
-    def run(self, finding: Any) -> AdversarialOutcome:
-        """Run prosecutor -> defense -> judge on one finding."""
+    def run(self, finding: Any, *,
+            machine_result: MachineCheckResult | None = None,
+            ) -> AdversarialOutcome:
+        """Run prosecutor -> defense -> two-judge panel on one finding.
+
+        ``machine_result`` is the tier-1 replay outcome threaded through by
+        :func:`verify_findings` (None when there was no spec, or on
+        standalone use); the disagreement path reuses it instead of
+        replaying twice.
+        """
         evidence = self._quarantined_evidence(finding)
         if evidence is None:
             return AdversarialOutcome(
@@ -711,46 +988,241 @@ class AdversarialFilter:
                 prosecution=case_text,
                 model=str(getattr(prosecution, "model", "") or ""),
                 llm_calls=made)
+        d_ref = str(d_parsed.get("refutation", ""))[:1000]
+        base_model = str(getattr(prosecution, "model", "") or "")
 
-        judge = self._chat(
-            _JUDGE_SYSTEM,
-            f"Prosecution:\n{case_text}\n\nDefense "
-            f"(verdict={d_parsed.get('verdict', '')}):\n"
-            f"{str(d_parsed.get('refutation', ''))[:1500]}",
-            max_tokens=self._tok_j, role="verify_judge")
+        # -- judge 1: schema-validated + calibration-checked --------------
+        j1, j1_why, _ = self._judge_call(
+            _JUDGE_SYSTEM, case_text, d_parsed,
+            role="verify_judge", temperature=0.0)
         made += 1
-        if judge is None:
+        spec = machine_check_spec(finding)
+
+        if j1 is None:
+            # Primary judge failed or misbehaved: the second judge becomes
+            # the decider. A lone reject after a failure is NOT enough to
+            # drop the finding — escalate so a human sees it.
+            return self._fallback_second_judge(
+                case_text, d_parsed, d_ref, base_model,
+                made, j1_why)
+
+        if j1.decision == "reject":
+            inconclusive_machine = (
+                spec is not None
+                and (machine_result is None
+                     or machine_result.reproduced is None))
+            if inconclusive_machine and self._second_judge:
+                # Machine evidence exists but could not speak: do not let
+                # one judge wield the axe alone — get the second opinion.
+                return self._reject_with_second_opinion(
+                    finding, case_text, d_parsed, d_ref, base_model,
+                    made, j1, machine_result)
+            # Legacy path: single judge reject, nothing to arbitrate with.
+            # (Known residual gap: a well-formed rogue reject with no
+            # second judge configured still drops — schema validation and
+            # calibration still apply; run two judges in production.)
             return AdversarialOutcome(
-                decision="unavailable",
-                reason="judge LLM call failed",
+                decision="reject",
+                reason=j1.reason[:500],
                 prosecution=case_text,
-                defense_refutation=str(d_parsed.get("refutation", ""))[:1000],
-                model=str(getattr(prosecution, "model", "") or ""),
-                llm_calls=made)
-        j_parsed = _extract_json(getattr(judge, "content", "") or "")
-        if not j_parsed or str(j_parsed.get("decision", "")).lower() not in (
-                "keep", "reject"):
-            return AdversarialOutcome(
-                decision="unavailable",
-                reason="judge verdict unparseable; failing open (kept)",
-                prosecution=case_text,
-                defense_refutation=str(d_parsed.get("refutation", ""))[:1000],
-                model=str(getattr(prosecution, "model", "") or ""),
-                llm_calls=made)
-        decision = str(j_parsed["decision"]).lower()
-        reason = str(j_parsed.get("reason", ""))[:500]
-        if decision == "reject" and not reason:
-            reason = ("defense rebuttal stood: "
-                      + str(d_parsed.get("refutation", ""))[:400])
+                defense_refutation=d_ref,
+                model=j1.model or base_model,
+                llm_calls=made,
+                judges_consulted=1,
+                second_opinion=("not consulted "
+                                "(no machine evidence to arbitrate)"),
+            )
+
+        # j1 says keep: wave-through guard — require the second opinion.
+        if not self._second_judge:
+            return self._kept_outcome(
+                j1, case_text, d_ref, base_model, made,
+                judges_consulted=1, second_opinion="second judge disabled")
+        j2, j2_why, _ = self._judge_call(
+            _JUDGE_SYSTEM_2, case_text, d_parsed,
+            role=_JUDGE_ROLE_2, temperature=self._judge2_temperature)
+        made += 1
+        if j2 is None:
+            # Degraded: second opinion unavailable — keep (fail-open),
+            # loudly flagged.
+            return self._kept_outcome(
+                j1, case_text, d_ref, base_model, made,
+                judges_consulted=1,
+                second_opinion=f"unavailable ({j2_why})")
+        if j2.decision == "keep":
+            out = self._kept_outcome(
+                j1, case_text, d_ref, base_model, made,
+                judges_consulted=2, second_opinion="agree (keep/keep)")
+            out.reason = (f"two judges agree: keep. J1: {j1.reason[:200]} "
+                          f"J2: {j2.reason[:200]}")
+            return out
+        # Disagreement: machine evidence arbitrates; otherwise ESCALATE.
+        return self._arbitrate_disagreement(
+            finding, case_text, d_ref, base_model, made, j1, j2,
+            machine_result)
+
+    # -- outcome builders -------------------------------------------------
+
+    def _kept_outcome(
+        self, judge: JudgeVerdict, case_text: str, d_ref: str,
+        base_model: str, made: int, *,
+        judges_consulted: int, second_opinion: str,
+    ) -> AdversarialOutcome:
         return AdversarialOutcome(
-            decision=decision,
-            reason=reason,
+            decision="keep",
+            reason=judge.reason[:500],
             prosecution=case_text,
-            defense_refutation=str(d_parsed.get("refutation", ""))[:1000],
-            model=str(getattr(judge, "model", "") or "") or str(
-                getattr(prosecution, "model", "") or ""),
+            defense_refutation=d_ref,
+            model=judge.model or base_model,
             llm_calls=made,
+            judges_consulted=judges_consulted,
+            second_opinion=second_opinion,
         )
+
+    def _escalate(
+        self, case_text: str, d_ref: str, base_model: str, made: int, *,
+        reason: str, judges_consulted: int,
+        judge_disagreement: bool = False,
+        second_opinion: str = "disputed — human review required",
+    ) -> AdversarialOutcome:
+        """UNKNOWN verdict: kept visible for a human — never confirmed,
+        never silently dropped."""
+        return AdversarialOutcome(
+            decision="escalate",
+            reason=reason[:500],
+            prosecution=case_text,
+            defense_refutation=d_ref,
+            model=base_model,
+            llm_calls=made,
+            judges_consulted=judges_consulted,
+            judge_disagreement=judge_disagreement,
+            second_opinion=second_opinion,
+            uncertainty=("The AI judges could not agree (or the evidence "
+                         "could not be re-run), so this finding is NEITHER "
+                         "confirmed NOR dropped. A human must decide."),
+        )
+
+    def _fallback_second_judge(
+        self, case_text: str, d_parsed: dict[str, Any], d_ref: str,
+        base_model: str, made: int, j1_why: str,
+    ) -> AdversarialOutcome:
+        """Primary judge unusable: the second judge decides alone."""
+        j2, j2_why, _ = self._judge_call(
+            _JUDGE_SYSTEM_2, case_text, d_parsed,
+            role=_JUDGE_ROLE_2, temperature=self._judge2_temperature)
+        made += 1
+        if j2 is None:
+            return AdversarialOutcome(
+                decision="unavailable",
+                reason=(f"both judges failed — primary: {j1_why}; second: "
+                        f"{j2_why}; failing open (kept)"),
+                prosecution=case_text,
+                defense_refutation=d_ref,
+                model=base_model,
+                llm_calls=made,
+                judges_consulted=0,
+            )
+        if j2.decision == "keep":
+            return self._kept_outcome(
+                j2, case_text, d_ref, base_model, made,
+                judges_consulted=1,
+                second_opinion=f"deciding judge (primary unusable: {j1_why})")
+        # Lone reject after a primary failure: not enough to drop.
+        return self._escalate(
+            case_text, d_ref, base_model, made,
+            reason=(f"primary judge failed ({j1_why}); lone second judge "
+                    "said reject — a single surviving judge cannot drop a "
+                    "finding"),
+            judges_consulted=1)
+
+    def _reject_with_second_opinion(
+        self, finding: Any, case_text: str, d_parsed: dict[str, Any],
+        d_ref: str, base_model: str, made: int,
+        j1: JudgeVerdict, machine_result: MachineCheckResult | None,
+    ) -> AdversarialOutcome:
+        """Judge 1 rejected but machine evidence could not speak: require
+        the second opinion before any drop."""
+        j2, j2_why, _ = self._judge_call(
+            _JUDGE_SYSTEM_2, case_text, d_parsed,
+            role=_JUDGE_ROLE_2, temperature=self._judge2_temperature)
+        made += 1
+        if j2 is not None and j2.decision == "reject":
+            return AdversarialOutcome(
+                decision="reject",
+                reason=(f"two judges agree: reject. J1: {j1.reason[:200]} "
+                        f"J2: {j2.reason[:200]}")[:500],
+                prosecution=case_text,
+                defense_refutation=d_ref,
+                model=j2.model or j1.model or base_model,
+                llm_calls=made,
+                judges_consulted=2,
+                second_opinion="agree (reject/reject)",
+            )
+        if j2 is not None:
+            return self._arbitrate_disagreement(
+                finding, case_text, d_ref, base_model, made, j1, j2,
+                machine_result)
+        # Second opinion failed too: known-degraded — escalate, never drop.
+        return self._escalate(
+            case_text, d_ref, base_model, made,
+            reason=(f"judge 1 rejected but the second opinion failed "
+                    f"({j2_why}) and machine evidence is inconclusive — "
+                    "not enough to drop"),
+            judges_consulted=1)
+
+    def _arbitrate_disagreement(
+        self, finding: Any, case_text: str, d_ref: str, base_model: str,
+        made: int, j1: JudgeVerdict, j2: JudgeVerdict,
+        machine_result: MachineCheckResult | None,
+    ) -> AdversarialOutcome:
+        """Two usable judges disagree: machine evidence decides.
+
+        Reproduced -> CONFIRMED EXPLOIT (machine-decided). Disproved ->
+        REJECTED. Absent/inconclusive -> ESCALATE: kept visible for a
+        human, NEVER confirmed on judges' word alone.
+        """
+        result = machine_result
+        if result is None and machine_check_spec(finding) is not None:
+            result = replay_machine_evidence(finding)
+        if result is not None and result.reproduced is True:
+            return AdversarialOutcome(
+                decision="keep",
+                reason=(f"judges disagreed ({j1.decision} vs {j2.decision}); "
+                        "machine evidence reproduced: "
+                        f"{result.detail[:200]}"),
+                prosecution=case_text,
+                defense_refutation=d_ref,
+                model="n/a (machine arbitration)",
+                llm_calls=made,
+                judges_consulted=2,
+                judge_disagreement=True,
+                machine_confirmed=True,
+                machine_decided=True,
+                second_opinion=f"{j1.decision}/{j2.decision}",
+            )
+        if result is not None and result.reproduced is False:
+            return AdversarialOutcome(
+                decision="reject",
+                reason=(f"judges disagreed ({j1.decision} vs {j2.decision}); "
+                        "machine evidence disproved the claim: "
+                        f"{result.detail[:200]}"),
+                prosecution=case_text,
+                defense_refutation=d_ref,
+                model="n/a (machine arbitration)",
+                llm_calls=made,
+                judges_consulted=2,
+                judge_disagreement=True,
+                machine_decided=True,
+                second_opinion=f"{j1.decision}/{j2.decision}",
+            )
+        detail = (result.detail if result is not None
+                  else "no machine evidence attached")
+        return self._escalate(
+            case_text, d_ref, base_model, made,
+            reason=(f"judges disagree ({j1.decision} vs {j2.decision}) and "
+                    f"machine evidence cannot arbitrate ({detail[:200]})"),
+            judges_consulted=2,
+            judge_disagreement=True)
 
 
 # ---------------------------------------------------------------------------
@@ -852,6 +1324,8 @@ class VerificationReport:
     kept: list[Any] = field(default_factory=list)
     dropped: list[Any] = field(default_factory=list)
     skipped: list[Any] = field(default_factory=list)  # not POTENTIAL
+    escalated: list[Any] = field(default_factory=list)  # UNKNOWN: kept AND
+        # flagged for human review (subset of kept, never dropped)
     ai_inactive: bool = False
     llm_calls: int = 0
     ledger_path: str = ""
@@ -884,15 +1358,19 @@ def verify_findings(
     client: Any = None,
     ledger_path: Path | str | None = None,
     max_llm_findings: int = 64,
+    second_judge: bool = True,
 ) -> VerificationReport:
     """Phase-3 verification gate: the single entry point phase 7 calls
     between "findings produced" and "report rendered".
 
-    Consumes POTENTIAL findings and emits CONFIRMED EXPLOIT or REJECTED —
-    never invents new statuses. Machine-checkable evidence is replayed
-    first; findings without it go through the LLM adversarial filter
-    (skipped, loudly, when the router reports AI inactive). Every decision
-    is written to the dropped-findings ledger.
+    Consumes POTENTIAL findings and emits CONFIRMED EXPLOIT, REJECTED, or
+    keeps them POTENTIAL — never invents new statuses. Machine-checkable
+    evidence is replayed first; findings without it go through the LLM
+    adversarial filter (two-judge panel, unless ``second_judge=False``),
+    which is skipped, loudly, when the router reports AI inactive. A
+    finding the judges cannot settle is ESCALATED: kept visible for a
+    human with its uncertainty stated, never confirmed, never dropped.
+    Every decision is written to the dropped-findings ledger.
 
     Never raises on per-finding work: a finding that cannot be verified
     due to infrastructure failure is kept (fail-open) and flagged.
@@ -919,7 +1397,7 @@ def verify_findings(
             _router().offline_report_note(reason))
         LOGGER.warning("%s", note)
 
-    adversarial = (AdversarialFilter(client)
+    adversarial = (AdversarialFilter(client, second_judge=second_judge)
                    if ai_active else None)
     llm_budget = int(max_llm_findings)
 
@@ -980,11 +1458,14 @@ def verify_findings(
                     finding, "machine_check_unavailable", result.detail,
                     evidence_summary=summary,
                     model="n/a (local replay)", ai_active=ai_active)
-                # Fall through to the adversarial filter when possible.
+                # Fall through to the adversarial filter when possible,
+                # threading the inconclusive machine result so a judge
+                # disagreement can be arbitrated without replaying twice.
                 if adversarial is not None and llm_budget > 0:
                     llm_budget -= 1
                     _run_adversarial(
-                        finding, adversarial, ledger, report, ai_active)
+                        finding, adversarial, ledger, report, ai_active,
+                        machine_result=result)
                 else:
                     _keep_unreviewed(
                         finding, ledger, report, ai_active,
@@ -1002,7 +1483,8 @@ def verify_findings(
 
     report.notes.append(
         f"verification: {len(report.kept)} kept, {len(report.dropped)} "
-        f"dropped, {len(report.skipped)} skipped (not POTENTIAL); "
+        f"dropped, {len(report.escalated)} escalated (kept, needs human), "
+        f"{len(report.skipped)} skipped (not POTENTIAL); "
         f"ledger: {ledger.path}")
     return report
 
@@ -1013,10 +1495,11 @@ def _run_adversarial(
     ledger: VerificationLedger,
     report: VerificationReport,
     ai_active: bool,
+    machine_result: MachineCheckResult | None = None,
 ) -> None:
-    """Run the prosecutor -> defense -> judge round; mutate finding."""
+    """Run the prosecutor -> defense -> judge panel; mutate finding."""
     try:
-        outcome = adversarial.run(finding)
+        outcome = adversarial.run(finding, machine_result=machine_result)
     except Exception as e:  # noqa: BLE001
         LOGGER.warning("adversarial filter crashed (fail-open): %s", e)
         _keep_unreviewed(finding, ledger, report, ai_active,
@@ -1024,6 +1507,29 @@ def _run_adversarial(
         return
     report.llm_calls += outcome.llm_calls
     summary = _evidence_summary(finding)
+    if outcome.machine_confirmed:
+        # Judges disagreed; machine evidence reproduced -> CONFIRMED.
+        # This is the only adversarial path that may mint CONFIRMED, and
+        # it requires reproducible machine evidence, never judges alone.
+        finding.status = "CONFIRMED EXPLOIT"
+        finding.dynamically_confirmed = True
+        try:
+            finding.confidence = max(
+                0.90, float(getattr(finding, "confidence", 0.5)))
+        except (TypeError, ValueError):
+            finding.confidence = 0.90
+        _tag_verification_meta(
+            finding, tier="adversarial+machine", decision="keep",
+            reason=outcome.reason[:500],
+            judges_consulted=outcome.judges_consulted,
+            judge_disagreement=True, machine_decided=True,
+            second_opinion=outcome.second_opinion)
+        ledger.record(finding, "confirmed_exploit", outcome.reason,
+                      evidence_summary=summary,
+                      model="n/a (machine arbitration)",
+                      ai_active=ai_active)
+        report.kept.append(finding)
+        return
     if outcome.decision == "reject":
         finding.status = "REJECTED"
         try:
@@ -1039,39 +1545,63 @@ def _run_adversarial(
             reason=reason[:500],
             prosecution=outcome.prosecution[:500],
             defense_refutation=outcome.defense_refutation[:500],
+            judges_consulted=outcome.judges_consulted,
+            second_opinion=outcome.second_opinion,
             model=outcome.model)
         ledger.record(finding, "rejected", reason,
                       evidence_summary=summary, model=outcome.model,
                       ai_active=ai_active)
         report.dropped.append(finding)
-    else:
-        # "keep" or "unavailable" (fail-open): the finding survives.
-        tag: dict[str, Any] = {
-            "tier": "adversarial",
-            "decision": outcome.decision,
-            "reason": outcome.reason[:500],
-            "model": outcome.model,
-        }
-        if outcome.decision == "keep":
-            tag["adversarial"] = "survived"
-            try:
-                finding.confidence = min(
-                    0.95, float(getattr(finding, "confidence", 0.5)) + 0.05)
-            except (TypeError, ValueError):
-                pass
-            ledger.record(finding, "kept_potential",
-                          outcome.reason or "prosecution survived defense",
-                          evidence_summary=summary, model=outcome.model,
-                          ai_active=ai_active)
-        else:
-            tag["flag"] = "unreviewed_llm_failure"
-            ledger.record(finding, "kept_unreviewed", outcome.reason,
-                          evidence_summary=summary, model=outcome.model,
-                          ai_active=ai_active)
-        if outcome.injection_skipped:
-            tag["flag"] = "llm_skipped_injection_risk"
-        _tag_verification_meta(finding, **tag)
+        return
+    if outcome.decision == "escalate":
+        # UNKNOWN: the finding stays VISIBLE to the human with its
+        # uncertainty stated. It is never confirmed and never dropped.
+        _tag_verification_meta(
+            finding, tier="adversarial", decision="escalate",
+            reason=outcome.reason[:500],
+            uncertainty=outcome.uncertainty,
+            judges_consulted=outcome.judges_consulted,
+            judge_disagreement=outcome.judge_disagreement,
+            second_opinion=outcome.second_opinion,
+            model=outcome.model)
+        meta = dict(getattr(finding, "metadata", None) or {})
+        meta["manual_review_required"] = True
+        finding.metadata = meta
+        ledger.record(finding, "escalate", outcome.reason,
+                      evidence_summary=summary, model=outcome.model,
+                      ai_active=ai_active)
         report.kept.append(finding)
+        report.escalated.append(finding)
+        return
+    # "keep" or "unavailable" (fail-open): the finding survives.
+    tag: dict[str, Any] = {
+        "tier": "adversarial",
+        "decision": outcome.decision,
+        "reason": outcome.reason[:500],
+        "model": outcome.model,
+        "judges_consulted": outcome.judges_consulted,
+        "second_opinion": outcome.second_opinion,
+    }
+    if outcome.decision == "keep":
+        tag["adversarial"] = "survived"
+        try:
+            finding.confidence = min(
+                0.95, float(getattr(finding, "confidence", 0.5)) + 0.05)
+        except (TypeError, ValueError):
+            pass
+        ledger.record(finding, "kept_potential",
+                      outcome.reason or "prosecution survived defense",
+                      evidence_summary=summary, model=outcome.model,
+                      ai_active=ai_active)
+    else:
+        tag["flag"] = "unreviewed_llm_failure"
+        ledger.record(finding, "kept_unreviewed", outcome.reason,
+                      evidence_summary=summary, model=outcome.model,
+                      ai_active=ai_active)
+    if outcome.injection_skipped:
+        tag["flag"] = "llm_skipped_injection_risk"
+    _tag_verification_meta(finding, **tag)
+    report.kept.append(finding)
 
 
 def _keep_unreviewed(
