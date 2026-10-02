@@ -525,8 +525,11 @@ def test_e2e_reentrancy_caught_by_attack_simulator(forge_env: dict, tmp_path: Pa
     assert f.status == "POTENTIAL"
     assert f.dynamically_confirmed is True
     # the exploit ran THROUGH the deployed attacker contract, in one
-    # fuzzed handler action:
-    assert "act_attack_reenter(" in f.poc_code
+    # fuzzed handler action (act_attack_reenter drives the reentry
+    # directly; act_heist reaches the same _wgDoReenter path inside a
+    # larger multi-step action — either proves the attacker contract
+    # drained the vault):
+    assert "act_attack_reenter(" in f.poc_code or "act_heist(" in f.poc_code
     assert "sender=" in f.poc_code and "calldata=" in f.poc_code
     # the strategy bookkeeping learned from this campaign
     state = json.loads((tmp_path / "strategy_state.json").read_text())

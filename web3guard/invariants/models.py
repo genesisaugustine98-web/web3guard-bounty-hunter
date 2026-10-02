@@ -106,6 +106,11 @@ class FuzzBounds:
     attack_depth: int = 64  # attack call-sequence depth
     attack_max_value_wei: int = 10_000_000_000_000_000_000  # 10 ETH/call
     strategy_epsilon: float = 0.25  # bandit exploration rate
+    # Weakness-hunt round, target 1: extra sender addresses the harness may
+    # act as (in addition to the addresses mined from the target source).
+    # Lets an operator point the fuzzer at a known privileged address
+    # (e.g. a multisig) without editing the contract. Empty by default.
+    impersonate_senders: tuple[str, ...] = ()
 
     @classmethod
     def from_config(cls, config: Any) -> FuzzBounds:
@@ -142,6 +147,9 @@ class FuzzBounds:
                     bounds.strategy_epsilon = eps
             except (TypeError, ValueError):
                 pass
+        if "impersonate_senders" in inv_cfg:
+            bounds.impersonate_senders = _coerce_address_list(
+                inv_cfg["impersonate_senders"])
         return bounds
 
     @property
@@ -161,6 +169,24 @@ def _coerce_bool(value: Any, default: bool) -> bool:
     if isinstance(value, (int, float)):
         return bool(value)
     return default
+
+
+_ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}\Z")
+
+
+def _coerce_address_list(value: Any) -> tuple[str, ...]:
+    """Parse a config list of hex addresses; drop anything malformed."""
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return ()
+    out: list[str] = []
+    for item in value:
+        if isinstance(item, str) and _ADDRESS_RE.match(item.strip()):
+            addr = item.strip().lower()
+            if addr not in out:
+                out.append(addr)
+    return tuple(out)
 
 
 @dataclass

@@ -720,7 +720,17 @@ def handler_reference_names() -> frozenset[str]:
 # try/catch so a reverted target call can never desync ghost accounting.
 # ---------------------------------------------------------------------------
 
-_DANGEROUS_PASSTHROUGH = {"target", "handler", "targetContracts", "setUp"}
+_DANGEROUS_PASSTHROUGH = {
+    "target",
+    "handler",
+    "targetContracts",
+    "setUp",
+    # weakness-hunt round, target 1: handler-owned members the fuzzer must
+    # not shadow with a passthrough.
+    "act_phish",
+    "wgSenderPool",
+    "wgNeutralDeployer",
+}
 
 
 def needs_ghost_mode(invariants: list[Invariant]) -> bool:
@@ -820,7 +830,14 @@ def _call_expr(sig: Any) -> str:
 
 
 def _passthrough(sig: Any, hooks: list[str]) -> str:
-    params = ", ".join(f"{t} p{i}" for i, (t, _) in enumerate(sig.params))
+    # Every passthrough takes the target's own parameters plus a trailing
+    # sender seed (weakness-hunt round, target 1): the fuzzer picks WHO
+    # calls from the sender pool (handler, built-in users, mined
+    # hardcoded addresses), so role-gated paths are reachable without the
+    # harness itself ever being the owner (neutral deployment, below).
+    params = ", ".join(
+        [f"{t} p{i}" for i, (t, _) in enumerate(sig.params)] + ["uint256 _wgSender"]
+    )
     payable_kw = " payable" if sig.mutability == "payable" else ""
     call = _call_expr(sig)
     if not hooks:
@@ -830,6 +847,7 @@ def _passthrough(sig: Any, hooks: list[str]) -> str:
         body = f"try {call} {{\n            {inner}\n        }} catch {{}}"
     return (
         f"    function {sig.name}({params}) public{payable_kw} {{\n"
+        f"        _wgPrank(_wgPickSender(_wgSender));\n"
         f"        {body}\n"
         f"    }}"
     )
@@ -876,7 +894,15 @@ def render_ghost_project(
     Returns (files, notes). Raises ValueError when no usable ghost template
     survived resolution (caller falls back to an honest skip).
     """
-    from web3guard.invariants.harness import extract_functions as _ef
+    from web3guard.invariants.harness import (
+        NEUTRAL_DEPLOYER,
+        _render_entry_dispatcher,
+        extract_mined_senders,
+        sender_pool,
+    )
+    from web3guard.invariants.harness import (
+        extract_functions as _ef,
+    )
 
     notes: list[str] = []
     specs = [
@@ -888,6 +914,15 @@ def render_ghost_project(
         raise ValueError("no ghost templates to render")
 
     sigs = [s for s in _ef(contract_source) if s.fuzzable]
+    # Sender pool (weakness-hunt round, target 1): handler itself first,
+    # then built-ins, configured senders, and mined hardcoded addresses.
+    pool_addrs = ["address(this)"] + sender_pool(contract_source, bounds)
+    mined = extract_mined_senders(contract_source)
+    if mined:
+        notes.append(
+            "ghost harness sender impersonation: mined from source: "
+            + ", ".join(mined)
+        )
     seen_names: set[str] = set()
     passthroughs: list[str] = []
     dropped_specs: set[str] = set()
@@ -900,6 +935,12 @@ def render_ghost_project(
                 )
             continue
         if sig.name.startswith("ghost_"):
+            continue
+        if sig.name.startswith("_wg"):
+            notes.append(
+                f"ghost harness: no passthrough for '{sig.name}' "
+                "(name reserved by the harness)"
+            )
             continue
         seen_names.add(sig.name)
         hooks: list[str] = []
@@ -952,10 +993,33 @@ def render_ghost_project(
         "// are updated inside try/catch so reverted calls can never desync",
         "// accounting. The fuzzer is restricted to this handler via",
         "// targetContracts() below, so no call bypasses ghost tracking.",
+        "//",
+        "// Weakness-hunt round, target 1: the target is deployed as a fixed",
+        "// NEUTRAL address (never the handler), so the harness can never act",
+        "// as the contract's owner — owner-confusion false positives are",
+        "// gone. Each passthrough takes a sender seed: the fuzzer picks WHO",
+        "// calls from the sender pool (handler, built-in users, hardcoded",
+        "// addresses mined from the source), so role-gated paths stay",
+        "// reachable. act_phish models tx.origin phishing (msg.sender != owner,",
+        "// tx.origin == owner).",
         f'import "../src/{contract_name}.sol";',
+        "",
+        "interface WgVm {",
+        "    function deal(address account, uint256 newBalance) external;",
+        "    function prank(address msgSender) external;",
+        "    function prank(address msgSender, address txOrigin) external;",
+        "}",
+        "WgVm constant WGVM = WgVm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);",
+        f"address constant WG_NEUTRAL_DEPLOYER = address({NEUTRAL_DEPLOYER});",
         "",
         "contract GhostHandler {",
         f"    {contract_name} public target;",
+        "    // The neutral deployer doubles as the tx.origin-phishing owner.",
+        "    address public wgNeutralDeployer;",
+        "    // Sender pool: every address the harness may act as.",
+        "    address[] public wgSenderPool;",
+        "    // tx.origin override for the phishing action (0 = none).",
+        "    address internal _wgTxOrigin;",
         "",
     ]
     for vname, vtype in var_decls.items():
@@ -963,12 +1027,43 @@ def render_ghost_project(
     if var_decls:
         handler_parts.append("")
     handler_parts.append("    constructor() {")
+    handler_parts.append("        WGVM.prank(WG_NEUTRAL_DEPLOYER);")
     handler_parts.append(f"        target = new {contract_name}();")
+    handler_parts.append("        wgNeutralDeployer = WG_NEUTRAL_DEPLOYER;")
+    for a in pool_addrs:
+        handler_parts.append(f"        wgSenderPool.push({a});")
+    handler_parts.append("        for (uint256 _wgi = 0; _wgi < wgSenderPool.length; _wgi++) {")
+    handler_parts.append("            WGVM.deal(wgSenderPool[_wgi], 10000 ether);")
+    handler_parts.append("        }")
     for stmt in setup_all:
         handler_parts.append(f"        {stmt}")
     handler_parts.append("    }")
     handler_parts.append("")
     handler_parts.append("    receive() external payable {}")
+    handler_parts.append("")
+    handler_parts.extend([
+        "    function _wgPickSender(uint256 i) internal view returns (address) {",
+        "        return wgSenderPool[i % wgSenderPool.length];",
+        "    }",
+        "",
+        "    // Prank as u, preserving a phishing tx.origin override when set.",
+        "    function _wgPrank(address u) internal {",
+        "        if (_wgTxOrigin == address(0)) { WGVM.prank(u); }",
+        "        else { WGVM.prank(u, _wgTxOrigin); }",
+        "    }",
+        "",
+        "    // Phishing model for tx.origin bugs: the neutral owner is tricked",
+        "    // into triggering a contract call; the target sees msg.sender = a",
+        "    // pool sender with tx.origin = owner. Routed through the handler's",
+        "    // own passthroughs so ghost accounting stays in lockstep.",
+        "    function act_phish(uint256 _wgFn, uint256 _wgA, uint256 _wgB, uint256 _wgSender) public {",
+        "        _wgTxOrigin = WG_NEUTRAL_DEPLOYER;",
+        "        _wgCallEntry(_wgFn, address(0), _wgA, _wgB, _wgSender);",
+        "        _wgTxOrigin = address(0);",
+        "    }",
+        "",
+        _render_entry_dispatcher(contract_name, sigs, via_passthrough=True),
+    ])
     handler_parts.append("")
     for fn in extra_fns:
         handler_parts.append(f"    {fn}")

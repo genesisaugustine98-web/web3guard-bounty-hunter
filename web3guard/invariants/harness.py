@@ -108,6 +108,161 @@ def extract_functions(source: str) -> list[FunctionSig]:
     return sigs
 
 
+#: The harness deploys the target contract *as* this fixed neutral address
+#: (via ``vm.prank`` in the handler constructor), so the harness itself is
+#: never the contract's owner. Owner-gated paths stay unreachable to the
+#: fuzzer (no owner-confusion false positives), while tx.origin phishing
+#: remains testable (see ``act_phishOrigin``). Checksum verified against
+#: the pinned Foundry build; also excluded from mined-sender extraction so
+#: the fuzzer can never accidentally act as the owner.
+NEUTRAL_DEPLOYER = "0x00000000000000000000000000000000DeaDBeef"
+
+#: Cheat-code address: never mined as a sender.
+_VM_ADDRESS = "0x7109709ecfa91a80626ff3989d68f67f5b1dd12d"
+
+_MINED_ADDR_RE = re.compile(r"0x[0-9a-fA-F]{40}")
+
+
+def extract_mined_senders(source: str, limit: int = 8) -> list[str]:
+    """Mine hardcoded address literals from the source as candidate senders.
+
+    Restores the old fuzzer's address-mining: a role gated on a hardcoded
+    address (e.g. ``pauser = address(0x...dEaD)``) is unreachable to a
+    fuzzer that only ever calls as itself. Every distinct non-zero literal
+    becomes a sender the harness can impersonate via prank.
+    """
+    seen: list[str] = []
+    for m in _MINED_ADDR_RE.finditer(source):
+        addr = m.group(0).lower()
+        if addr == "0x" + "0" * 40:
+            continue
+        if addr in (_VM_ADDRESS, NEUTRAL_DEPLOYER.lower()):
+            continue
+        if addr not in seen:
+            seen.append(addr)
+        if len(seen) >= limit:
+            break
+    return seen
+
+
+def addr_expr(hex_addr: str) -> str:
+    """Render a hex address as Solidity that never trips checksum validation.
+
+    solc ≥0.8.18 rejects 40-hex-char literals with a bad EIP-55 checksum —
+    and we cannot compute EIP-55 here (no keccak dependency) — so mined
+    addresses render as ``address(uint160(<decimal>))``, which the
+    compiler always accepts.
+    """
+    return f"address(uint160({int(hex_addr, 16)}))"
+
+
+def sender_pool(
+    source: str, bounds: FuzzBounds, *, extra: list[str] | None = None,
+) -> list[str]:
+    """Ordered sender pool: built-ins, config, mined-from-source, extra.
+
+    ``extra`` (e.g. attacker-contract placeholders) is appended last; the
+    handler always seeds slot 0 with itself, so the pool is never empty.
+    """
+    pool = [
+        "address(uint160(0xB0B))",
+        "address(uint160(0xC0C))",
+        "address(uint160(0xD0D))",
+    ]
+    for addr in list(bounds.impersonate_senders) + extract_mined_senders(source):
+        expr = addr_expr(addr)
+        if expr not in pool:
+            pool.append(expr)
+    for addr in extra or []:
+        if addr not in pool:
+            pool.append(addr)
+    return pool
+
+
+def _generic_arg_expr(ptype: str, index: int, addr_expr: str = "u") -> str:
+    """A deterministic generic argument expression for one parameter type.
+
+    Used by the entry dispatcher (phishing + coverage): argument quality
+    does not matter there — the fuzzer's own calls provide variety — so
+    every parameter maps to a cheap deterministic expression over the
+    dispatcher seeds (``a``/``b``) and an address expression.
+    """
+    if ptype.startswith("uint"):
+        return "a" if index % 2 == 0 else "b"
+    if ptype.startswith("int"):
+        return f"int256({'a' if index % 2 == 0 else 'b'})"
+    if ptype == "bool":
+        return "true" if index % 2 == 0 else "false"
+    if ptype == "address":
+        return addr_expr
+    if ptype == "address payable":
+        return f"payable({addr_expr})"
+    if ptype.startswith("bytes"):
+        return f"{ptype}(a)"
+    return "a"
+
+
+def _render_entry_dispatcher(
+    contract_name: str,
+    entries: list[FunctionSig],
+    *,
+    via_passthrough: bool,
+    chunk_size: int = 256,
+) -> str:
+    """Render ``_wgCallEntry``: call the k-th target entry point.
+
+    One dispatcher serves the phishing action (target 1: tx.origin with
+    ``msg.sender != tx.origin``) and — from the weakness-hunt round's
+    target 6 — the deterministic coverage sweep. Every leaf swallows
+    reverts: the goal is to *attempt* the call, never to require success.
+
+    ``via_passthrough=True`` (ghost mode) routes through the handler's own
+    passthroughs so ghost accounting stays in lockstep; ``False`` (attack
+    mode) calls the target directly inside try/catch.
+    """
+    n = len(entries)
+    addr_expr = "_wgPickSender(a)" if via_passthrough else "u"
+    chunks: list[str] = []
+    for ci in range(0, n, chunk_size):
+        chunk = entries[ci:ci + chunk_size]
+        lines = [
+            f"    function _wgEntryChunk{ci // chunk_size}"
+            "(uint256 idx, address u, uint256 a, uint256 b, uint256 s) internal {"
+        ]
+        for j, fn in enumerate(chunk):
+            k = ci + j
+            args = ", ".join(
+                _generic_arg_expr(t, i, addr_expr)
+                for i, (t, _) in enumerate(fn.params)
+            )
+            if via_passthrough:
+                args = ", ".join(([args] if args else []) + ["s"])
+                call = f"this.{fn.name}({args})"
+                if fn.mutability == "payable":
+                    call = f"this.{fn.name}{{value: 0}}({args})"
+            else:
+                call = f"target.{fn.name}({args})"
+                if fn.mutability == "payable":
+                    call = f"target.{fn.name}{{value: 0}}({args})"
+            lines.append(f"        if (idx == {k}) {{ try {call} {{}} catch {{}} return; }}")
+        lines.append("    }")
+        chunks.append("\n".join(lines))
+    dispatch = [
+        "    // Call the k-th target entry point (mod entry count).",
+        "    // Shared by the phishing action and the coverage sweep.",
+        f"    uint256 constant WG_ENTRY_COUNT = {n};",
+        "    function _wgCallEntry(uint256 k, address u, uint256 a, uint256 b, uint256 s) internal {",
+        "        if (WG_ENTRY_COUNT == 0) return;",
+        "        uint256 idx = k % WG_ENTRY_COUNT;",
+    ]
+    for ci in range(0, n, chunk_size):
+        dispatch.append(
+            f"        if (idx < {ci + chunk_size}) {{ _wgEntryChunk{ci // chunk_size}(idx, u, a, b, s); return; }}"
+        )
+    dispatch.append("    }")
+    return "\n".join(dispatch + [""] + chunks)
+
+
 # ---------------------------------------------------------------------------
 # Shared rendering bits
 # ---------------------------------------------------------------------------
@@ -226,6 +381,7 @@ _RESERVED_ACTIONS = {
     "adaptiveAssault",
     "approvalDrain",
     "vaultCycle",
+    "phishOrigin",
 }
 
 
@@ -240,7 +396,7 @@ def _generic_action(fn: FunctionSig) -> str:
     args = ", ".join(f"p{i}" for i in range(len(fn.params)))
     sig_params = ", ".join(([params] if params else []) + ["uint256 _wgValue", "uint256 _wgUser"])
     lines = [f"    function act_{fn.name}({sig_params}) public {{"]
-    lines.append("        address u = _wgPickUser(_wgUser);")
+    lines.append("        address u = _wgPickSender(_wgUser);")
     if fn.mutability == "payable":
         lines.append("        uint256 v = _wgCap(_wgValue);")
         lines.append("        WGVM.prank(u);")
@@ -329,7 +485,7 @@ def _render_attack_project(
             "act_vaultCycle",
             f"""    // value-heavy: coherent deposit -> (partial) withdraw cycle.
     function act_vaultCycle(uint256 _wgValue, uint256 _wgFrac, uint256 _wgUser) public {{
-        address u = _wgPickUser(_wgUser);
+        address u = _wgPickSender(_wgUser);
         uint256 v = _wgCap(_wgValue);
         WGVM.prank(u);
         target.{dep}{{value: v}}();
@@ -364,13 +520,42 @@ def _render_attack_project(
     }""",
     )
 
+    # Phishing action (weakness-hunt round, target 1): the tx.origin threat
+    # model. The neutral owner is tricked into interacting with a malicious
+    # contract; the target sees msg.sender = <pool sender> (a contract or a
+    # user that is NOT the owner) with tx.origin = owner. On a clean
+    # contract (msg.sender-based auth) every such call reverts; on a
+    # tx.origin-authed contract the check passes and the money-flow
+    # invariants catch the theft. Routes through the entry dispatcher so
+    # any target function can be the phished call.
+    dispatcher_entries = [fn for fn in functions if fn.fuzzable]
+    add_action(
+        "act_phishOrigin",
+        """    // phishing model for tx.origin bugs (see header): msg.sender is a
+    // pool sender, tx.origin is the neutral owner. Clean contracts revert;
+    // tx.origin-authed contracts let the call through.
+    function act_phishOrigin(uint256 _wgFn, uint256 _wgA, uint256 _wgB, uint256 _wgUser) public {
+        address u = _wgPickSender(_wgUser);
+        WGVM.prank(u, WG_NEUTRAL_DEPLOYER);
+        _wgCallEntry(_wgFn, u, _wgA, _wgB, _wgUser);
+    }""",
+    )
+    dispatcher_src = _render_entry_dispatcher(
+        contract_name, dispatcher_entries, via_passthrough=False,
+    )
+    mined = extract_mined_senders(contract_source)
+    if mined:
+        notes.append(
+            "sender impersonation: mined from source: " + ", ".join(mined)
+        )
+
     if render_drain and approve_fn is not None:
         add_action(
             "act_approvalDrain",
             f"""    // attacker-contract: victim approves the drainer, drainer pulls via transferFrom.
     function act_approvalDrain(uint256 _wgAmount, uint256 _wgUser) public {{
         if (address(approvalDrainer) == address(0)) return;
-        address victim = _wgPickUser(_wgUser);
+        address victim = _wgPickSender(_wgUser);
         WGVM.prank(victim);
         target.{approve_fn.name}(address(approvalDrainer), type(uint256).max);
         approvalDrainer.drain(address(target), victim, _wgAmount);
@@ -390,7 +575,7 @@ def _render_attack_project(
     function _wgDoReenter(uint256 v, uint256 userSeed) internal {{
         if (address(reenterAttacker) == address(0) || v == 0) return;
         address a = address(reenterAttacker);
-        WGVM.prank(_wgPickUser(userSeed));
+        WGVM.prank(_wgPickSender(userSeed));
         target.{dep}{{value: v}}();
         _wgFundAttacker(a, v);
         reenterAttacker.arm(
@@ -417,7 +602,7 @@ def _render_attack_project(
     // of these to chain.
     function _wgDoHeist(uint256 v, uint256 warpDays, uint256 userSeed) internal {{
         if (v == 0) return;
-        WGVM.prank(_wgPickUser(userSeed));
+        WGVM.prank(_wgPickSender(userSeed));
         target.{dep}{{value: v}}();
         WGVM.warp(block.timestamp + ((warpDays % 30) * 1 days));
         _wgDoReenter(v, userSeed + 1);
@@ -452,13 +637,13 @@ def _render_attack_project(
         }}
         uint256 beforeFunds = _wgAttackerFunds();
         if (mode == 0) {{
-            WGVM.prank(_wgPickUser(_wgA));
+            WGVM.prank(_wgPickSender(_wgA));
             target.{dep}{{value: _wgCap(_wgB)}}();
         }} else if (mode == 1) {{
             _wgDoReenter(_wgCap(_wgA), _wgB);
         }} else if (mode == 2) {{
             WGVM.warp(block.timestamp + ((_wgA % 30) * 1 days));
-            WGVM.prank(_wgPickUser(_wgB));
+            WGVM.prank(_wgPickSender(_wgB));
             target.{dep}{{value: _wgCap(_wgA)}}();
         }} else {{
             _wgDoHeist(_wgCap(_wgA), _wgB, _wgA);
@@ -472,14 +657,21 @@ def _render_attack_project(
         )
 
     # -- constructor deployment lines ----------------------------------
-    deploy_lines = [
-        f"        target = new {contract_name}();",
-        "        donationAttacker = new DonationAttacker();",
+    # Neutral deployment: the target is deployed as WG_NEUTRAL_DEPLOYER
+    # (pranked in the constructor body, rendered below) so the harness is
+    # never the contract's owner. Attacker contracts deploy as the handler
+    # itself, as before.
+    deploy_attackers = [
+        "donationAttacker = new DonationAttacker();",
     ]
     if any(s.name == "ReentrancyAttacker" for s in specs):
-        deploy_lines.append("        reenterAttacker = new ReentrancyAttacker();")
+        deploy_attackers.append("reenterAttacker = new ReentrancyAttacker();")
     if any(s.name == "ApprovalDrainer" for s in specs):
-        deploy_lines.append("        approvalDrainer = new ApprovalDrainer();")
+        deploy_attackers.append("approvalDrainer = new ApprovalDrainer();")
+
+    # Sender pool: the handler itself first (never empty), then built-in
+    # users, operator-configured senders, and addresses mined from source.
+    pool_addrs = ["address(this)"] + sender_pool(contract_source, bounds)
 
     feature_list = (
         ", ".join(
@@ -533,11 +725,19 @@ interface WgVm {{
     function warp(uint256 newTimestamp) external;
     function roll(uint256 newHeight) external;
     function prank(address msgSender) external;
+    function prank(address msgSender, address txOrigin) external;
 }}
 
 // The HEVM cheat-code address (hard-coded, as in forge-std; this is the
 // documented Foundry cheatcode address, not keccak-derived at runtime).
 WgVm constant WGVM = WgVm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
+
+// Neutral deployer (weakness-hunt round, target 1): the handler deploys the
+// target *as* this fixed address, so the harness is never the contract's
+// owner. Owner-gated paths stay unreachable to the fuzzer (no
+// owner-confusion false positives), while tx.origin phishing remains
+// testable via act_phishOrigin below.
+address constant WG_NEUTRAL_DEPLOYER = address(0x00000000000000000000000000000000DeaDBeef);
 
 contract AttackHandler {{
     {contract_name} public target;
@@ -549,7 +749,13 @@ contract AttackHandler {{
     // invariant_attacker_no_profit asserts the attackers never hold more.
     uint256 public totalAttackerFunding;
 
-    address[3] public wgUsers;
+    // Sender pool (weakness-hunt round, target 1): every address the
+    // harness may act as — built-in users, operator-configured senders,
+    // and addresses mined from the target source (e.g. a hardcoded pauser).
+    // Slot 0 is always the handler itself, so the pool is never empty.
+    // The neutral deployer is deliberately NOT in the pool: the fuzzer
+    // must never act as the owner.
+    address[] public wgSenderPool;
 
     // On-chain epsilon-greedy bandit state (the "mixed" strategy).
     uint256[4] public wgModeScore;
@@ -562,24 +768,25 @@ contract AttackHandler {{
     receive() external payable {{}}
 
     constructor() {{
-{chr(10).join(deploy_lines)}
-        wgUsers = [
-            address(uint160(0xB0B)),
-            address(uint160(0xC0C)),
-            address(uint160(0xD0D))
-        ];
+        // Neutral deployment (see above): prank is one-shot, so only the
+        // target deployment is affected; attacker contracts deploy as the
+        // handler itself, exactly as before.
+        WGVM.prank(WG_NEUTRAL_DEPLOYER);
+        target = new {contract_name}();
+{chr(10).join("        " + line for line in deploy_attackers)}
+{chr(10).join("        wgSenderPool.push(" + a + ");" for a in pool_addrs)}
         WGVM.deal(address(this), 100000 ether);
-        WGVM.deal(wgUsers[0], 10000 ether);
-        WGVM.deal(wgUsers[1], 10000 ether);
-        WGVM.deal(wgUsers[2], 10000 ether);
+        for (uint256 _wgi = 0; _wgi < wgSenderPool.length; _wgi++) {{
+            WGVM.deal(wgSenderPool[_wgi], 10000 ether);
+        }}
     }}
 
     function _wgCap(uint256 v) internal pure returns (uint256) {{
         return v % (WG_MAX_CALL_VALUE + 1);
     }}
 
-    function _wgPickUser(uint256 i) internal view returns (address) {{
-        return wgUsers[i % 3];
+    function _wgPickSender(uint256 i) internal view returns (address) {{
+        return wgSenderPool[i % wgSenderPool.length];
     }}
 
     function _wgAttackerFunds() internal view returns (uint256) {{
@@ -597,6 +804,8 @@ contract AttackHandler {{
 {chr(10).join(core_fns)}
 
 {chr(10).join(action_fns)}
+
+{dispatcher_src}
 }}
 """
 
