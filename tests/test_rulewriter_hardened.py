@@ -581,3 +581,59 @@ def test_extract_baseline_failures_parses_forge_shape() -> None:
     inv = _inv("reserve-always-full", "target.totalDeposited() == 999999")
     assert gate.extract_baseline_failures(output, [inv]) == ["reserve-always-full"]
     assert gate.extract_baseline_failures("Suite result: ok", [inv]) == []
+
+
+# ---------------------------------------------------------------------------
+# Self-improvement loop, iteration 5 (invariants/fuzzing pipeline focus):
+# the snforge branch of the proof gate's trace check used to admit a
+# finding whenever the PoC carried neither "arguments:" nor "(not printed)"
+# — a fail-open hole. A snforge PoC with no counterexample arguments has
+# no machine trace and must be rejected, like every other engine.
+# ---------------------------------------------------------------------------
+
+_CAIRO_POC_NO_TRACE = (
+    "# snforge invariant counterexample (machine-checked).\n"
+    "# Reproduce: run this pipeline against vault.cairo\n"
+    "# Failing test: invariant_foo\n"
+    "#   foo [other]: violated invariant\n"
+    "# Failure data:\n#   (none)\n"
+)
+
+_CAIRO_POC_WITH_ARGS = (
+    "# snforge invariant counterexample (machine-checked).\n"
+    "# Reproduce: run this pipeline against vault.cairo\n"
+    "# Failing test: invariant_foo\n"
+    "#   foo [other]: violated invariant\n"
+    "# Fuzzer counterexample arguments (the `ops` array that breaks it):\n"
+    '#   arguments: ["42"]\n'
+    "# Failure data:\n#   (none)\n"
+)
+
+
+def _cairo_campaign() -> CampaignResult:
+    return CampaignResult(
+        compile_ok=True, clean=False, runs=3, engine="snforge-invariant",
+    )
+
+
+def test_gate_rejects_snforge_finding_with_no_counterexample_args() -> None:
+    verdict = gate.gate_findings(
+        [_finding("foo", _CAIRO_POC_NO_TRACE, engine="snforge-invariant")],
+        {"foo"},
+        _cairo_campaign(),
+    )
+    assert verdict.admitted == []
+    assert len(verdict.rejected) == 1
+    assert "no machine trace" in verdict.rejected[0].reason
+
+
+def test_gate_admits_snforge_finding_with_counterexample_args() -> None:
+    verdict = gate.gate_findings(
+        [_finding("foo", _CAIRO_POC_WITH_ARGS, engine="snforge-invariant")],
+        {"foo"},
+        _cairo_campaign(),
+    )
+    assert len(verdict.admitted) == 1
+    proof = verdict.admitted[0].metadata["proof"]
+    assert proof["engine"] == "snforge-invariant"
+    assert any("arguments:" in line for line in proof["trace"])

@@ -252,6 +252,36 @@ def test_synthesize_dedupes_ids_against_templates() -> None:
     assert {i.id for i in result.invariants} == _VULN_VAULT_TEMPLATE_IDS
 
 
+# Self-improvement loop, iteration 5 (invariants/fuzzing pipeline focus):
+# one malformed element in the LLM's batch no longer discards the whole
+# batch — bad elements are skipped (loudly) and the good ones are kept.
+def test_synthesize_keeps_good_elements_when_one_is_malformed() -> None:
+    good = (
+        '{"id": "no-free-mint", "statement": "s", '
+        '"assertion": "target.totalSupply() <= target.totalAssets()"}'
+    )
+    dup = (
+        '{"id": "tmpl-solvency-1-1", "statement": "s", '
+        '"assertion": "target.totalSupply() == target.totalAssets()"}'
+    )
+    bad_assertion = (
+        '{"id": "statement-like", "statement": "s", '
+        '"assertion": "target.a() == 1; target.b();"}'
+    )
+    result = synthesize_invariants(
+        _VULN_VAULT_SRC,
+        FakeClient(f"[{good}, {dup}, {bad_assertion}]"),
+        {},
+        contract_name="VulnVault",
+    )
+    by_id = {i.id: i for i in result.invariants}
+    assert result.ai_used
+    assert "no-free-mint" in by_id
+    assert by_id["no-free-mint"].source == "llm"
+    assert "statement-like" not in by_id
+    assert any("skipped as malformed" in n for n in result.notes)
+
+
 # ---------------------------------------------------------------------------
 # Harness rendering (no forge needed — pure string checks)
 # ---------------------------------------------------------------------------

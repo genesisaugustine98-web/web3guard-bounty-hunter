@@ -321,7 +321,14 @@ def _check_trace(engine: str, poc: str) -> tuple[bool, list[str]]:
         if "(not printed)" in poc:
             return False, []
         m = re.search(r"arguments:\s*(.+)", poc)
-        return (True, [m.group(0).strip()] if m else [])
+        # Self-improvement loop, iteration 5: fail-closed. A snforge PoC
+        # with no counterexample arguments in it has no machine trace —
+        # the gate must refuse to emit the finding rather than admit it
+        # on an empty trace (the old code returned True unconditionally
+        # here). Real cairo findings always embed either `arguments: ...`
+        # or `(not printed)` (see fuzz_cairo.py), so the real path is
+        # unaffected.
+        return (bool(m), [m.group(0).strip()] if m else [])
     if engine == "echidna":
         lines = [
             ln.strip()

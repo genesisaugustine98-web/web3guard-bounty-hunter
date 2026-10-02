@@ -214,8 +214,62 @@ def _build_user_prompt(
     )
 
 
-def _parse_llm_invariants(raw: str, *, existing_ids: set[str]) -> list[Invariant]:
-    """Strictly validate model output; raise ValueError with a clear reason."""
+def _str_list(item: dict[str, Any], key: str) -> list[str]:
+    val = item.get(key, [])
+    if not isinstance(val, list):
+        return []
+    return [str(v)[:80] for v in val if isinstance(v, (str, int))][:16]
+
+
+def _validate_llm_invariant(
+    item: Any, where: str, existing_ids: set[str],
+) -> Invariant:
+    """Validate one model-produced invariant; raise ValueError naming the flaw."""
+    if not isinstance(item, dict):
+        raise ValueError(f"{where}: must be an object")
+    for field in ("id", "statement", "assertion"):
+        if not isinstance(item.get(field), str) or not item[field].strip():
+            raise ValueError(f"{where}: missing or empty required field {field!r}")
+    inv_id = re.sub(r"[^A-Za-z0-9_-]", "-", item["id"].strip())[:64]
+    if not inv_id or inv_id in existing_ids:
+        raise ValueError(f"{where}: duplicate or empty id {item['id']!r}")
+    existing_ids.add(inv_id)
+    # The assertion must be a single-line expression: collapse whitespace,
+    # reject anything that looks like a statement block.
+    assertion = " ".join(item["assertion"].split())
+    if any(tok in assertion for tok in (";", "{", "}")):
+        raise ValueError(f"{where}: assertion must be a single expression")
+    bug_class = str(item.get("bug_class", "other"))
+    if bug_class not in _BUG_CLASS_SEVERITY:
+        bug_class = "other"
+    severity = str(item.get("severity", "")).upper()
+    if severity not in _SEVERITIES:
+        severity = _BUG_CLASS_SEVERITY[bug_class]
+    return Invariant(
+        id=inv_id,
+        statement=item["statement"].strip()[:500],
+        variables=_str_list(item, "variables"),
+        functions=_str_list(item, "functions"),
+        assertion=assertion[:500],
+        rationale=str(item.get("rationale", ""))[:500],
+        bug_class=bug_class,
+        source="llm",
+        severity=severity,
+    )
+
+
+def _parse_llm_invariants(
+    raw: str, *, existing_ids: set[str],
+) -> tuple[list[Invariant], list[str]]:
+    """Validate model output, skipping bad elements instead of dumping the batch.
+
+    Raises ValueError (the whole batch is rejected) only for structurally
+    malformed output — not valid JSON, or not a JSON array. An individual
+    element with a duplicate id, a missing field, or a statement-shaped
+    assertion is skipped with a reason recorded in the returned rejection
+    list: one confused element no longer discards the rest of an otherwise
+    good batch. Every kept element passed the full strict validation above.
+    """
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -225,49 +279,17 @@ def _parse_llm_invariants(raw: str, *, existing_ids: set[str]) -> list[Invariant
             f"LLM invariant output must be a JSON array, got {type(data).__name__}"
         )
     out: list[Invariant] = []
+    rejected: list[str] = []
     for i, item in enumerate(data[:_MAX_LLM_INVARIANTS]):
         where = f"element {i}"
-        if not isinstance(item, dict):
-            raise ValueError(f"{where}: must be an object")
-        for field in ("id", "statement", "assertion"):
-            if not isinstance(item.get(field), str) or not item[field].strip():
-                raise ValueError(f"{where}: missing or empty required field {field!r}")
-        inv_id = re.sub(r"[^A-Za-z0-9_-]", "-", item["id"].strip())[:64]
-        if not inv_id or inv_id in existing_ids:
-            raise ValueError(f"{where}: duplicate or empty id {item['id']!r}")
-        existing_ids.add(inv_id)
-        # The assertion must be a single-line expression: collapse whitespace,
-        # reject anything that looks like a statement block.
-        assertion = " ".join(item["assertion"].split())
-        if any(tok in assertion for tok in (";", "{", "}")):
-            raise ValueError(f"{where}: assertion must be a single expression")
-        bug_class = str(item.get("bug_class", "other"))
-        if bug_class not in _BUG_CLASS_SEVERITY:
-            bug_class = "other"
-        severity = str(item.get("severity", "")).upper()
-        if severity not in _SEVERITIES:
-            severity = _BUG_CLASS_SEVERITY[bug_class]
-
-        def _str_list(key: str, item: dict[str, Any]) -> list[str]:
-            val = item.get(key, [])
-            if not isinstance(val, list):
-                return []
-            return [str(v)[:80] for v in val if isinstance(v, (str, int))][:16]
-
-        out.append(
-            Invariant(
-                id=inv_id,
-                statement=item["statement"].strip()[:500],
-                variables=_str_list("variables", item),
-                functions=_str_list("functions", item),
-                assertion=assertion[:500],
-                rationale=str(item.get("rationale", ""))[:500],
-                bug_class=bug_class,
-                source="llm",
-                severity=severity,
-            )
-        )
-    return out
+        try:
+            out.append(_validate_llm_invariant(item, where, existing_ids))
+        except ValueError as exc:
+            # Self-improvement loop, iteration 5: skip the one bad
+            # element (loudly) instead of rejecting the whole batch.
+            LOGGER.warning("skipping malformed LLM invariant %s: %s", where, exc)
+            rejected.append(str(exc))
+    return out, rejected
 
 
 def synthesize_invariants(
@@ -326,14 +348,23 @@ def synthesize_invariants(
         return result
 
     try:
-        llm_invariants = _parse_llm_invariants(resp.content, existing_ids=existing_ids)
+        llm_invariants, rejected = _parse_llm_invariants(
+            resp.content, existing_ids=existing_ids
+        )
     except ValueError as exc:
         LOGGER.warning("rejecting malformed LLM invariant output: %s", exc)
         result.notes.append(f"LLM invariant output rejected ({exc}); using templates only.")
         return result
 
+    if rejected:
+        result.notes.append(
+            f"LLM invariant synthesis: {len(rejected)} element(s) skipped as "
+            f"malformed ({'; '.join(rejected[:3])}"
+            f"{'...' if len(rejected) > 3 else ''}); "
+            f"keeping {len(llm_invariants)} valid element(s)."
+        )
     result.invariants.extend(llm_invariants)
-    result.ai_used = True
+    result.ai_used = bool(llm_invariants)
     LOGGER.info(
         "synthesized %d invariants for %s (%d template, %d LLM)",
         len(result.invariants), contract_name, len(templates), len(llm_invariants),
