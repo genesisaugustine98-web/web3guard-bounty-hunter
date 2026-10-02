@@ -7,8 +7,42 @@ and :mod:`web3guard.invariants.fuzz` pass between each other.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
+
+# Primitive Solidity types the entry-point generator can fuzz.
+_PRIMITIVE_RE = re.compile(
+    r"^(uint(8|16|32|64|128|256)?|int(8|16|32|64|128|256)?|address|bool|bytes32)$"
+)
+
+
+@dataclass
+class FunctionSig:
+    """A parsed function signature relevant to fuzz-entry generation.
+
+    (Moved here from :mod:`web3guard.invariants.harness` in the Phase 1
+    attack-simulator upgrade so :mod:`web3guard.invariants.attackers` can
+    use it without creating an import cycle. It is still importable from
+    ``harness`` — same object, same behavior.)
+    """
+
+    name: str
+    params: list[tuple[str, str]] = field(default_factory=list)  # (type, name)
+    mutability: str = ""  # "payable" | "view" | "pure" | ""
+
+    @property
+    def state_changing(self) -> bool:
+        return self.mutability not in ("view", "pure")
+
+    @property
+    def fuzzable(self) -> bool:
+        """True when every parameter is a fuzzable primitive type."""
+        if not self.state_changing:
+            return False
+        if self.name.startswith(("invariant", "entry_")):
+            return False
+        return all(_PRIMITIVE_RE.match(t) for t, _ in self.params)
 
 
 @dataclass
@@ -23,17 +57,17 @@ class Invariant:
     fallback and for LLM-drafted invariants alike.
     """
 
-    id: str                     # short slug, e.g. "solvency-1-1"
-    statement: str              # natural-language statement of the property
-    variables: list[str] = field(default_factory=list)   # state vars involved
+    id: str  # short slug, e.g. "solvency-1-1"
+    statement: str  # natural-language statement of the property
+    variables: list[str] = field(default_factory=list)  # state vars involved
     functions: list[str] = field(default_factory=list)  # functions involved
-    assertion: str = ""         # Solidity boolean expression over `target`
-    rationale: str = ""         # why this property matters for security
+    assertion: str = ""  # Solidity boolean expression over `target`
+    rationale: str = ""  # why this property matters for security
     bug_class: str = "accounting-desync"  # accounting-desync | access-control
-                                            # | oracle-price | rounding
-                                            # | share-price | other
-    source: str = "template"    # "template" | "llm"
-    severity: str = "HIGH"      # severity if the invariant is violated
+    # | oracle-price | rounding
+    # | share-price | other
+    source: str = "template"  # "template" | "llm"
+    severity: str = "HIGH"  # severity if the invariant is violated
 
 
 @dataclass
@@ -42,12 +76,36 @@ class FuzzBounds:
 
     Defaults are sized for a small 2-CPU / 7 GB VM: a campaign should
     finish in a few minutes, never dominate the host.
+
+    Phase 1 attack-simulator fields (all additive, all default-ON so the
+    pipeline needs no changes to get the attacking simulator):
+
+    - ``seed``: fixed default campaign seed (reproducibility). Plumbed to
+      ``forge test --fuzz-seed``, the ``[fuzz] seed`` config key, and the
+      on-chain strategy PRNG inside the attack handler.
+    - ``attack_enabled``: render the attack harness (value-carrying
+      handler, deployed attacker contracts, time-warp + heist actions,
+      adaptive strategy mixing) instead of the legacy plain harness.
+    - ``attack_depth``: call-sequence depth for attack campaigns. The old
+      15-call ceiling is what kept multi-step exploits unreachable; the
+      rendered ``[invariant] depth`` becomes
+      ``max(depth, attack_depth)`` when attacks are on.
+    - ``attack_max_value_wei``: cap on ETH value any single handler
+      action may move (fuzzed per-call amounts are clamped to this).
+    - ``strategy_epsilon``: exploration rate of the epsilon-greedy
+      strategy selector (0 = always exploit the best-known strategy,
+      1 = always explore randomly).
     """
 
-    runs: int = 256             # invariant runs per campaign
-    depth: int = 15             # max call-sequence depth
+    runs: int = 256  # invariant runs per campaign
+    depth: int = 15  # max call-sequence depth
     timeout_seconds: int = 300  # hard wall-clock cap per campaign
     fail_on_revert: bool = False
+    seed: int = 1337  # fixed default campaign seed
+    attack_enabled: bool = True  # attack harness ON by default
+    attack_depth: int = 64  # attack call-sequence depth
+    attack_max_value_wei: int = 10_000_000_000_000_000_000  # 10 ETH/call
+    strategy_epsilon: float = 0.25  # bandit exploration rate
 
     @classmethod
     def from_config(cls, config: Any) -> FuzzBounds:
@@ -65,9 +123,44 @@ class FuzzBounds:
                         setattr(bounds, key, val)
                 except (TypeError, ValueError):
                     continue
+        for key in ("seed", "attack_depth", "attack_max_value_wei"):
+            if key in inv_cfg:
+                try:
+                    val = int(inv_cfg[key])
+                    if val >= 0:
+                        setattr(bounds, key, val)
+                except (TypeError, ValueError):
+                    continue
         if "fail_on_revert" in inv_cfg:
             bounds.fail_on_revert = bool(inv_cfg["fail_on_revert"])
+        if "attack_enabled" in inv_cfg:
+            bounds.attack_enabled = _coerce_bool(inv_cfg["attack_enabled"], True)
+        if "strategy_epsilon" in inv_cfg:
+            try:
+                eps = float(inv_cfg["strategy_epsilon"])
+                if 0.0 <= eps <= 1.0:
+                    bounds.strategy_epsilon = eps
+            except (TypeError, ValueError):
+                pass
         return bounds
+
+    @property
+    def effective_depth(self) -> int:
+        """Call-sequence depth actually rendered into foundry.toml."""
+        if self.attack_enabled:
+            return max(self.depth, self.attack_depth)
+        return self.depth
+
+
+def _coerce_bool(value: Any, default: bool) -> bool:
+    """Parse a config boolean without ``bool("false") == True`` traps."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "y", "on")
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
 
 
 @dataclass
@@ -77,7 +170,7 @@ class CampaignResult:
     skipped: bool = False
     skip_reason: str = ""
     compile_ok: bool = False
-    clean: bool = False               # ran to completion, nothing violated
+    clean: bool = False  # ran to completion, nothing violated
     runs: int = 0
     calls: int = 0
     reverts: int = 0
@@ -85,6 +178,10 @@ class CampaignResult:
     raw_stdout: str = ""
     raw_stderr: str = ""
     engine: str = "foundry-invariant"
+    # Phase 1 (additive): which attack strategies the campaign emphasized,
+    # and the campaign seed actually used. Empty for legacy campaigns.
+    strategies_used: list[str] = field(default_factory=list)
+    campaign_seed: int = 1337
 
 
 @dataclass
@@ -104,3 +201,6 @@ class PipelineResult:
     notes: list[str] = field(default_factory=list)
     invariants: list[Invariant] = field(default_factory=list)
     campaign: CampaignResult | None = None
+    #: Rules the proof gate quarantined (pre-render or post-campaign), as
+    #: dicts with invariant_id / reason / stage. Additive (Phase 3).
+    quarantined_rules: list[Any] = field(default_factory=list)

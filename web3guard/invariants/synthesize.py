@@ -1,20 +1,25 @@
 """Invariant synthesis (Phase 2, step 1) — the PROMFUZZ pattern.
 
-Given Solidity contract source, draft "must-always-hold" invariants in two
-layers:
+Given contract source, draft "must-always-hold" invariants in two layers:
 
-1. **Deterministic templates** (:data:`GENERIC_TEMPLATES`) — a small set of
-   hand-written, widely-applicable properties (e.g. ``totalSupply ==
-   totalAssets`` for 1:1 vaults). These ALWAYS run, even with no AI keys, so
-   the pipeline works keyless at reduced depth. Each template declares the
-   public getters it needs; it is only emitted when the contract actually
-   exposes them.
+1. **Deterministic templates** (:mod:`web3guard.invariants.templates`) — a
+   WIDE registry of hand-written, widely-applicable properties (~17 Solidity
+   templates across conservation, access-control, arithmetic bounds, pausing,
+   fees, allowances, mint/burn symmetry, oracle staleness, and share-price
+   sanity, plus Vyper/Cairo mirrors of the core set). These ALWAYS run, even
+   with no AI keys, so the pipeline works keyless at reduced depth. Each
+   template declares applicability conditions and is only emitted when the
+   contract actually matches them. Templates with ghost state additionally
+   get a generated handler harness (see templates.render_ghost_project).
 
 2. **LLM-drafted invariants** — when the router client is active, the model is
    asked for deeper, contract-specific properties (accounting desync,
    access-control intent, oracle/price assumptions, rounding, share-price
    monotonicity). Output is validated against a strict schema; malformed
    output is rejected with a clear log line and never crashes the scan.
+
+Every rule from either layer must additionally pass the proof gate
+(:mod:`web3guard.invariants.proof_gate`) before it can produce a finding.
 
 Security note: contract source is untrusted input to the prompt. We rely on
 :class:`web3guard.ai.client.AIClient`'s built-in prompt-injection guard
@@ -47,198 +52,42 @@ _BUG_CLASS_SEVERITY = {
     "oracle-price": "CRITICAL",
     "rounding": "MEDIUM",
     "share-price": "HIGH",
+    "fee-accounting": "MEDIUM",
+    "allowance": "HIGH",
     "other": "MEDIUM",
 }
 
 
 # ---------------------------------------------------------------------------
-# Deterministic template fallback (always runs, no AI needed)
+# Deterministic template fallback (always runs, no AI needed).
+#
+# The registry itself lives in web3guard.invariants.templates (Phase 3
+# widened it well beyond the original 3 Solidity templates and added
+# ghost-state temporal properties). The names below are re-exported for
+# backward compatibility.
 # ---------------------------------------------------------------------------
 
-
-class _Template:
-    """One hand-written invariant template with applicability conditions."""
-
-    def __init__(
-        self,
-        id: str,
-        statement: str,
-        requires: list[str],
-        assertion: str,
-        rationale: str,
-        bug_class: str,
-        severity: str,
-        variables: list[str] | None = None,
-        functions: list[str] | None = None,
-    ) -> None:
-        self.id = id
-        self.statement = statement
-        self.requires = requires          # regexes; ALL must match the source
-        self.assertion = assertion        # Solidity over `target`
-        self.rationale = rationale
-        self.bug_class = bug_class
-        self.severity = severity
-        self.variables = variables or []
-        self.functions = functions or []
-
-    def applies(self, source: str) -> bool:
-        return all(re.search(p, source) for p in self.requires)
-
-    def to_invariant(self) -> Invariant:
-        return Invariant(
-            id=self.id,
-            statement=self.statement,
-            variables=list(self.variables),
-            functions=list(self.functions),
-            assertion=self.assertion,
-            rationale=self.rationale,
-            bug_class=self.bug_class,
-            source="template",
-            severity=self.severity,
-        )
-
-
-# Matches either an explicit getter (``totalSupply()``) or a public state
-# variable declaration (``uint256 public totalSupply;``), which Solidity
-# auto-exposes as a getter.
-def _getter_pat(name: str) -> str:
-    return rf"(?:\bpublic\b[^\n;{{}}]*\b{name}\b|\b{name}\s*\(\s*\))"
-
-
-# Vyper: ``total_supply: public(uint256)`` or ``def total_supply(``.
-def _vyper_getter_pat(name: str) -> str:
-    return rf"(?:\b{name}\s*:\s*public\s*\(|\bdef\s+{name}\s*\()"
-
-
-# Cairo: ``fn total_supply(`` inside the contract or its interface trait.
-def _cairo_getter_pat(name: str) -> str:
-    return rf"\bfn\s+{name}\s*\("
-
-
-def _mk_templates(
-    *,
-    supply: str,
-    assets: str,
-    price: str,
-    owner: str,
-    solvency_assert: str,
-    share_price_assert: str,
-    owner_assert: str,
-    solvency_requires: list[str],
-    share_price_requires: list[str],
-    owner_requires: list[str],
-) -> list[_Template]:
-    return [
-        _Template(
-            id="tmpl-solvency-1-1",
-            statement=f"For a 1:1 vault, {supply} must always equal {assets}: "
-                      "every share in existence is backed by exactly one unit of assets.",
-            requires=solvency_requires,
-            assertion=solvency_assert,
-            rationale="A mismatch means shares were minted without backing "
-                      "(free mint / donation-inflation hole) or assets left "
-                      "without burning shares — the classic vault accounting "
-                      "desync behind share-price manipulation exploits.",
-            bug_class="accounting-desync",
-            severity="HIGH",
-            variables=[supply, assets],
-        ),
-        _Template(
-            id="tmpl-share-price-positive",
-            statement=f"The reported share price ({price}) must always be "
-                      "strictly positive.",
-            requires=share_price_requires,
-            assertion=share_price_assert,
-            rationale="A zero (or underflowing) share price breaks every "
-                      "deposit/withdraw quote; attackers abuse rounding to push "
-                      "it to zero and mint shares for free.",
-            bug_class="rounding",
-            severity="MEDIUM",
-            variables=[price],
-        ),
-        _Template(
-            id="tmpl-owner-nonzero",
-            statement=f"The contract owner ({owner}) must never be the zero address.",
-            requires=owner_requires,
-            assertion=owner_assert,
-            rationale="Ownership silently landing on address(0) bricks admin "
-                      "functions or, worse, signals a broken access-control "
-                      "handoff an attacker can race.",
-            bug_class="access-control",
-            severity="MEDIUM",
-            variables=[owner],
-        ),
-    ]
-
-
-GENERIC_TEMPLATES: list[_Template] = _mk_templates(
-    supply="totalSupply",
-    assets="totalAssets",
-    price="sharePrice",
-    owner="owner",
-    solvency_assert="target.totalSupply() == target.totalAssets()",
-    share_price_assert="target.sharePrice() > 0",
-    owner_assert="target.owner() != address(0)",
-    solvency_requires=[_getter_pat("totalSupply"), _getter_pat("totalAssets")],
-    share_price_requires=[_getter_pat("sharePrice")],
-    owner_requires=[_getter_pat("owner")],
+from web3guard.invariants.templates import (  # noqa: E402
+    CAIRO_TEMPLATES,
+    GENERIC_TEMPLATES,
+    VYPER_TEMPLATES,
+    TemplateSpec,
+    template_invariants,
 )
 
-#: Vyper template variants (snake_case getters; assertions in the Python
-#: dialect the Vyper driver evaluates).
-VYPER_TEMPLATES: list[_Template] = _mk_templates(
-    supply="total_supply",
-    assets="total_assets",
-    price="share_price",
-    owner="owner",
-    solvency_assert="target.total_supply() == target.total_assets()",
-    share_price_assert="target.share_price() > 0",
-    owner_assert="target.owner() != address(0)",
-    solvency_requires=[
-        _vyper_getter_pat("total_supply"), _vyper_getter_pat("total_assets")
-    ],
-    share_price_requires=[_vyper_getter_pat("share_price")],
-    owner_requires=[_vyper_getter_pat("owner")],
-)
-
-#: Cairo template variants (snake_case getters; assertions in the neutral
-#: ``target.`` dialect that ``translate_assertion_to_cairo`` consumes —
-#: it rewrites ``target.`` to ``dispatcher.`` and ``address(0)`` to the
-#: zero contract address).
-CAIRO_TEMPLATES: list[_Template] = _mk_templates(
-    supply="total_supply",
-    assets="total_assets",
-    price="share_price",
-    owner="owner",
-    solvency_assert="target.total_supply() == target.total_assets()",
-    share_price_assert="target.share_price() > 0",
-    owner_assert="target.owner() != address(0)",
-    solvency_requires=[
-        _cairo_getter_pat("total_supply"), _cairo_getter_pat("total_assets")
-    ],
-    share_price_requires=[_cairo_getter_pat("share_price")],
-    owner_requires=[_cairo_getter_pat("owner")],
-)
-
-_TEMPLATES_BY_LANGUAGE: dict[str, list[_Template]] = {
+_TEMPLATES_BY_LANGUAGE: dict[str, list[TemplateSpec]] = {
     "solidity": GENERIC_TEMPLATES,
     "vyper": VYPER_TEMPLATES,
     "cairo": CAIRO_TEMPLATES,
 }
 
-
-def template_invariants(
-    source: str, language: str = "solidity",
-) -> list[Invariant]:
-    """Return every generic template whose required getters exist in ``source``."""
-    out: list[Invariant] = []
-    for tmpl in _TEMPLATES_BY_LANGUAGE.get(language, []):
-        try:
-            if tmpl.applies(source):
-                out.append(tmpl.to_invariant())
-        except re.error as exc:  # a bad hand-written regex must not kill a scan
-            LOGGER.warning("invariant template %s regex failed: %s", tmpl.id, exc)
-    return out
+__all__ = [
+    "CAIRO_TEMPLATES",
+    "GENERIC_TEMPLATES",
+    "VYPER_TEMPLATES",
+    "synthesize_invariants",
+    "template_invariants",
+]
 
 
 # ---------------------------------------------------------------------------

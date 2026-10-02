@@ -5,8 +5,10 @@
     findings = run_invariant_pipeline(contract_path, config)
 
 Steps: read source -> detect language -> synthesize invariants (LLM +
-templates) -> render a language-specific fuzz project -> fuzz it sandboxed
--> return :class:`Finding` objects.
+templates) -> proof-gate stage 1 (validate rules pre-render) -> render a
+language-specific fuzz project (ghost-state harness when temporal templates
+apply) -> fuzz it sandboxed -> proof-gate stage 2 (no finding without
+machine proof) -> return :class:`Finding` objects.
 
 The pipeline NEVER requires AI keys and NEVER fails a scan: every
 degradation (AI inactive, toolchain missing, compile failure, timeout) is a
@@ -24,6 +26,8 @@ from typing import Any
 
 from web3guard.ai.router import build_router_client
 from web3guard.invariants import cairo_harness as _cairo_harness  # noqa: F401
+from web3guard.invariants import proof_gate as _proof_gate
+from web3guard.invariants import templates as _templates
 from web3guard.invariants import vyper_harness as _vyper_harness  # noqa: F401
 from web3guard.invariants.fuzz import (
     discover_forge,
@@ -144,28 +148,86 @@ def run_invariant_pipeline_full(
         source, client, config, contract_name=contract_name, language=language,
     )
     note_sink.extend(synthesis.notes)
-    result.invariants = synthesis.invariants
-    if not synthesis.invariants:
+
+    # 1b. Proof gate, stage 1 (Phase 3): validate every rule BEFORE it can
+    # reach the fuzzer. Mechanically-bad rules (unknown functions, tautologies)
+    # are quarantined LOUDLY instead of killing the campaign at compile time.
+    validation = _proof_gate.validate_rules(
+        synthesis.invariants,
+        source,
+        language=language,
+        ghost_ids=_templates.GHOST_TEMPLATE_IDS,
+        handler_refs=_templates.handler_reference_names(),
+        body_ids=_templates.BODY_TEMPLATE_IDS,
+    )
+    for q in validation.quarantined:
+        msg = (
+            f"invariant rule '{q.invariant_id}' QUARANTINED pre-render: "
+            f"{q.reason} — the rule will not run."
+        )
+        LOGGER.warning(msg)
+        note_sink.append(msg)
+        result.quarantined_rules.append(
+            {"invariant_id": q.invariant_id, "reason": q.reason, "stage": q.stage}
+        )
+    note_sink.extend(validation.notes)
+    invariants = validation.valid
+    result.invariants = invariants
+    if not invariants:
         msg = (
             f"invariant pipeline: no invariants applied to {label} "
-            "(no matching templates and no AI output); skipping fuzzing."
+            "(no matching templates and no AI output"
+            + (
+                f"; {len(validation.quarantined)} rule(s) quarantined"
+                if validation.quarantined
+                else ""
+            )
+            + "); skipping fuzzing."
         )
         LOGGER.info(msg)
         note_sink.append(msg)
         return result
     LOGGER.info(
-        "invariant pipeline: %d invariant(s) for %s (ai_used=%s)",
-        len(synthesis.invariants), label, synthesis.ai_used,
+        "invariant pipeline: %d invariant(s) for %s (ai_used=%s, quarantined=%d)",
+        len(invariants), label, synthesis.ai_used, len(validation.quarantined),
     )
+
+    # 1c. Resolve ghost templates (Phase 3): drop ghost rules whose tracked
+    # calls cannot be wired safely; they would otherwise desync accounting.
+    invariants, ghost_notes = _templates.resolve_ghost_templates(invariants, source)
+    note_sink.extend(ghost_notes)
+    if not invariants:
+        msg = (
+            f"invariant pipeline: no runnable invariants for {label} "
+            "(all rules quarantined or unresolvable); skipping fuzzing."
+        )
+        LOGGER.info(msg)
+        note_sink.append(msg)
+        return result
+    ghost_mode = language == "solidity" and _templates.needs_ghost_mode(invariants)
+    if ghost_mode:
+        n_ghost = sum(1 for i in invariants if i.id in _templates.GHOST_TEMPLATE_IDS)
+        note_sink.append(
+            f"invariant pipeline: ghost-state harness active for {label} "
+            f"({n_ghost} temporal invariant(s)): calls are routed through a "
+            "handler that keeps ghost variables in lockstep, so properties "
+            "like 'withdrawn never exceeds deposited' are checkable."
+        )
 
     # 2. Render the language-specific fuzz project. A ValueError means the
     #    source cannot be turned into a runnable harness (e.g. a Cairo file
     #    without #[starknet::contract]) — an honest skip, not a crash.
     bounds = FuzzBounds.from_config(config)
     try:
-        files = render_project(
-            language, source, contract_name, synthesis.invariants, bounds,
-        )
+        if ghost_mode:
+            files, render_notes = _templates.render_ghost_project(
+                source, contract_name, invariants, bounds,
+            )
+            note_sink.extend(render_notes)
+        else:
+            files = render_project(
+                language, source, contract_name, invariants, bounds,
+            )
     except ValueError as exc:
         msg = (
             f"invariant pipeline: cannot build a {language} fuzz project "
@@ -182,22 +244,55 @@ def run_invariant_pipeline_full(
         findings: list[Finding]
         if language == "vyper":
             campaign, findings = _run_vyper_campaign(
-                project_dir, files, synthesis.invariants, bounds, config,
+                project_dir, files, invariants, bounds, config,
                 contract_path=str(path), contract_name=contract_name,
                 target_label=label, notes=note_sink,
             )
         elif language == "cairo":
             campaign, findings = _run_cairo_campaign(
-                project_dir, files, synthesis.invariants, bounds, config,
+                project_dir, files, invariants, bounds, config,
                 contract_path=str(path), contract_name=contract_name,
                 target_label=label, notes=note_sink,
             )
         else:
             campaign, findings = _run_solidity_campaign(
-                project_dir, files, synthesis.invariants, bounds, config,
+                project_dir, files, invariants, bounds, config,
                 contract_path=str(path), contract_name=contract_name,
                 target_label=label, notes=note_sink,
             )
+        # Phase 3 proof gate, stage 2: no rule becomes a finding without
+        # machine proof. Also detect rules that were already false at
+        # deployment (bad RULE, not a bug) and quarantine them instead of
+        # mislabeling the outcome as "did not compile".
+        baseline_ids = _proof_gate.extract_baseline_failures(
+            campaign.raw_stdout if campaign else "", invariants,
+        )
+        for bid in baseline_ids:
+            msg = (
+                f"invariant rule '{bid}' QUARANTINED post-campaign: violated "
+                "at deployment with an empty call sequence — the rule "
+                "contradicts the contract's own construction, so it cannot "
+                "indicate a bug. No finding emitted."
+            )
+            LOGGER.warning(msg)
+            note_sink.append(msg)
+            result.quarantined_rules.append(
+                {
+                    "invariant_id": bid,
+                    "reason": "violated at deployment (empty call sequence)",
+                    "stage": "post-campaign",
+                }
+            )
+        if baseline_ids:
+            # The campaign compiled fine (forge said so); drop the misleading
+            # generic note the runner may have added.
+            note_sink[:] = [
+                n for n in note_sink if "did not compile; see logs" not in n
+            ]
+        findings = _proof_gate.apply_proof_gate(
+            findings, invariants, campaign,
+            notes=note_sink, target_label=label,
+        )
         result.campaign = campaign
         result.findings.extend(findings)
     return result

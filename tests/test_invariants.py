@@ -88,6 +88,14 @@ contract Bare {
 }
 """
 
+# Phase 3 widened the template registry: these are the templates that match
+# the VulnVault fixture (solvency + two ghost-state temporal templates).
+_VULN_VAULT_TEMPLATE_IDS = {
+    "tmpl-solvency-1-1",
+    "tmpl-cum-flow-conservation",
+    "tmpl-no-unbacked-balance",
+}
+
 
 def _write(tmp_path: Path, name: str, src: str) -> Path:
     p = tmp_path / name
@@ -182,7 +190,7 @@ def test_synthesize_inactive_client_falls_back_to_templates() -> None:
     assert not client.is_active
     result = synthesize_invariants(_VULN_VAULT_SRC, client, {}, contract_name="VulnVault")
     assert not result.ai_used
-    assert {i.id for i in result.invariants} == {"tmpl-solvency-1-1"}
+    assert {i.id for i in result.invariants} == _VULN_VAULT_TEMPLATE_IDS
     assert result.notes, "the AI skip must be LOUD"
     assert any("SKIPPED" in n for n in result.notes)
 
@@ -208,7 +216,7 @@ def test_synthesize_rejects_malformed_json() -> None:
         _VULN_VAULT_SRC, FakeClient("this is not json {{{"), {}, contract_name="VulnVault"
     )
     assert not result.ai_used
-    assert {i.id for i in result.invariants} == {"tmpl-solvency-1-1"}
+    assert {i.id for i in result.invariants} == _VULN_VAULT_TEMPLATE_IDS
     assert any("rejected" in n for n in result.notes)
 
 
@@ -218,7 +226,7 @@ def test_synthesize_rejects_schema_violations() -> None:
         _VULN_VAULT_SRC, FakeClient(bad), {}, contract_name="VulnVault"
     )
     assert not result.ai_used
-    assert {i.id for i in result.invariants} == {"tmpl-solvency-1-1"}
+    assert {i.id for i in result.invariants} == _VULN_VAULT_TEMPLATE_IDS
 
 
 def test_synthesize_rejects_statement_like_assertions() -> None:
@@ -241,7 +249,7 @@ def test_synthesize_dedupes_ids_against_templates() -> None:
         _VULN_VAULT_SRC, FakeClient(dup), {}, contract_name="VulnVault"
     )
     assert not result.ai_used
-    assert len(result.invariants) == 1
+    assert {i.id for i in result.invariants} == _VULN_VAULT_TEMPLATE_IDS
 
 
 # ---------------------------------------------------------------------------
@@ -250,10 +258,21 @@ def test_synthesize_dedupes_ids_against_templates() -> None:
 
 
 def test_harness_renders_complete_foundry_project() -> None:
+    # Default rendering is the Phase 1 ATTACK harness (attack_enabled=True
+    # is the FuzzBounds default): handler + attacker contracts, deeper
+    # call sequences, fixed campaign seed.
     invs = template_invariants(_VULN_VAULT_SRC)
     bounds = FuzzBounds(runs=64, depth=8, timeout_seconds=120)
     files = render_solidity_project(_VULN_VAULT_SRC, "VulnVault", invs, bounds)
-    assert set(files) == {"foundry.toml", "src/VulnVault.sol", "test/Invariant.t.sol"}
+    assert set(files) == {
+        "foundry.toml",
+        "src/VulnVault.sol",
+        "test/Invariant.t.sol",
+        "test/AttackHandler.sol",
+        "test/attackers/DonationAttacker.sol",
+        "test/attackers/ReentrancyAttacker.sol",
+        "test/attackers/ApprovalDrainer.sol",
+    }
     assert files["src/VulnVault.sol"] == _VULN_VAULT_SRC
     test_src = files["test/Invariant.t.sol"]
     assert "contract InvariantTest" in test_src
@@ -261,11 +280,28 @@ def test_harness_renders_complete_foundry_project() -> None:
     assert "function invariant_tmpl_solvency_1_1() public view" in test_src
     assert "assert(target.totalSupply() == target.totalAssets());" in test_src
     assert 'import "forge-std' not in test_src  # no dependency downloads
+    assert "invariant_attacker_no_profit" in test_src  # harness-level exploit check
+    handler_src = files["test/AttackHandler.sol"]
+    assert "act_attack_reenter" in handler_src  # the simulator attacks now
+    assert "0x7109709ECfa91a80626fF3989D68f67F5b1DD12D" in handler_src
     toml = files["foundry.toml"]
     assert "runs = 64" in toml
-    assert "depth = 8" in toml
+    assert "depth = 64" in toml  # attack depth: well beyond the old 15-call ceiling
+    assert 'seed = "0x539"' in toml  # fixed default campaign seed (1337)
     assert "ffi = false" in toml
     assert "fs_permissions = []" in toml
+
+
+def test_harness_legacy_render_without_attack_flag() -> None:
+    # attack=False keeps the old plain moneyless harness for baselining.
+    invs = template_invariants(_VULN_VAULT_SRC)
+    bounds = FuzzBounds(runs=64, depth=8, timeout_seconds=120)
+    files = render_solidity_project(
+        _VULN_VAULT_SRC, "VulnVault", invs, bounds, attack=False
+    )
+    assert set(files) == {"foundry.toml", "src/VulnVault.sol", "test/Invariant.t.sol"}
+    assert "AttackHandler" not in files["test/Invariant.t.sol"]
+    assert "depth = 8" in files["foundry.toml"]
 
 
 def test_harness_renderer_registry_allows_new_languages() -> None:
@@ -445,7 +481,17 @@ def test_e2e_vulnerable_vault_violation_is_caught(tmp_path: Path) -> None:
         notes=notes,
     )
     assert not any("fuzz campaign SKIPPED" in n for n in notes), notes
-    assert len(findings) == 1
+    # Three findings now: tmpl-solvency-1-1, tmpl-no-unbacked-balance AND
+    # tmpl-cum-flow-conservation (the widened registry catches the skim bug
+    # three ways: share/asset desync, unbacked balances, and value-out >
+    # value-in over call history).
+    assert len(findings) == 3
+    by_id = {f.metadata["invariant_id"] for f in findings}
+    assert by_id == {
+        "tmpl-solvency-1-1",
+        "tmpl-no-unbacked-balance",
+        "tmpl-cum-flow-conservation",
+    }, by_id
     f = findings[0]
     assert f.status == "POTENTIAL"
     assert f.category == "invariant-violation"

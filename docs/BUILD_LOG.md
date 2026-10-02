@@ -79,3 +79,77 @@ This is the "the history checker can no longer be fooled" upgrade. Plain English
 **Proof.** 23 new regression tests in `tests/test_history_hardened.py` (no network, no keys): a 3-version repo where v2 only renames/reshuffles the hole → not FIXED; v3 genuinely fixes it → FIXED; a repo where the fix moves the function to another file → tracker follows, FIXED with the new file named; access-control fix reaching FIXED without by-design-public functions blocking it; generic bug classes now completing STILL OPEN → FIXED → REGRESSED; reversed version order no longer fabricates regressions. Full suite: all history tests green (39/39), ruff + mypy clean on the history package. Pre-existing failures elsewhere (forge binary permission errors when running as root; a sibling phase's in-progress verification tests) are unrelated and were verified to fail identically without these changes.
 
 **Known limits (honest).** Verdicts are still heuristic — the "generic" bug class (anything that isn't reentrancy or access-control phrasing) can only compare code shapes, so an unrecognizable-but-real fix reads FIXED at low confidence and is queued for a human to verify. The history stage in the hunt pipeline still hand-rolls its own latest-version-only queue logic instead of calling the queue's new `sync_from_history` — that wiring lives in `web3guard/hunt.py`, outside this phase's files, and is flagged for whoever owns it.
+
+## 2026-10-02 — Phase 1: the simulator learns to actually attack
+
+**What was wrong before.** The part of Web3Guard that pretends to be a hacker and tries to break a contract's "must-always-hold" rules could only make simple, moneyless, one-at-a-time calls from plain accounts. The brutal testing you ordered proved this ceiling is structural, not a matter of trying harder: it could never catch a break-in-during-a-call attack (no attacker contract is ever deployed, so re-entering a contract mid-call is impossible), anything where money has to move (every call sends 0 ETH, always), anything depending on time (no clock control), or any exploit longer than 15 calls. The two bug families behind the biggest real-world payouts — reentrancy and money-flow accounting bugs — were invisible to it by design.
+
+**What changed.** The simulator now attacks for real, and all of it is on by default (no settings to flip):
+- **It sends money.** Every contract function gets an attack action whose ETH amount comes from the fuzzer's own random input (capped at 10 ETH per call). Payable functions, fee logic, and anything that behaves differently when value moves are now exercised with real value.
+- **It deploys attacker contracts.** Three malicious contracts are generated as real Solidity, deployed inside the test project, and driven *through*: a reentrancy attacker that re-enters the target mid-call when it receives money, an approval-draining spender, and a donation attacker that force-feeds ETH past all defenses via selfdestruct.
+- **It runs multi-step heists.** One fuzzed action can now do victim-deposit → time-warp → attacker-deposit → reentrant-drain → donation-kicker, and the call-sequence depth went from 15 to 64, so long chained exploits are reachable.
+- **It controls time.** The fuzzer can fast-forward the clock and block number between calls, so vesting, lockups, and time-based logic can be attacked.
+- **It adapts instead of following a script.** A strategy picker (epsilon-greedy bandit) weighs six approaches — plain calls, money-heavy, attacker-contract, time-warped, multi-step heist, and a mixed mode — based on what the target looks like (payable functions? uses the clock? has a deposit/withdraw pair?). Inside the fuzzer, an on-chain bandit mixes the attack modes live and reinforces whichever one actually extracts profit; across campaigns, results are saved so the next campaign starts from what previous ones learned.
+- **Same attack, same result.** Every campaign uses the fixed seed 1337 unless you override it (plumbed into forge, the config file, and the strategy picker), so a found exploit reproduces exactly.
+- There is also a new tripwire rule the harness adds by itself: attacker contracts must never end up holding more money than they were given — breaking it means an exploit stole value, with the exact call sequence as proof.
+
+**Proof.** 24 new tests in `tests/test_simulator_attack.py` (no AI keys, no network), including real forge campaigns: (a) a reentrancy vault the old simulator scans clean is now drained through the deployed attacker contract — the old run finds nothing, the new run reports the exploit with the exact `act_attack_reenter` call sequence; (b) a 1%-fee vault that quietly under-collateralizes itself on every deposit — invisible when calls carry 0 ETH — is now caught on the first money-carrying call, missed by the old run. A repeat run with the same seed produces the same attack. Full suite: 741 passed, 12 skipped, 0 failed; ruff + mypy clean on all touched files.
+
+**Known limits (honest).** The scripted reentrancy/heist attacks only fire on the classic shape — a no-argument payable `deposit()` plus a `withdraw(uint256)` (aliases like stake/unstake count); fancier vault shapes still get fuzzed with money and time-warping, but not the full scripted heist. The fuzzer's *choice of sender address* wobbles between OS processes (outside the seed's reach); the attack itself — which function, which arguments — reproduces exactly. Constructor-argument contracts are still skipped by the harness (old limitation, unchanged). And the money in play is test money minted by cheatcodes, not mainnet funds — the simulator proves the *mechanism*, not the dollar amount.
+
+## 2026-10-02 — Phase 3 (hardening): the rule-writer gets bigger, wider, and honest
+
+**What this was:** the part of Web3Guard that writes the "rules that must
+always hold" (the things the machine tries to break when hunting bugs) was
+too small and too trusting. It only knew 3 rules, it could not express
+"this must stay true OVER TIME" (like: money paid out can never exceed
+money put in), and worst of all — a confident-but-wrong AI suggestion
+could turn into a scary-looking "bug found!" report on a perfectly clean
+contract. That destroys trust. This phase fixed all three.
+
+**What changed, in plain language:**
+
+1. **The rule book went from 3 rules to 17.** It now covers the things
+   that actually lose people money: money-in vs money-out accounting,
+   who is allowed to do what (ownership), fees, allowances, mint/burn
+   balance, price-feed freshness, share-price tricks (the Balancer kind),
+   and whether "pause" really stops anything. It also learned to stay
+   quiet where a rule does not apply (for example, it no longer claims a
+   fee-charging vault is broken just because its books are not exactly
+   1:1 — that was a known false alarm).
+
+2. **It can now check things OVER TIME, not just snapshots.** New
+   "ghost bookkeeping": while the machine attacks the contract, a helper
+   quietly counts every deposit and withdrawal alongside the real calls,
+   so the machine can now prove statements like "total paid out never
+   exceeds total deposited" — the exact shape of the biggest real-world
+   payout bugs. Verified working: it caught a planted money-drain bug
+   that the old machine could not even express.
+
+3. **No rule becomes a "finding" without machine proof — enforced, not
+   promised.** There is now a gatekeeper with two checkpoints:
+   (a) BEFORE testing, it throws out broken rules loudly — rules that
+   mention functions that do not exist (these used to crash the whole
+   test), rules that are worded so they can never fail, and rules that
+   are already false before any attack happens (a bad rule, not a bug);
+   (b) AFTER testing, every finding must carry its proof — the exact
+   attack steps that broke the rule — or it is rejected, loudly, and
+   never shown to you. Tested with a fake "expert" AI that confidently
+   invents 5 bogus rules on a clean contract: zero findings came out,
+   and every bogus rule was quarantined with a clear explanation.
+
+**Honest limits (what it still cannot do):**
+- If a wrong rule happens to be TRUE at the start and only breaks through
+  completely normal use (example: "this counter never changes" on a
+  counter that is supposed to change), no machine can tell it is a bad
+  rule — that still needs a human eye. The finding will show you the
+  rule and its proof so you can judge.
+- It cannot check "does this contract HAVE a re-entry guard?" — that is
+  a different kind of check (static), not a "must always hold" rule.
+- The ghost bookkeeping only follows simple function calls; exotic
+  functions it cannot understand are skipped with a loud note, never
+  silently.
+
+**Tests:** 21 new tests, all passing. Full suite: 741 passed, 12 skipped
+(skips are missing optional toolchains), 0 failed. Code checks
+(ruff + mypy) clean on all touched files.
