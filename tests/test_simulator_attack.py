@@ -529,7 +529,11 @@ def test_e2e_reentrancy_caught_by_attack_simulator(forge_env: dict, tmp_path: Pa
     # directly; act_heist reaches the same _wgDoReenter path inside a
     # larger multi-step action — either proves the attacker contract
     # drained the vault):
-    assert "act_attack_reenter(" in f.poc_code or "act_heist(" in f.poc_code
+    # Weakness-hunt round, target 6: the coverage sweep piggybacks on every
+    # action, so the fuzzer may attribute the PoC to act_adaptiveAssault
+    # (whose coverage step drove the strike) — accept all three.
+    assert ("act_attack_reenter(" in f.poc_code or "act_heist(" in f.poc_code
+            or "act_adaptiveAssault(" in f.poc_code)
     assert "sender=" in f.poc_code and "calldata=" in f.poc_code
     # the strategy bookkeeping learned from this campaign
     state = json.loads((tmp_path / "strategy_state.json").read_text())

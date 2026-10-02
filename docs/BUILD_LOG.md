@@ -223,3 +223,13 @@ Technical notes: full test suite 735 passed / 4 failed / 16 skipped — all 4 fa
 **Proof it works.** 5 new regression tests, all passing: the oracle template is marked time-limited, the inference catches deadline/freshness language in AI rules while leaving permanent rules alone, both engines (attack and ghost) omit the warp actions when a time-limited rule is present (with the loud note), and keep them when all rules are permanent. Full suite still green; ruff + mypy clean.
 
 **Honest residual risk.** The inference is regex-based — an AI rule about time that uses unusual phrasing might not be caught as time-limited. The marked templates (like oracle freshness) are always correct; the inference is a best-effort safety net.
+
+## 2026-10-02 — Weakness hunt, fix 6 of 6: deterministic coverage sweep ends seed-1337 blind spots (plain-language note)
+
+**What was wrong.** The fuzzer uses a fixed random seed (1337) so results are reproducible. But on a huge contract with 1,504 functions, that fixed seed deterministically *never* scheduled some functions — including a suspicious `skim()` that turned out to be the bug. Deterministic seed × huge function count = a deterministic blind spot: the same bug would be missed on every single run, forever.
+
+**What changed.** Every test action now piggybacks one step of a deterministic coverage sweep: a persistent on-chain cursor walks through *every* public function in the contract, one per action, independent of the random seed. Suspicious functions (names like skim, mint, drain, withdraw) and functions mentioned in the invariants go first; everything else follows in a fixed order. A reentrancy guard prevents the sweep from triggering itself recursively, and once all functions are covered the sweep becomes a no-op. Seed 1337 still controls everything else, so results stay reproducible.
+
+**Proof it works.** 5 new regression tests, all passing: suspicious names sort first, invariant-referenced functions outrank merely-suspicious ones, both engines render the sweep infrastructure (cursor, guard, piggybacked calls), and a live campaign on a many-function contract compiles and runs with the sweep active. Full suite: 774 passed (was 735), same 4 pre-existing environment failures, 0 new failures; ruff + mypy clean.
+
+**Honest residual risk.** The sweep guarantees each function is *called* at least once, not that it's called with the *right arguments* to trigger a bug — argument coverage still depends on the fuzzer. On a 1,504-function contract, the first full sweep takes 1,504 actions; with typical budgets that's fine, but very tight budgets might only complete part of the sweep (suspicious-first ordering mitigates this).

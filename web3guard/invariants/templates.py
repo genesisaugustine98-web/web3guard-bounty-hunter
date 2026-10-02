@@ -874,6 +874,11 @@ def _passthrough(sig: Any, hooks: list[str]) -> str:
     # calls from the sender pool (handler, built-in users, mined
     # hardcoded addresses), so role-gated paths are reachable without the
     # harness itself ever being the owner (neutral deployment, below).
+    #
+    # Weakness-hunt round, target 6: every passthrough piggybacks one
+    # deterministic coverage step (seed-1337 dilution fix). The
+    # _wgCovering guard makes the nested call a no-op, so there is no
+    # recursion; after all entry points are covered the step is a no-op.
     params = ", ".join(
         [f"{t} p{i}" for i, (t, _) in enumerate(sig.params)] + ["uint256 _wgSender"]
     )
@@ -888,6 +893,7 @@ def _passthrough(sig: Any, hooks: list[str]) -> str:
         f"    function {sig.name}({params}) public{payable_kw} {{\n"
         f"        _wgPrank(_wgPickSender(_wgSender));\n"
         f"        {body}\n"
+        f"        _wgCoverageStep();\n"
         f"    }}"
     )
 
@@ -949,6 +955,7 @@ def render_ghost_project(
         extract_mined_senders,
         sender_pool,
     )
+    from web3guard.invariants.harness import coverage_order
     from web3guard.invariants.harness import (
         extract_contract_names as _ecn,
     )
@@ -1175,6 +1182,16 @@ def render_ghost_project(
         handler_parts.append(f"    {vtype} public {vname};")
     if var_decls:
         handler_parts.append("")
+    # Weakness-hunt round, target 6: deterministic coverage sweep
+    # (seed-1337 dilution fix). Every action/passthrough advances the
+    # cursor by one; the sweep visits entry points suspicious-first,
+    # independent of the fuzzer's seed.
+    handler_parts.extend([
+        "    // Deterministic coverage sweep (weakness-hunt round, target 6).",
+        "    uint256 public wgCoverageCursor;",
+        "    bool internal _wgCovering;",
+        "",
+    ])
     handler_parts.append("    constructor() {")
     handler_parts.append("        WGVM.prank(WG_NEUTRAL_DEPLOYER);")
     handler_parts.append(f"        target = new {contract_name}();")
@@ -1216,6 +1233,20 @@ def render_ghost_project(
         "        else { WGVM.prank(u, _wgTxOrigin); }",
         "    }",
         "",
+        "    // Deterministic coverage sweep (weakness-hunt round, target 6):",
+        "    // piggybacked on every action/passthrough, this advances a",
+        "    // persistent cursor through the entry points (suspicious-first",
+        "    // order) independent of the fuzzer's seed. The _wgCovering guard",
+        "    // prevents recursion: the sweep's own nested call is a no-op.",
+        "    function _wgCoverageStep() internal {",
+        "        if (_wgCovering) return;",
+        "        if (wgCoverageCursor >= WG_ENTRY_COUNT) return;",
+        "        _wgCovering = true;",
+        "        _wgCallEntry(wgCoverageCursor, address(0), wgCoverageCursor, wgCoverageCursor, wgCoverageCursor);",
+        "        wgCoverageCursor += 1;",
+        "        _wgCovering = false;",
+        "    }",
+        "",
         "    // Phishing model for tx.origin bugs: the neutral owner is tricked",
         "    // into triggering a contract call; the target sees msg.sender = a",
         "    // pool sender with tx.origin = owner. Routed through the handler's",
@@ -1224,9 +1255,10 @@ def render_ghost_project(
         "        _wgTxOrigin = WG_NEUTRAL_DEPLOYER;",
         "        _wgCallEntry(_wgFn, address(0), _wgA, _wgB, _wgSender);",
         "        _wgTxOrigin = address(0);",
+        "        _wgCoverageStep();",
         "    }",
         "",
-        _render_entry_dispatcher(contract_name, sigs, via_passthrough=True),
+        _render_entry_dispatcher(contract_name, coverage_order(sigs, invariants), via_passthrough=True),
     ])
     # Weakness-hunt round, target 4: the attack actions, routed through the
     # ghost passthroughs (this.deposit(...)/this.withdraw(...)) so every
@@ -1275,6 +1307,7 @@ def render_ghost_project(
                 "",
                 "    function act_attack_reenter(uint256 _wgValue, uint256 _wgSeed) public {",
                 "        _wgDoReenter(_wgCap(_wgValue), _wgSeed);",
+                "        _wgCoverageStep();",
                 "    }",
                 "",
                 "    // Multi-step heist: deposit, warp time, reenter, donate dust.",
@@ -1297,10 +1330,12 @@ def render_ghost_project(
                 "",
                 "    function act_heist(uint256 _wgValue, uint256 _wgA, uint256 _wgSeed) public {",
                 "        _wgDoHeist(_wgCap(_wgValue), _wgA, _wgSeed);",
+                "        _wgCoverageStep();",
                 "    }",
                 "",
                 "    // Deposit + withdraw cycle through the passthroughs.",
                 "    function act_vaultCycle(uint256 _wgValue, uint256 _wgW, uint256 _wgUser) public {",
+                "        _wgCoverageStep();",
                 "        uint256 v = _wgCap(_wgValue);",
                 f"        this.{_dep}{{value: v}}(_wgUser);",
                 f"        this.{_wd}(v > _wgW ? _wgW : v, _wgUser);",
@@ -1318,6 +1353,7 @@ def render_ghost_project(
             "        _wgFundAttacker(address(donationAttacker), v);",
             "        donationAttacker.donate(payable(address(target)));",
             "        _wgSeed; // (seed kept for fuzzer arity)",
+            "        _wgCoverageStep();",
             "    }",
             "",
         ])
@@ -1327,6 +1363,7 @@ def render_ghost_project(
                 "    // runs against future timestamps.",
                 "    function act_warpTime(uint256 _wgDays) public {",
                 "        WGVM.warp(block.timestamp + ((_wgDays % 3650) * 1 days));",
+                "        _wgCoverageStep();",
                 "    }",
                 "",
             ])
@@ -1338,6 +1375,7 @@ def render_ghost_project(
                 "        if (address(approvalDrainer) == address(0)) return;",
                 f"        this.{_ap}(address(approvalDrainer), type(uint256).max, _wgSeed);",
                 "        approvalDrainer.drain(address(target));",
+                "        _wgCoverageStep();",
                 "    }",
                 "",
             ])
@@ -1391,6 +1429,7 @@ def render_ghost_project(
         _atk_lines.extend([
             "        uint256 afterProfit = _wgAttackerFunds();",
             "        if (afterProfit > before) { wgModeScore[mode] += (afterProfit - before); }",
+            "        _wgCoverageStep();",
             "    }",
             "",
         ])

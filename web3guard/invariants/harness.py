@@ -354,6 +354,44 @@ def _generic_arg_expr(ptype: str, index: int, addr_expr: str = "u") -> str:
     return "a"
 
 
+#: Weakness-hunt round, target 6: suspicious name fragments, checked
+#: first by the deterministic coverage sweep (seed-1337 dilution fix).
+_SUSPICIOUS_FN_RE = re.compile(
+    r"skim|mint|drain|withdraw|sweep|claim|steal|loot|pillage|"
+    r"extract|rescue|recover|emergency|backdoor|selfdestruct|"
+    r"suicide|kill|destroy|pause|unpause|upgrade|setOwner|"
+    r"transferOwnership|renounce",
+    re.IGNORECASE,
+)
+
+
+def coverage_order(
+    sigs: list[FunctionSig], invariants: list[Invariant]
+) -> list[FunctionSig]:
+    """Order entry points suspicious-first for the coverage sweep.
+
+    Functions referenced by invariants and functions with suspicious
+    names (skim/mint/drain/...) come first; state-changing before view;
+    alphabetical as the final tiebreak (deterministic). The sweep visits
+    every entry point regardless — the order only decides what gets hit
+    first when the budget is tight.
+    """
+    inv_fns: set[str] = set()
+    for inv in invariants:
+        inv_fns.update(inv.functions)
+        inv_fns.update(re.findall(r"target\.(\w+)\s*\(", inv.assertion))
+        inv_fns.update(re.findall(r"target\.(\w+)\s*\(", inv.statement))
+    def key(sig: FunctionSig) -> tuple[int, int, str]:
+        s = 0
+        if sig.name in inv_fns:
+            s += 100
+        if _SUSPICIOUS_FN_RE.search(sig.name):
+            s += 50
+        changing = 1 if sig.mutability in ("nonpayable", "payable") else 0
+        return (-s, -changing, sig.name)
+    return sorted(sigs, key=key)
+
+
 def _render_entry_dispatcher(
     contract_name: str,
     entries: list[FunctionSig],
@@ -637,8 +675,19 @@ def _render_attack_project(
     seen_actions: set[str] = set()
 
     def add_action(name: str, body: str) -> None:
+        # Weakness-hunt round, target 6: every action piggybacks one
+        # deterministic coverage step (seed-1337 dilution fix). Inserted
+        # before the function's closing brace.
         if name not in seen_actions:
             seen_actions.add(name)
+            if body.rstrip().endswith("}"):
+                idx = body.rstrip().rfind("\n    }")
+                if idx != -1:
+                    body = (
+                        body[:idx]
+                        + "\n        _wgCoverageStep();"
+                        + body[idx:]
+                    )
             action_fns.append(body)
 
     for fn in functions:
@@ -697,7 +746,11 @@ def _render_attack_project(
     # tx.origin-authed contract the check passes and the money-flow
     # invariants catch the theft. Routes through the entry dispatcher so
     # any target function can be the phished call.
-    dispatcher_entries = [fn for fn in functions if fn.fuzzable]
+    # Weakness-hunt round, target 6: suspicious-first ordering for the
+    # deterministic coverage sweep (seed-1337 dilution fix).
+    dispatcher_entries = coverage_order(
+        [fn for fn in functions if fn.fuzzable], invariants
+    )
     add_action(
         "act_phishOrigin",
         """    // phishing model for tx.origin bugs (see header): msg.sender is a
@@ -707,6 +760,7 @@ def _render_attack_project(
         address u = _wgPickSender(_wgUser);
         WGVM.prank(u, WG_NEUTRAL_DEPLOYER);
         _wgCallEntry(_wgFn, u, _wgA, _wgB, _wgUser);
+        _wgCoverageStep();
     }""",
     )
     dispatcher_src = _render_entry_dispatcher(
@@ -927,6 +981,12 @@ contract AttackHandler {{
     // invariant_attacker_no_profit asserts the attackers never hold more.
     uint256 public totalAttackerFunding;
 
+    // Deterministic coverage sweep (weakness-hunt round, target 6):
+    // persistent cursor through the entry points (suspicious-first order),
+    // advanced by one on every action. Independent of the fuzzer's seed.
+    uint256 public wgCoverageCursor;
+    bool internal _wgCovering;
+
     // Sender pool (weakness-hunt round, target 1): every address the
     // harness may act as — built-in users, operator-configured senders,
     // and addresses mined from the target source (e.g. a hardcoded pauser).
@@ -977,6 +1037,19 @@ contract AttackHandler {{
         if (v == 0) return;
         WGVM.deal(a, a.balance + v);
         totalAttackerFunding += v;
+    }}
+
+    // Deterministic coverage sweep (weakness-hunt round, target 6):
+    // piggybacked on every action, advances a persistent cursor through
+    // the entry points (suspicious-first order) independent of the seed.
+    // The _wgCovering guard prevents recursion.
+    function _wgCoverageStep() internal {{
+        if (_wgCovering) return;
+        if (wgCoverageCursor >= WG_ENTRY_COUNT) return;
+        _wgCovering = true;
+        _wgCallEntry(wgCoverageCursor, address(0), wgCoverageCursor, wgCoverageCursor, wgCoverageCursor);
+        wgCoverageCursor += 1;
+        _wgCovering = false;
     }}
 
 {chr(10).join(core_fns)}
