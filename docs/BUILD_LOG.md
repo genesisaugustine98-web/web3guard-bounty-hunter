@@ -307,3 +307,21 @@ You said "hunt those 14 next" — the 14 regressions the weakness-hunt round int
 **Proof it works.** 2 new regression tests (both passing): a "0 passed, 0 failed" snforge line parses as inconclusive (not clean); a Vyper summary with `clean: True` but `runs: 0` parses as inconclusive. The existing clean-path tests still pass unchanged (real clean runs with actual executions still verdict clean). Full suite: 893 passed (was 891), same 4 pre-existing environment failures (forge/vyper-venv permission-denied as root, sandbox-killed toolchains — both e2e multilang tests verified failing on pristine code too, environmental), 16 skipped; ruff + mypy clean. Commit: selfimprove(iteration 4). Not pushed.
 
 **Honest residual risk.** None significant — both fixes only touch verdict/log labeling in the two parser/runner modules; verdict computation for real campaigns is unchanged, and the changes are covered by regression tests.
+
+## 2026-10-02 — Self-improvement loop, iteration 5: invariants/fuzzing pipeline (plain-language note)
+
+**Setup first.** The run started with an uncommitted leftover from the prior tick (`web3guard/ai/redteam.py`: raised LLM token budgets for the red-team roles — reasoning models spend completion tokens on hidden thinking, and tight budgets truncated the JSON mid-object). The test suite was green modulo the known environment failures, so the leftover was committed as `chore(selfimprove): recover prior run`. Nothing was lost.
+
+**Focus this tick.** The loop rotates its audit focus; this run covered the invariants/fuzzing pipeline (rule synthesis, the proof gate, forge/snforge/titanoboa runners, strategy bandit). The forge parser, campaign runner, ghost-template resolution, and strategy selector survived the audit intact.
+
+**What was wrong (1).** The proof gate's trace check for Cairo (snforge) findings had a fail-open hole: any finding whose proof text contained neither `arguments:` nor `(not printed)` was admitted as proven — even though it carried no counterexample and therefore no machine trace. The other engines (forge, titanoboa, echidna) already fail closed here.
+
+**What changed (1).** The snforge branch now requires the counterexample arguments to be present in the proof text; without them the finding is rejected with "no machine trace", like the other engines. Real cairo findings always include either `arguments: [...]` or `(not printed)` (the campaign renderer guarantees it), so real catches are unaffected.
+
+**What was wrong (2).** The LLM invariant parser rejected the model's *entire* batch if a single element was bad — one duplicate id or one statement-shaped assertion threw away the other 11 good rules and dropped back to templates only.
+
+**What changed (2).** Validation is now per element: bad elements are skipped loudly (a note records how many and why) while the good ones are kept — each still fully validated. Structurally broken output (not JSON at all, or not a list) still rejects the whole batch, and a batch with zero survivors behaves exactly as before.
+
+**Proof it works.** 3 new regression tests (2 gate: a traceless snforge proof is rejected, a traced one admitted; 1 synthesis: a batch of good + duplicate + malformed keeps only the good one). Full suite: 896 passed (was 893), same 4 pre-existing environment failures (forge/vyper-venv permission-denied as root — environmental, unchanged), 16 skipped; ruff + mypy clean. Commits: recovery (c93d9a8) + selfimprove(iteration 5) (58603a7). Not pushed.
+
+**Honest residual risk.** None significant — both fixes narrow the gate and the parser in ways covered by the new tests; the real cairo/forge paths behave exactly as before.
