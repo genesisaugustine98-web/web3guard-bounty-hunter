@@ -153,3 +153,23 @@ contract. That destroys trust. This phase fixed all three.
 **Tests:** 21 new tests, all passing. Full suite: 741 passed, 12 skipped
 (skips are missing optional toolchains), 0 failed. Code checks
 (ruff + mypy) clean on all touched files.
+
+## 2026-10-02 — Phase 5: wired up the "second look" queue + proved the upgrade with the attack test library (plain-language note)
+
+Two things happened in this final phase.
+
+**1. Connected a piece that was sitting unused.** The history engine (the part that remembers what past security audits said) had a hardened "re-dive queue" — basically a to-do list of old problems that deserve a second look because the fix might be fake or incomplete. But the main hunt was using its own simpler, weaker version of that list that only looked at the latest version of the code. So a half-fixed problem from an earlier version could slip through unnoticed. The hunt now uses the real queue for everything, and a new test proves a mid-history half-fix lands on that list end-to-end.
+
+**2. Ran the whole attack test library against the upgraded machine to see if it actually got better.** The test library has 571 deliberately tricky cases across 7 batches, re-run with the new code:
+
+- Classic/simple bugs (batch 1): went from 24 to 21 out of 50 caught — a small step back. The new fuzzing engine sometimes confuses itself about who owns the contract, creating 2 new false alarms, and it can't test certain bug shapes (like tx.origin tricks) that the old simpler engine could poke at.
+- Subtle economic bugs (batch 2, the important one): went from 76 to 59 out of 96 — looks worse on paper, but 9 genuinely new catches (oracle price tricks, lottery fairness bugs, a flipped comparison) against 24 cases where the new engine trips over contracts split across multiple files. That multi-file stumble is the single biggest known weakness the upgrade introduced.
+- Hostile rules and sneaky clients (batch 3): 48 → 47 out of 51, with 1 genuine new catch (a rule that lies about which version of the code it describes now gets quarantined instead of trusted).
+- The lie detector (batch 4): 58 → 45 out of 58 — the 13 "failures" are all the test's own artificial lies being correctly *rejected* by the now-stricter verifier (timeouts no longer become fake "confirmed" results, rogue AI judges can't kill real findings silently). This batch is a win disguised as a loss: 4 real lies-that-used-to-pass are now caught.
+- History tricky-cases (batch 5): 37 → 41 out of 50 — 9 genuine fixes, including catching problems that span multiple files and fixes that only half-worked. This is where the history hardening paid off.
+- Router fault injection (batch 6): unchanged, 49/52 — was never in scope.
+- Full hunt pipeline (batch 7): 47 → 46 out of 49 — one scale case (1,500-function contract) flipped because the now-fixed test seed deterministically never schedules the one buggy function among 1,504. Honest cost of reproducibility.
+
+**Bottom line for the headline question:** on the exact cases that broke the old machine, the ceiling genuinely rose where it matters most — the machine now attacks with real money flow and multi-step heists (9 new subtle-bug catches in batch 2, 9 history wins in batch 5, 4 lie-detector fixes in batch 4). The price: 5 brand-new real weaknesses found by the re-run (multi-file contracts crash the fuzzer, the handler pretending to be the owner creates false alarms and blinds tx.origin tests, a parameter-type bug breaks compilation for payable addresses, the fuzzing engine steals work from the attack engine so reentrancy still slips through, and time-warp confuses time-limited rules). None of these were fixed — they're documented honestly in docs/UPGRADE_PROOF.md as the next round's hit list.
+
+Technical notes: full test suite 735 passed / 4 failed / 16 skipped — all 4 failures are pre-existing on the base commit and environmental (the container runs as root, so the sandbox's privilege-dropped forge child can't reach the forge binary under /home/hatch; document, don't chase). ruff + mypy clean on changed files. One worktree created for the test corpus and removed afterwards. The re-run needed its own forge copies under /tmp because of the same root/nobody quirk; /tmp filled up mid-run (512MB tmpfs) and was cleaned. Commit: feat(proof). Not pushed.

@@ -190,6 +190,23 @@ def versioned_repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture()
+def versioned_repo_three_tags(tmp_path: Path) -> Path:
+    """Git repo with tags v1.0 (vuln) -> v2.0 (band-aid) -> v3.0 (both
+    Ether-sending functions guarded: the proper fix)."""
+    repo = tmp_path / "repo3"
+    repo.mkdir()
+    (repo / "contracts").mkdir()
+    _git(repo, "init", "-q")
+    for tag, src in (("v1.0", _VAULT_V1), ("v2.0", _VAULT_V2),
+                     ("v3.0", _VAULT_V3)):
+        (repo / "contracts" / "Vault.sol").write_text(src)
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-qm", tag)
+        _git(repo, "tag", tag)
+    return repo
+
+
+@pytest.fixture()
 def audit_report(tmp_path: Path) -> Path:
     p = tmp_path / "audit.md"
     p.write_text(_REPORT_MD)
@@ -443,6 +460,59 @@ def test_history_verdicts_appear_in_report(
     # The band-aid verdict lands on the re-dive list.
     assert result.redive_added, "band-aid verdict should queue a re-dive"
     assert "Worth a second look" in md
+
+
+def test_redive_queue_populated_end_to_end_from_hunt(
+        versioned_repo_three_tags: Path, audit_report: Path,
+        tmp_path: Path) -> None:
+    """The hunt pipeline wires the hardened RediveQueue.sync_from_history().
+
+    Timeline here is v1.0 (vuln) -> v2.0 (band-aid: withdrawAll still
+    buggy) -> v3.0 (proper fix). The band-aid only exists MID-history —
+    the old latest-version-only logic looked at v3.0 (FIXED) and queued
+    nothing. The hardened sync must land the v2.0 band-aid in the
+    persistent queue, and re-running must not duplicate it.
+    """
+    out = tmp_path / "reports"
+
+    def _hunt() -> Any:
+        return run_hunt(
+            str(versioned_repo_three_tags), _keyless_config(),
+            workdir=tmp_path, out_dir=out, history_report=audit_report,
+            skip_static=True, skip_invariants=True, skip_redteam=True,
+            skip_verify=True, router_env={},
+        )
+
+    result = _hunt()
+    hist_stage = result.stage("history")
+    assert hist_stage is not None and hist_stage.ran
+    assert result.history is not None
+    assert result.history["versions"] == ["v1.0", "v2.0", "v3.0"]
+    # Mid-history band-aid made it onto the re-dive list.
+    assert result.redive_added, \
+        "mid-history band-aid should queue a re-dive"
+    reasons = [item["reason"] for item in result.redive_added]
+    assert any("BAND-AID" in reason and "v2.0" in reason
+               for reason in reasons), reasons
+    # The persistent queue file was populated end-to-end (this is the
+    # product's real queue, not a test-only object).
+    queue_path = tmp_path / ".web3guard" / "redive_queue.json"
+    assert queue_path.is_file(), "sync must write the persistent queue"
+    payload = json.loads(queue_path.read_text(encoding="utf-8"))
+    items = [e for e in payload if e.get("finding_id") == "H-01"]
+    assert items, "queue JSON must carry the synced H-01 item"
+    assert all(e.get("status") == "open" for e in items)
+    # The later FIXED verdict annotates the item (verify-and-resolve),
+    # never auto-resolves it.
+    assert any(
+        ev.get("event") == "superseded-noted"
+        for e in items for ev in e.get("events", [])
+    ), "FIXED-at-v3.0 should annotate, not close, the open item"
+    # Re-running the hunt is idempotent: same items, no duplicates.
+    _hunt()
+    payload2 = json.loads(queue_path.read_text(encoding="utf-8"))
+    assert len(payload2) == len(payload), \
+        "re-running the hunt must not duplicate queue items"
 
 
 def test_history_skipped_without_tags(

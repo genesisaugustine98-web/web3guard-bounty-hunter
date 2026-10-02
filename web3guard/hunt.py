@@ -41,12 +41,7 @@ from web3guard.ai.verification import verify_findings
 from web3guard.history.ingest import parse_report
 from web3guard.history.redive import RediveQueue, default_queue_path
 from web3guard.history.report import plain_verdict, summarize_verdicts
-from web3guard.history.verdicts import (
-    BAND_AID,
-    REGRESSED,
-    STILL_OPEN,
-    walk_versions,
-)
+from web3guard.history.verdicts import walk_versions
 from web3guard.invariants import (
     SUPPORTED_LANGUAGES,
     detect_language,
@@ -501,29 +496,28 @@ def _history_stage(repo: Path, cfg: dict[str, Any], workdir: Path,
              "timeline": timelines.get(f.id, {})}
             for f in audit.findings
         ]
-        # Re-dive queue: band-aid fixes and regressions deserve a second
-        # look; still-open high/critical findings too.
+        # Re-dive queue: hand every finding's full verdict timeline to the
+        # hardened queue's own ``sync_from_history`` entry point, so EVERY
+        # BAND-AID / REGRESSED / still-open lead is tracked — mid-history
+        # verdicts included, not just the latest version's. (The old code
+        # hand-rolled its own latest-version-only logic here; it missed
+        # band-aids from earlier versions entirely.)
         queue = RediveQueue(default_queue_path(workdir))
+        verdicts_by_finding: dict[str, list[Any]] = {}
+        for verdict in all_verdicts:
+            verdicts_by_finding.setdefault(verdict.finding_id, []).append(
+                verdict)
         for audit_finding in audit.findings:
-            timeline = timelines.get(audit_finding.id, {})
-            latest = timeline.get(versions[-1], "") if versions else ""
-            interesting = (
-                latest in (BAND_AID, REGRESSED)
-                or (latest == STILL_OPEN and str(audit_finding.severity).lower()
-                    in ("critical", "high"))
+            items = queue.sync_from_history(
+                audit_finding.id,
+                verdicts_by_finding.get(audit_finding.id, []),
+                audit_finding,
             )
-            if not interesting:
-                continue
-            item = queue.add(
-                finding_id=audit_finding.id,
-                title=audit_finding.title,
-                reason=(f"{plain_verdict(latest)} as of {versions[-1]} "
-                        f"(timeline: {timeline})"),
-            )
-            redive_added.append({
-                "id": item.id, "finding_id": audit_finding.id,
-                "title": audit_finding.title, "reason": item.reason,
-            })
+            for item in items:
+                redive_added.append({
+                    "id": item.id, "finding_id": audit_finding.id,
+                    "title": audit_finding.title, "reason": item.reason,
+                })
         summary["redive_count"] = len(redive_added)
     else:
         notes.append("history: no audit report supplied — reporting tag "
