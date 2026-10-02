@@ -71,6 +71,11 @@ class Invariant:
     # | share-price | other
     source: str = "template"  # "template" | "llm"
     severity: str = "HIGH"  # severity if the invariant is violated
+    temporal_scope: str = "permanent"
+    # Weakness-hunt round, target 5: "permanent" (must hold at all times,
+    # time-warp is a valid test) vs "time-limited" (only meaningful within
+    # a time window, e.g. oracle freshness — warping the clock past the
+    # window would be a false positive, so warp actions are disabled).
 
 
 @dataclass

@@ -615,6 +615,22 @@ def _render_attack_project(
             "approval drainer deployed but no standard approve(address,uint) "
             "found: the approval-drain action is disabled for this target"
         )
+    # Weakness-hunt round, target 5: if any invariant is time-limited,
+    # disable time-warp actions (warping past the window is a false
+    # positive, not a bug).
+    from web3guard.invariants.templates import infer_temporal_scope
+
+    warp_disabled = any(
+        inv.temporal_scope == "time-limited"
+        or infer_temporal_scope(inv) == "time-limited"
+        for inv in invariants
+    )
+    if warp_disabled:
+        notes.append(
+            "attack harness: time-warp actions DISABLED — a time-limited "
+            "invariant is active; warping the clock would manufacture a "
+            "false positive."
+        )
 
     # -- handler action functions --------------------------------------
     action_fns: list[str] = []
@@ -649,16 +665,17 @@ def _render_attack_project(
     }}""",
         )
 
-    add_action(
-        "act_warpTime",
-        """    // time-warped: advance the clock / block height, then keep attacking.
+    if not warp_disabled:
+        add_action(
+            "act_warpTime",
+            """    // time-warped: advance the clock / block height, then keep attacking.
     // Exposes vm.warp + vm.roll as fuzzed attack actions (vesting, TWAP,
     // lockups, deadlines).
     function act_warpTime(uint256 _wgSecs, uint256 _wgBlocks) public {
         WGVM.warp(block.timestamp + (_wgSecs % 365 days));
         WGVM.roll(block.number + (_wgBlocks % 100000));
     }""",
-    )
+        )
 
     add_action(
         "act_donateForcedEth",
@@ -715,6 +732,17 @@ def _render_attack_project(
         )
 
     core_fns: list[str] = []
+    # Weakness-hunt round, target 5: the heist's time-warp step and the
+    # bandit's warp mode are omitted when a time-limited invariant is
+    # active (warping would be a false positive).
+    _warp_heist = (
+        "        WGVM.warp(block.timestamp + ((warpDays % 30) * 1 days));\n"
+        if not warp_disabled else ""
+    )
+    _warp_bandit = (
+        "            WGVM.warp(block.timestamp + ((_wgA % 30) * 1 days));\n"
+        if not warp_disabled else ""
+    )
     if eth_vault and vault is not None:
         dep, wd = vault.deposit_fn, vault.withdraw_fn
         wd_sig = vault.withdraw_sig
@@ -756,8 +784,7 @@ def _render_attack_project(
         if (v == 0) return;
         WGVM.prank(_wgPickSender(userSeed));
         target.{dep}{{value: v}}();
-        WGVM.warp(block.timestamp + ((warpDays % 30) * 1 days));
-        _wgDoReenter(v, userSeed + 1);
+{_warp_heist}        _wgDoReenter(v, userSeed + 1);
         uint256 dust = v / 100;
         if (dust > 0 && address(donationAttacker).balance == 0) {{
             _wgFundAttacker(address(donationAttacker), dust);
@@ -794,8 +821,7 @@ def _render_attack_project(
         }} else if (mode == 1) {{
             _wgDoReenter(_wgCap(_wgA), _wgB);
         }} else if (mode == 2) {{
-            WGVM.warp(block.timestamp + ((_wgA % 30) * 1 days));
-            WGVM.prank(_wgPickSender(_wgB));
+{_warp_bandit}            WGVM.prank(_wgPickSender(_wgB));
             target.{dep}{{value: _wgCap(_wgA)}}();
         }} else {{
             _wgDoHeist(_wgCap(_wgA), _wgB, _wgA);

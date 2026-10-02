@@ -632,6 +632,86 @@ def test_ghost_attack_follows_bounds_by_default() -> None:
     assert "act_attack_reenter" not in files_off["test/Invariant.t.sol"]
 
 
+# ---------------------------------------------------------------------------
+# Target 5: time-warp disabled for time-limited rules
+# ---------------------------------------------------------------------------
+
+_ORACLE_SRC = """\
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+// Chainlink-style oracle: tmpl-oracle-fresh applies (time-limited).
+contract MockOracle {
+    uint80 public roundId = 1;
+    int256 public answer = 1000;
+    uint256 public updatedAt;
+    uint80 public answeredInRound = 1;
+    constructor() { updatedAt = block.timestamp; }
+    function latestRoundData() external view returns (
+        uint80, int256, uint256, uint256, uint80) {
+        return (roundId, answer, 0, updatedAt, answeredInRound);
+    }
+}
+"""
+
+
+def test_oracle_fresh_template_is_time_limited() -> None:
+    invs = {i.id: i for i in tmpl.template_invariants(_ORACLE_SRC)}
+    assert "tmpl-oracle-fresh" in invs
+    assert invs["tmpl-oracle-fresh"].temporal_scope == "time-limited"
+
+
+def test_infer_temporal_scope_for_llm_rules() -> None:
+    from web3guard.invariants.models import Invariant
+    from web3guard.invariants.templates import infer_temporal_scope
+
+    time_limited = Invariant(
+        id="llm-1", statement="The deadline must always be in the future",
+        assertion="target.deadline() > block.timestamp", source="llm")
+    assert infer_temporal_scope(time_limited) == "time-limited"
+
+    permanent = Invariant(
+        id="llm-2", statement="Total supply equals sum of balances",
+        assertion="target.totalSupply() == target.sumBalances()", source="llm")
+    assert infer_temporal_scope(permanent) == "permanent"
+
+
+def test_ghost_attack_omits_warp_when_time_limited() -> None:
+    # tmpl-oracle-fresh is not ghost-mode; use a synthetic time-limited inv.
+    from web3guard.invariants.models import Invariant
+    ghost_inv = Invariant(
+        id="tmpl-cum-flow-conservation", statement="x",
+        assertion="true", temporal_scope="time-limited")
+    files, notes = tmpl.render_ghost_project(
+        _REENTER_SRC, "ReenterVault", [ghost_inv], FuzzBounds(), attack=True)
+    test_src = files["test/Invariant.t.sol"]
+    assert "function act_warpTime(" not in test_src
+    assert "WGVM.warp" not in test_src
+    assert any("time-warp actions DISABLED" in n for n in notes)
+
+
+def test_ghost_attack_keeps_warp_when_permanent() -> None:
+    invs = [i for i in tmpl.template_invariants(_REENTER_SRC)
+            if i.id in tmpl.GHOST_TEMPLATE_IDS]
+    assert all(i.temporal_scope == "permanent" for i in invs)
+    files, notes = tmpl.render_ghost_project(
+        _REENTER_SRC, "ReenterVault", invs, FuzzBounds(), attack=True)
+    test_src = files["test/Invariant.t.sol"]
+    assert "function act_warpTime(" in test_src
+    assert not any("time-warp actions DISABLED" in n for n in notes)
+
+
+def test_attack_harness_omits_warp_when_time_limited() -> None:
+    from web3guard.invariants.models import Invariant
+    inv = Invariant(id="x", statement="deadline in future",
+                    assertion="target.deadline() > block.timestamp",
+                    temporal_scope="time-limited")
+    files = render_solidity_project(
+        _REENTER_SRC, "ReenterVault", [inv], FuzzBounds())
+    handler = files["test/AttackHandler.sol"]
+    assert "function act_warpTime(" not in handler
+    assert "WGVM.warp" not in handler
+
+
 @needs_forge
 def test_e2e_ghost_attack_catches_reentrancy(forge_env: dict) -> None:
     """Target 4: the reentrancy family is caught through the main (ghost)

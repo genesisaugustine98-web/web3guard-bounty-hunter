@@ -111,6 +111,11 @@ class TemplateSpec:
     bug_class: str = "other"
     severity: str = "MEDIUM"
     ghost: GhostSpec | None = None
+    temporal_scope: str = "permanent"
+    #: Weakness-hunt round, target 5: "permanent" vs "time-limited".
+    #: Time-limited rules (e.g. oracle freshness windows) must not be
+    #: tested under time-warp — warping past the window is a false
+    #: positive, not a bug.
 
     def match(self, source: str) -> dict[str, str] | None:
         """Return placeholder bindings if the template applies, else None."""
@@ -158,11 +163,37 @@ class TemplateSpec:
             bug_class=self.bug_class,
             source="template",
             severity=self.severity,
+            temporal_scope=self.temporal_scope,
         )
 
 
 def _sanitize(name: str) -> str:
     return re.sub(r"\W", "_", name) or "x"
+
+
+#: Weakness-hunt round, target 5: regexes that mark an invariant as
+#: time-limited (only meaningful within a time window). Matched against
+#: the statement + assertion of LLM/sharp-rule invariants.
+_TIME_LIMITED_RE = re.compile(
+    r"block\.timestamp|deadline|expir|fresh|stale|updatedAt|"
+    r"no older than|within \d+ (day|hour|minute|second)",
+    re.IGNORECASE,
+)
+
+
+def infer_temporal_scope(inv: Invariant) -> str:
+    """Infer ``temporal_scope`` for a non-template invariant.
+
+    Template invariants carry their scope from the spec; LLM- or
+    sharp-rule-drafted invariants get it from regexes over the statement
+    and assertion. Returns "time-limited" or "permanent".
+    """
+    if inv.temporal_scope != "permanent":
+        return inv.temporal_scope
+    haystack = f"{inv.statement} {inv.assertion}"
+    if _TIME_LIMITED_RE.search(haystack):
+        return "time-limited"
+    return "permanent"
 
 
 def _sub(text: str, bindings: Mapping[str, str]) -> str:
@@ -473,6 +504,11 @@ SOLIDITY_TEMPLATES: list[TemplateSpec] = [
                   "inherit the feed's freshness.",
         bug_class="oracle-price",
         severity="CRITICAL",
+        # Weakness-hunt round, target 5: this rule is only meaningful
+        # within its 1-day freshness window — warping the clock past it
+        # would be a false positive, so warp actions are disabled when
+        # this template is active.
+        temporal_scope="time-limited",
     ),
     # --- pausing correctness ----------------------------------------------
     TemplateSpec(
@@ -987,6 +1023,20 @@ def render_ghost_project(
             f"({', '.join(s.name for s in atk_specs)}); attack actions route "
             "through the ghost passthroughs so accounting stays in lockstep."
         )
+    # Weakness-hunt round, target 5: if any invariant is time-limited
+    # (e.g. oracle freshness), time-warp actions are disabled — warping
+    # the clock past the window would be a false positive, not a bug.
+    warp_disabled = any(
+        inv.temporal_scope == "time-limited"
+        or infer_temporal_scope(inv) == "time-limited"
+        for inv in invariants
+    )
+    if warp_disabled:
+        notes.append(
+            "ghost harness: time-warp actions DISABLED — a time-limited "
+            "invariant is active; warping the clock would manufacture a "
+            "false positive."
+        )
     seen_names: set[str] = set()
     passthroughs: list[str] = []
     dropped_specs: set[str] = set()
@@ -1231,7 +1281,12 @@ def render_ghost_project(
                 "    function _wgDoHeist(uint256 v, uint256 warpDays, uint256 userSeed) internal {",
                 "        if (v == 0) return;",
                 f"        this.{_dep}{{value: v}}(userSeed);",
-                "        WGVM.warp(block.timestamp + ((warpDays % 30) * 1 days));",
+            ])
+            if not warp_disabled:
+                _atk_lines.append(
+                    "        WGVM.warp(block.timestamp + ((warpDays % 30) * 1 days));"
+                )
+            _atk_lines.extend([
                 "        _wgDoReenter(v, userSeed + 1);",
                 "        uint256 dust = v / 100;",
                 "        if (dust > 0 && address(donationAttacker).balance == 0) {",
@@ -1265,13 +1320,16 @@ def render_ghost_project(
             "        _wgSeed; // (seed kept for fuzzer arity)",
             "    }",
             "",
-            "    // Time-warp: advances the clock so deadline/vesting logic",
-            "    // runs against future timestamps.",
-            "    function act_warpTime(uint256 _wgDays) public {",
-            "        WGVM.warp(block.timestamp + ((_wgDays % 3650) * 1 days));",
-            "    }",
-            "",
         ])
+        if not warp_disabled:
+            _atk_lines.extend([
+                "    // Time-warp: advances the clock so deadline/vesting logic",
+                "    // runs against future timestamps.",
+                "    function act_warpTime(uint256 _wgDays) public {",
+                "        WGVM.warp(block.timestamp + ((_wgDays % 3650) * 1 days));",
+                "    }",
+                "",
+            ])
         if atk_approve_fn is not None:
             _ap = atk_approve_fn.name
             _atk_lines.extend([
@@ -1303,18 +1361,33 @@ def render_ghost_project(
         ])
         if atk_eth_vault and atk_vault is not None:
             _dep2, _wd2 = atk_vault.deposit_fn, atk_vault.withdraw_fn
-            _atk_lines.extend([
-                f"        if (mode == 0) {{ this.{_dep2}{{value: _wgCap(_wgB)}}(_wgA); }}",
-                "        else if (mode == 1) { _wgDoReenter(_wgCap(_wgA), _wgB); }",
-                f"        else if (mode == 2) {{ WGVM.warp(block.timestamp + ((_wgA % 30) * 1 days)); this.{_dep2}{{value: _wgCap(_wgA)}}(_wgB); }}",
-                "        else { _wgDoHeist(_wgCap(_wgA), _wgB, _wgSeed); }",
-            ])
+            if warp_disabled:
+                # Target 5: no warp — mode 2 becomes a plain deposit.
+                _atk_lines.extend([
+                    f"        if (mode == 0) {{ this.{_dep2}{{value: _wgCap(_wgB)}}(_wgA); }}",
+                    "        else if (mode == 1) { _wgDoReenter(_wgCap(_wgA), _wgB); }",
+                    f"        else if (mode == 2) {{ this.{_dep2}{{value: _wgCap(_wgA)}}(_wgB); }}",
+                    "        else { _wgDoHeist(_wgCap(_wgA), _wgB, _wgSeed); }",
+                ])
+            else:
+                _atk_lines.extend([
+                    f"        if (mode == 0) {{ this.{_dep2}{{value: _wgCap(_wgB)}}(_wgA); }}",
+                    "        else if (mode == 1) { _wgDoReenter(_wgCap(_wgA), _wgB); }",
+                    f"        else if (mode == 2) {{ WGVM.warp(block.timestamp + ((_wgA % 30) * 1 days)); this.{_dep2}{{value: _wgCap(_wgA)}}(_wgB); }}",
+                    "        else { _wgDoHeist(_wgCap(_wgA), _wgB, _wgSeed); }",
+                ])
         else:
-            _atk_lines.extend([
-                "        if (mode == 0 || mode == 1) { act_donateForcedEth(_wgA, _wgB); }",
-                "        else if (mode == 2) { act_warpTime(_wgA); }",
-                "        else { _wgCallEntry(_wgSeed, address(0), _wgA, _wgB, _wgSeed); }",
-            ])
+            if warp_disabled:
+                _atk_lines.extend([
+                    "        if (mode == 0 || mode == 1) { act_donateForcedEth(_wgA, _wgB); }",
+                    "        else { _wgCallEntry(_wgSeed, address(0), _wgA, _wgB, _wgSeed); }",
+                ])
+            else:
+                _atk_lines.extend([
+                    "        if (mode == 0 || mode == 1) { act_donateForcedEth(_wgA, _wgB); }",
+                    "        else if (mode == 2) { act_warpTime(_wgA); }",
+                    "        else { _wgCallEntry(_wgSeed, address(0), _wgA, _wgB, _wgSeed); }",
+                ])
         _atk_lines.extend([
             "        uint256 afterProfit = _wgAttackerFunds();",
             "        if (afterProfit > before) { wgModeScore[mode] += (afterProfit - before); }",

@@ -213,3 +213,13 @@ Technical notes: full test suite 735 passed / 4 failed / 16 skipped — all 4 fa
 **Proof it works.** 4 new regression tests, all passing: the ghost+attack project renders the attacker contracts and actions, the reentrancy is armed with the ghost-tracked call signature, the no-profit check is present and active, and a live forge run on a classic reentrancy-vulnerable vault now catches the theft (broken money-flow invariants + attacker profit). Full suite still green; ruff + mypy clean.
 
 **Honest residual risk.** The scripted reentrancy only fires on the classic vault shape (payable deposit taking no arguments + withdraw of a single amount); exotic vault interfaces still rely on the fuzzer stumbling into the right sequence. The attacker-profit check can only catch theft that actually moves money — a reentrancy that merely freezes the contract (denial of service) won't trip it, though the money-flow invariants may still catch the accounting break.
+
+## 2026-10-02 — Weakness hunt, fix 5 of 6: time-warp no longer breaks time-limited rules (plain-language note)
+
+**What was wrong.** The fuzzer can fast-forward the blockchain clock to test deadline and vesting logic. But some rules are only meant to hold *temporarily* — for example, "the price feed's answer must be no older than 1 day." Fast-forwarding 30 days would break that rule even when the contract is perfectly fine — a false alarm manufactured by the test itself, not a real bug.
+
+**What changed.** Every rule now carries a "temporal scope": either *permanent* (must hold at all times — time-warp is a valid test) or *time-limited* (only meaningful within a window). The oracle-freshness rule is marked time-limited, and the machine also infers the scope for AI-written rules by looking for time-related words (deadline, expiry, freshness, etc.). Whenever a time-limited rule is active, the time-warp actions are automatically omitted from the test — and a loud note records that warping was disabled and why.
+
+**Proof it works.** 5 new regression tests, all passing: the oracle template is marked time-limited, the inference catches deadline/freshness language in AI rules while leaving permanent rules alone, both engines (attack and ghost) omit the warp actions when a time-limited rule is present (with the loud note), and keep them when all rules are permanent. Full suite still green; ruff + mypy clean.
+
+**Honest residual risk.** The inference is regex-based — an AI rule about time that uses unusual phrasing might not be caught as time-limited. The marked templates (like oracle freshness) are always correct; the inference is a best-effort safety net.
