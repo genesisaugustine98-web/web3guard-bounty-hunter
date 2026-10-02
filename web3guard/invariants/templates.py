@@ -116,6 +116,20 @@ class TemplateSpec:
     #: Time-limited rules (e.g. oracle freshness windows) must not be
     #: tested under time-warp — warping past the window is a false
     #: positive, not a bug.
+    accounting_class: str = "agnostic"
+    #: Weakness-hunt round, fix B (donation-attacker scoping): how this
+    #: template interacts with forced-ETH donations (selfdestruct
+    #: force-feeds, which bypass all deposit accounting).
+    #: - "exact-equality": the invariant asserts an exact accounting
+    #:   equality (e.g. totalSupply == totalAssets) that a donation breaks
+    #:   BY CONSTRUCTION. The donation attacker is only a legitimate test
+    #:   here when the target has share-price/mint mechanics (the real
+    #:   ERC-4626 donation-inflation bug class); otherwise it can only
+    #:   manufacture false positives.
+    #: - "share-based": the template is itself about share mechanics
+    #:   (share price, mint/burn symmetry) — donations are a legitimate
+    #:   test and never trigger scoping.
+    #: - "agnostic": donations neither break nor test this invariant.
 
     def match(self, source: str) -> dict[str, str] | None:
         """Return placeholder bindings if the template applies, else None."""
@@ -196,6 +210,72 @@ def infer_temporal_scope(inv: Invariant) -> str:
     return "permanent"
 
 
+# ---------------------------------------------------------------------------
+# Fix B: donation-attacker scoping — exact-equality accounting detection.
+#
+# A forced ETH donation (selfdestruct force-feed, bypassing every deposit
+# function) breaks an invariant of the form
+# ``<tracked/recorded value> == <actual holdings>`` BY CONSTRUCTION, on a
+# clean contract as easily as on a buggy one. The donation attacker is a
+# legitimate test only where the target has share-price/mint mechanics
+# (the real ERC-4626 donation-inflation bug class). Everywhere else, firing
+# it at full strength against such invariants manufactures 0.90-confidence
+# false positives (batch_01 n1/n2/n9).
+# ---------------------------------------------------------------------------
+
+#: Getter-name markers for the *tracked/recorded* side of an accounting
+#: equality (what the contract believes it holds).
+_TRACKED_VALUE_RES = re.compile(
+    r"deposit|supply|shares?|reserve|tracked|recorded|cumul|minted|accounted|ledger",
+    re.IGNORECASE,
+)
+#: Getter-name markers for the *actual holdings* side (what is really there).
+#: A forced donation moves this side without touching the tracked side.
+_ACTUAL_VALUE_RES = re.compile(
+    r"assets?|balance|ethbal|holdings?",
+    re.IGNORECASE,
+)
+#: ``target.foo() == target.bar()`` — the exact-equality shape.
+_GETTER_EQ_RE = re.compile(r"target\.(\w+)\(\)\s*==\s*target\.(\w+)\(\)")
+
+
+def is_exact_equality_accounting(inv: Invariant) -> bool:
+    """Heuristic: does this invariant assert an exact accounting equality
+    that a forced ETH donation breaks by construction?
+
+    Matches ``target.<tracked>() == target.<actual>()`` in either order
+    (e.g. ``target.totalDeposits() == target.totalAssets()``,
+    ``target.reserves() == target.realBalance()``). Template invariants
+    are classified by their spec instead (see
+    :func:`template_accounting_class`); this covers sharp/LLM-drafted rules
+    whose ids the registry doesn't know.
+    """
+    m = _GETTER_EQ_RE.search(inv.assertion or "")
+    if not m:
+        return False
+    left, right = m.group(1), m.group(2)
+    tracked_left = bool(_TRACKED_VALUE_RES.search(left))
+    tracked_right = bool(_TRACKED_VALUE_RES.search(right))
+    actual_left = bool(_ACTUAL_VALUE_RES.search(left))
+    actual_right = bool(_ACTUAL_VALUE_RES.search(right))
+    # One side tracked, the other side actual holdings (either order) —
+    # and not the same side twice (e.g. ethBal == totalAssets is
+    # actual-vs-actual, not the donation-sensitive shape).
+    return (tracked_left and actual_right and not actual_left) or (
+        tracked_right and actual_left and not actual_right
+    )
+
+
+def template_accounting_class(inv_id: str) -> str:
+    """The :attr:`TemplateSpec.accounting_class` for a template id.
+
+    Returns "agnostic" for unknown ids (sharp/LLM rules go through
+    :func:`is_exact_equality_accounting` instead).
+    """
+    spec = _TEMPLATE_BY_ID.get(inv_id)
+    return spec.accounting_class if spec is not None else "agnostic"
+
+
 def _sub(text: str, bindings: Mapping[str, str]) -> str:
     """Replace ``{placeholder}`` tokens; leave other braces untouched."""
 
@@ -260,6 +340,11 @@ SOLIDITY_TEMPLATES: list[TemplateSpec] = [
                   "Skipped for fee/yield/rebasing vaults where 1:1 cannot hold.",
         bug_class="accounting-desync",
         severity="HIGH",
+        # Fix B: exact-equality accounting — a forced ETH donation breaks
+        # this by construction (assets rise, supply doesn't), so the
+        # donation attacker is only legitimate here when the target has
+        # share-price/mint mechanics (the real donation-inflation class).
+        accounting_class="exact-equality",
     ),
     TemplateSpec(
         id="tmpl-total-deposited-gte-withdrawn",
@@ -868,12 +953,18 @@ def _call_expr(sig: Any) -> str:
     return f"target.{sig.name}({args})"
 
 
-def _passthrough(sig: Any, hooks: list[str]) -> str:
+def _passthrough(sig: Any, hooks: list[str], *, compromised: bool = False) -> str:
     # Every passthrough takes the target's own parameters plus a trailing
     # sender seed (weakness-hunt round, target 1): the fuzzer picks WHO
     # calls from the sender pool (handler, built-in users, mined
     # hardcoded addresses), so role-gated paths are reachable without the
     # harness itself ever being the owner (neutral deployment, below).
+    #
+    # Fix A (compromised-key scenario): when ``compromised`` is set, the
+    # passthrough pranks as the owner (the neutral deployer — deployment
+    # is neutral, so the deployer IS the owner for `owner = msg.sender`
+    # contracts) instead of picking a sender from the pool. The fuzzer
+    # then acts with the compromised owner key on demand.
     #
     # Weakness-hunt round, target 6: every passthrough piggybacks one
     # deterministic coverage step (seed-1337 dilution fix). The
@@ -884,6 +975,10 @@ def _passthrough(sig: Any, hooks: list[str]) -> str:
     )
     payable_kw = " payable" if sig.mutability == "payable" else ""
     call = _call_expr(sig)
+    if compromised:
+        prank_line = "WGVM.prank(WG_NEUTRAL_DEPLOYER);"
+    else:
+        prank_line = "_wgPrank(_wgPickSender(_wgSender));"
     if not hooks:
         body = f"{call};"
     else:
@@ -891,7 +986,7 @@ def _passthrough(sig: Any, hooks: list[str]) -> str:
         body = f"try {call} {{\n            {inner}\n        }} catch {{}}"
     return (
         f"    function {sig.name}({params}) public{payable_kw} {{\n"
-        f"        _wgPrank(_wgPickSender(_wgSender));\n"
+        f"        {prank_line}\n"
         f"        {body}\n"
         f"        _wgCoverageStep();\n"
         f"    }}"
@@ -935,6 +1030,7 @@ def render_ghost_project(
     bounds: FuzzBounds,
     *,
     attack: bool | None = None,
+    compromised_key: bool = False,
 ) -> tuple[dict[str, str], list[str]]:
     """Render a Foundry project with the ghost-state handler harness.
 
@@ -948,14 +1044,24 @@ def render_ghost_project(
     accounting stays in lockstep. This closes the integration gap where
     ghost (temporal) templates disabled the attack simulator and the
     reentrancy family stayed uncaught through the main pipeline.
+
+    ``compromised_key`` (Fix A): the compromised-key scenario leg. Owner-
+    gated passthroughs prank as the owner (the neutral deployer) ON
+    DEMAND instead of picking a sender from the pool, so the fuzzer acts
+    with the compromised owner key. Attacker contracts, attack actions,
+    and the phishing action are disabled in this mode — the scenario is
+    strictly "the owner key is compromised", not "an external attacker".
+    Deployment stays neutral (target is still deployed as the neutral
+    deployer), so no owner-confusion false alarms.
     """
     from web3guard.invariants.harness import (
         NEUTRAL_DEPLOYER,
         _render_entry_dispatcher,
+        coverage_order,
+        detect_owner_gated_functions,
         extract_mined_senders,
         sender_pool,
     )
-    from web3guard.invariants.harness import coverage_order
     from web3guard.invariants.harness import (
         extract_contract_names as _ecn,
     )
@@ -969,8 +1075,22 @@ def render_ghost_project(
         for inv in invariants
         if inv.id in _GHOST_SPECS
     ]
-    if not specs:
+    if not specs and not compromised_key:
         raise ValueError("no ghost templates to render")
+    if compromised_key:
+        notes.append(
+            "ghost harness: COMPROMISED-KEY scenario leg — owner-gated "
+            "passthroughs prank as the owner (neutral deployer) on demand; "
+            "attacker contracts, attack actions, and the phishing action "
+            "are disabled; deployment stays neutral."
+        )
+
+    # Fix A: owner-gated functions the compromised-key leg impersonates.
+    ck_names = (
+        {fn.name for fn in detect_owner_gated_functions(contract_source)}
+        if compromised_key
+        else set()
+    )
 
     # Weakness-hunt round, target 2: only the deploy-target contract's own
     # functions are wrapped. Auxiliary contracts in the same file still
@@ -994,7 +1114,11 @@ def render_ghost_project(
         )
     # Weakness-hunt round, target 4: run the attacker contracts INSIDE
     # ghost mode. `use_attack` follows bounds.attack_enabled by default.
+    # Fix A: the compromised-key scenario is strictly "the owner key is
+    # compromised" — no external attacker contracts or attack actions.
     use_attack = bounds.attack_enabled if attack is None else bool(attack)
+    if compromised_key:
+        use_attack = False
     atk_specs: list = []
     atk_vault = None
     atk_eth_vault = False
@@ -1005,14 +1129,34 @@ def render_ghost_project(
         pragma = extract_pragma(contract_source)
         atk_specs, atk_notes = _attackers.select_attackers(pragma, sigs)
         notes.extend(f"ghost harness: {n}" for n in atk_notes)
+        # Weakness-hunt round, fix B: scope the donation attacker. A forced
+        # ETH donation breaks exact-equality accounting invariants BY
+        # CONSTRUCTION; on targets with no share-price/mint mechanics that
+        # can only manufacture false positives (batch_01 n1/n2/n9), so the
+        # donation attacker is stood down there. The reentrancy + approval
+        # attackers are unaffected, and the donation attacker stays fully
+        # active wherever share mechanics exist (ERC-4626 inflation class).
+        deploy_donation, donation_note = _attackers.should_deploy_donation_attacker(
+            contract_source, invariants
+        )
+        notes.append(f"ghost harness: donation attacker: {donation_note}")
+        if not deploy_donation:
+            atk_specs = [s for s in atk_specs if s.name != "DonationAttacker"]
         atk_vault = _attackers.detect_vault_interface(sigs)
         by_name = {fn.name: fn for fn in sigs}
         dep_fn = by_name.get(atk_vault.deposit_fn) if atk_vault else None
+        # Scripted reentrancy needs a payable no-arg deposit plus at least
+        # one drivable withdraw variant: withdraw(uint256), bare
+        # withdraw(), withdrawTo(address), and sibling entries such as
+        # withdrawVested() for cross-function reentrancy (each variant
+        # pairs the withdraw with the payable no-arg deposit funding the
+        # balance it reads).
         atk_eth_vault = bool(
             atk_vault is not None
             and dep_fn is not None
             and dep_fn.mutability == "payable"
             and not dep_fn.params
+            and atk_vault.variants
         )
         atk_approve_fn = next(
             (
@@ -1030,6 +1174,9 @@ def render_ghost_project(
             f"({', '.join(s.name for s in atk_specs)}); attack actions route "
             "through the ghost passthroughs so accounting stays in lockstep."
         )
+        if atk_vault is not None:
+            for s in atk_vault.skipped:
+                notes.append(f"ghost harness: reentrancy variant skipped: {s}")
     # Weakness-hunt round, target 5: if any invariant is time-limited
     # (e.g. oracle freshness), time-warp actions are disabled — warping
     # the clock past the window would be a false positive, not a bug.
@@ -1077,10 +1224,12 @@ def render_ghost_project(
                 dropped_specs.add(spec.id)
                 continue
             hooks.extend(rendered)
-        passthroughs.append(_passthrough(sig, hooks))
+        passthroughs.append(
+            _passthrough(sig, hooks, compromised=sig.name in ck_names)
+        )
 
     specs = [(spec, inv) for spec, inv in specs if spec.id not in dropped_specs]
-    if not specs:
+    if not specs and not compromised_key:
         raise ValueError("no ghost templates survived hook rendering")
 
     # Merge ghost declarations / setup / extra fns (dedupe by name).
@@ -1153,6 +1302,19 @@ def render_ghost_project(
             'import "./attackers/ReentrancyAttacker.sol";\n'
             'import "./attackers/ApprovalDrainer.sol";',
         )
+        # Fix B: when the donation attacker is scoped out it is NOT in the
+        # sender pool either — a pool slot of address(0) would receive the
+        # 10000-ETH deal below and break invariant_attacker_no_profit via
+        # _wgAttackerFunds(). Slot indices stay consistent because they are
+        # computed from the actual pool layout.
+        atk_pool_addrs: list[str] = []
+        if deploy_donation:
+            atk_pool_addrs.append("address(donationAttacker)")
+        atk_pool_addrs.append("address(reenterAttacker)")
+        atk_pool_addrs.append("address(approvalDrainer)")
+        atk_slot = {
+            addr: len(pool_addrs) + i for i, addr in enumerate(atk_pool_addrs)
+        }
         handler_parts.extend([
             "    // --- attacker contracts (weakness-hunt round, target 4) ---",
             "    DonationAttacker public donationAttacker;",
@@ -1163,9 +1325,12 @@ def render_ghost_project(
             "    uint256 public totalAttackerFunding;",
             "    // Sender-pool slots for the attacker contracts (appended",
             "    // after users/mined senders; indices fixed at render time).",
-            f"    uint256 constant WG_SENDER_DONATION = {len(pool_addrs)};",
-            f"    uint256 constant WG_SENDER_REENTER = {len(pool_addrs) + 1};",
-            f"    uint256 constant WG_SENDER_DRAINER = {len(pool_addrs) + 2};",
+            f"    uint256 constant WG_SENDER_DONATION = "
+            f"{atk_slot.get('address(donationAttacker)', 0)};",
+            f"    uint256 constant WG_SENDER_REENTER = "
+            f"{atk_slot['address(reenterAttacker)']};",
+            f"    uint256 constant WG_SENDER_DRAINER = "
+            f"{atk_slot['address(approvalDrainer)']};",
             "    uint256 constant WG_MAX_CALL_VALUE = "
             f"{bounds.attack_max_value_wei};",
             "    // On-chain epsilon-greedy bandit state (adaptive strategy).",
@@ -1173,11 +1338,7 @@ def render_ghost_project(
             "    uint256 public wgModePulls;",
             "",
         ])
-        pool_addrs.extend([
-            "address(donationAttacker)",
-            "address(reenterAttacker)",
-            "address(approvalDrainer)",
-        ])
+        pool_addrs.extend(atk_pool_addrs)
     for vname, vtype in var_decls.items():
         handler_parts.append(f"    {vtype} public {vname};")
     if var_decls:
@@ -1197,7 +1358,14 @@ def render_ghost_project(
     handler_parts.append(f"        target = new {contract_name}();")
     handler_parts.append("        wgNeutralDeployer = WG_NEUTRAL_DEPLOYER;")
     if use_attack:
-        handler_parts.append("        donationAttacker = new DonationAttacker();")
+        # Fix B: the donation attacker is only deployed when the scoping
+        # decision allows it (stood down against exact-equality invariants
+        # on targets with no share mechanics — it can only FP there). The
+        # field declaration stays so all references still compile; an
+        # undeployed attacker is address(0) and every donation action
+        # no-ops on it (see act_donateForcedEth + the heist kicker below).
+        if deploy_donation:
+            handler_parts.append("        donationAttacker = new DonationAttacker();")
         if any(s.name == "ReentrancyAttacker" for s in atk_specs):
             handler_parts.append("        reenterAttacker = new ReentrancyAttacker();")
         if any(s.name == "ApprovalDrainer" for s in atk_specs):
@@ -1213,7 +1381,10 @@ def render_ghost_project(
         # break invariant_attacker_no_profit by construction. They start at
         # zero; _wgFundAttacker is the only funding source the invariant
         # counts. (deal on address(0) for an undeployed attacker is a no-op.)
-        handler_parts.append("        WGVM.deal(address(donationAttacker), 0);")
+        # Fix B: only zero the donation attacker's balance when it was
+        # actually deployed (deal on address(0) is skipped).
+        if deploy_donation:
+            handler_parts.append("        WGVM.deal(address(donationAttacker), 0);")
         handler_parts.append("        WGVM.deal(address(reenterAttacker), 0);")
         handler_parts.append("        WGVM.deal(address(approvalDrainer), 0);")
     for stmt in setup_all:
@@ -1247,6 +1418,10 @@ def render_ghost_project(
         "        _wgCovering = false;",
         "    }",
         "",
+        # Fix A: no phishing action in the compromised-key scenario — the
+        # scenario is strictly "the owner key is compromised", and phishing
+        # (tx.origin) belongs to a different threat model.
+        *( [] if compromised_key else [
         "    // Phishing model for tx.origin bugs: the neutral owner is tricked",
         "    // into triggering a contract call; the target sees msg.sender = a",
         "    // pool sender with tx.origin = owner. Routed through the handler's",
@@ -1258,6 +1433,7 @@ def render_ghost_project(
         "        _wgCoverageStep();",
         "    }",
         "",
+        ] ),
         _render_entry_dispatcher(contract_name, coverage_order(sigs, invariants), via_passthrough=True),
     ])
     # Weakness-hunt round, target 4: the attack actions, routed through the
@@ -1286,23 +1462,60 @@ def render_ghost_project(
             "",
         ]
         if atk_eth_vault and atk_vault is not None:
-            _dep, _wd = atk_vault.deposit_fn, atk_vault.withdraw_fn
+            _dep = atk_vault.deposit_fn
+            _variant_lines: list[str] = []
+            for _v in atk_vault.variants:
+                _vdep, _vwd = _v.deposit_fn, _v.withdraw_fn
+                if _v.withdraw_shape == "amount":
+                    # Ghost passthroughs append a trailing sender seed.
+                    _sig, _cargs, _trig = (
+                        f"{_vwd}(uint256,uint256)",
+                        "v, WG_SENDER_REENTER",
+                        f"this.{_vwd}(v, WG_SENDER_REENTER)",
+                    )
+                elif _v.withdraw_shape == "noarg":
+                    _sig, _cargs, _trig = (
+                        f"{_vwd}(uint256)",
+                        "WG_SENDER_REENTER",
+                        f"this.{_vwd}(WG_SENDER_REENTER)",
+                    )
+                else:  # "to": the reentrant call pays the attacker itself
+                    _sig, _cargs, _trig = (
+                        f"{_vwd}(address,uint256)",
+                        "address(reenterAttacker), WG_SENDER_REENTER",
+                        f"this.{_vwd}(payable(address(reenterAttacker)), WG_SENDER_REENTER)",
+                    )
+                _variant_lines.extend([
+                    f"        // re-entry variant: {_v.withdraw_sig} (balance funded via {_vdep}).",
+                    "        _wgFundAttacker(address(reenterAttacker), v);",
+                    "        reenterAttacker.arm(",
+                    "            address(this),",
+                    f'            abi.encodeWithSignature("{_sig}", {_cargs}),',
+                    "            3",
+                    "        );",
+                    f"        this.{_vdep}{{value: v}}(WG_SENDER_REENTER);",
+                    f"        {_trig};",
+                    "        reenterAttacker.disarm();",
+                ])
+            _variants_src = "\n".join(_variant_lines)
+            _wd0, _wshape0 = atk_vault.withdraw_fn, atk_vault.withdraw_shape
+            if _wshape0 == "amount":
+                _cycle_withdraw = f"this.{_wd0}(v > _wgW ? _wgW : v, _wgUser);"
+            elif _wshape0 == "noarg":
+                _cycle_withdraw = f"if (v > 0) {{ this.{_wd0}(_wgUser); }}"
+            else:  # "to": withdraw to the cycling user itself
+                _cycle_withdraw = (
+                    f"if (v > 0) {{ this.{_wd0}(payable(_wgPickSender(_wgUser)), _wgUser); }}"
+                )
             _atk_lines.extend([
                 "    // Scripted reentrancy: the attacker is armed with the",
                 "    // *passthrough* signature, so the reentrant call is ghost-",
-                "    // tracked exactly like a fuzzer call.",
+                "    // tracked exactly like a fuzzer call. Every withdraw-like",
+                "    // entry point is driven in turn (cross-function reentrancy).",
                 "    function _wgDoReenter(uint256 v, uint256 userSeed) internal {",
                 "        if (address(reenterAttacker) == address(0) || v == 0) return;",
                 f"        this.{_dep}{{value: v}}(userSeed);",
-                "        _wgFundAttacker(address(reenterAttacker), v);",
-                "        reenterAttacker.arm(",
-                "            address(this),",
-                f'            abi.encodeWithSignature("{_wd}(uint256,uint256)", v, WG_SENDER_REENTER),',
-                "            3",
-                "        );",
-                f"        this.{_dep}{{value: v}}(WG_SENDER_REENTER);",
-                f"        this.{_wd}(v, WG_SENDER_REENTER);",
-                "        reenterAttacker.disarm();",
+                _variants_src,
                 "    }",
                 "",
                 "    function act_attack_reenter(uint256 _wgValue, uint256 _wgSeed) public {",
@@ -1322,7 +1535,10 @@ def render_ghost_project(
             _atk_lines.extend([
                 "        _wgDoReenter(v, userSeed + 1);",
                 "        uint256 dust = v / 100;",
-                "        if (dust > 0 && address(donationAttacker).balance == 0) {",
+                # Fix B: the kicker is inert when the donation attacker was
+                # scoped out of this campaign (address(0)).
+                "        if (dust > 0 && address(donationAttacker) != address(0)",
+                "                && address(donationAttacker).balance == 0) {",
                 "            _wgFundAttacker(address(donationAttacker), dust);",
                 "            donationAttacker.donate(payable(address(target)));",
                 "        }",
@@ -1338,7 +1554,7 @@ def render_ghost_project(
                 "        _wgCoverageStep();",
                 "        uint256 v = _wgCap(_wgValue);",
                 f"        this.{_dep}{{value: v}}(_wgUser);",
-                f"        this.{_wd}(v > _wgW ? _wgW : v, _wgUser);",
+                f"        {_cycle_withdraw}",
                 "    }",
                 "",
             ])
@@ -1347,7 +1563,11 @@ def render_ghost_project(
             "    // Forced-ETH donation: selfdestruct-style value injection",
             "    // that bypasses the target's own accounting (deliberately",
             "    // NOT ghost-tracked — that is the point).",
+            "    // Fix B: no-op when the donation attacker was scoped out of",
+            "    // this campaign (stood down against exact-equality",
+            "    // invariants on targets with no share mechanics).",
             "    function act_donateForcedEth(uint256 _wgValue, uint256 _wgSeed) public {",
+            "        if (address(donationAttacker) == address(0)) return;",
             "        uint256 v = _wgCap(_wgValue);",
             "        if (v == 0) return;",
             "        _wgFundAttacker(address(donationAttacker), v);",

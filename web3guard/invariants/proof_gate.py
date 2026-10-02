@@ -44,11 +44,13 @@ at WARNING and appended to the pipeline notes. Nothing is silent.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from web3guard.invariants.attackers import HARNESS_RENDERED_INVARIANT_IDS
 from web3guard.invariants.harness import extract_target_functions
 from web3guard.invariants.models import CampaignResult, Invariant
 
@@ -263,11 +265,49 @@ _TRACE_LINE_RES = {
 }
 
 
+def _is_forge_failure_event(line: str) -> bool:
+    """Is this line one of forge's NDJSON invariant-failure events?
+
+    Forge prints ``{"timestamp":...,"event":"failure",
+    "invariant":"invariant_foo",...}`` on stderr for every invariant it
+    breaks while fuzzing — and ONLY then. Rules that are false at
+    deployment produce ``failed to set up invariant testing environment``
+    and NO failure event (verified against forge 1.6.0-nightly), so an
+    event line can never be an empty-trace false-at-deployment artifact.
+    The line may be embedded in the PoC's ``#`` comment block, so a
+    leading comment marker is stripped before checking.
+    """
+    s = line.strip().lstrip("#").strip()
+    if len(s) < 2 or len(s) > 8192 or not s.startswith("{"):
+        return False
+    try:
+        obj = json.loads(s)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    return (
+        isinstance(obj, dict)
+        and obj.get("event") == "failure"
+        and isinstance(obj.get("invariant"), str)
+        and bool(obj["invariant"])
+    )
+
+
 def _check_trace(engine: str, poc: str) -> tuple[bool, list[str]]:
     """Does the PoC carry a non-empty machine trace?"""
     if engine == "foundry-invariant":
         lines = [ln.strip() for ln in poc.splitlines() if "calldata=" in ln]
-        return (bool(lines), lines[:30])
+        if lines:
+            return True, lines[:30]
+        # Fix C: when output truncation destroyed the human-readable call
+        # sequence, forge's own JSON failure event (embedded in the PoC by
+        # the parser) is still a machine trace — it is forge's attestation
+        # that fuzzing found a violating sequence, which false-at-deployment
+        # rules never produce (see _is_forge_failure_event). The readable
+        # sequence is preferred whenever it survived.
+        evt_lines = [
+            ln.strip() for ln in poc.splitlines() if _is_forge_failure_event(ln)
+        ]
+        return (bool(evt_lines), evt_lines[:30])
     if engine == "titanoboa-invariant":
         if "(no call sequence recorded)" in poc:
             return False, []
@@ -417,9 +457,15 @@ def apply_proof_gate(
 
     Returns the admitted findings; every rejection/quarantine is appended
     to ``notes`` (when given) so it is LOUD, never silent.
+
+    The harness's own machine-rendered exploit invariants (see
+    :data:`attackers.HARNESS_RENDERED_INVARIANT_IDS`) are attributable by
+    construction — deterministic product code, not caller or LLM rules —
+    so a machine-proven break of one is admitted like any validated rule.
     """
+    valid_ids = {i.id for i in invariants} | set(HARNESS_RENDERED_INVARIANT_IDS)
     verdict = gate_findings(
-        findings, {i.id for i in invariants}, campaign,
+        findings, valid_ids, campaign,
         target_label=target_label,
     )
     if notes is not None:

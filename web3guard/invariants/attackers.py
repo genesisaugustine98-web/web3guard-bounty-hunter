@@ -15,13 +15,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from web3guard.invariants.models import FunctionSig
+from web3guard.invariants.models import FunctionSig, Invariant
 
 #: Function-name aliases the harness recognizes as "put money in".
 _DEPOSIT_ALIASES = ("deposit", "stake", "mint", "supply", "fund", "addliquidity")
 #: Function-name aliases the harness recognizes as "take money out".
 _WITHDRAW_ALIASES = (
     "withdraw",
+    "withdrawto",
     "unstake",
     "burn",
     "redeem",
@@ -30,21 +31,76 @@ _WITHDRAW_ALIASES = (
     "cashout",
 )
 
+#: Withdraw parameter shapes the reentrancy attacker can drive.
+_WITHDRAW_SHAPE_AMOUNT = "amount"  # withdraw(uint256)
+_WITHDRAW_SHAPE_NOARG = "noarg"  # bare withdraw()
+_WITHDRAW_SHAPE_TO = "to"  # withdrawTo(address)
+
+#: Invariant ids rendered by Web3Guard's own harness code (the attack and
+#: ghost harnesses), as opposed to caller-supplied or LLM-drafted rules.
+#: They are deterministic product logic — a forge break of one of them is a
+#: machine-checked exploit demonstration, attributable by construction. The
+#: proof gate's attribution requirement exists to block hallucinated rules
+#: from becoming findings; it must not silence the harness's own exploit
+#: demonstrations (that would make the reentrancy-attacker feature
+#: unreachable through the product pipeline for every vault shape).
+HARNESS_RENDERED_INVARIANT_IDS = frozenset({"attacker_no_profit"})
+
+#: Source markers for share-price / share-mint mechanics (Fix B). When any
+#: of these appear, a forced ETH donation is a legitimate test: the real
+#: ERC-4626 donation-inflation bug class works exactly by force-feeding
+#: value to move the share price. Without share mechanics, a donation can
+#: only break naive ``deposits == balance`` equalities — a false positive,
+#: not a bug.
+_SHARE_MECHANICS_RES = (
+    r"\btotalShares\b",
+    r"\bsharePrice\b",
+    r"\bpricePerShare\b",
+    r"\bconvertTo(?:Shares|Assets)\b",
+    r"\bpreview(?:Deposit|Mint|Withdraw|Redeem)\b",
+    r"\bgetRate\b",
+    r"\bexchangeRate\b",
+    r"\bERC4626\b",
+    r"\bvirtual(?:Shares|Assets|Offset)\b",
+)
+
+
+@dataclass
+class ReenterVariant:
+    """One withdraw-like entry the reentrancy attacker can drive.
+
+    Cross-function reentrancy hides behind sibling entries (a guarded
+    ``withdraw()`` next to an unguarded ``withdrawVested()``), so every
+    withdraw-like function becomes its own re-entry variant, paired with
+    the deposit-like function that funds the balance it reads.
+    """
+
+    withdraw_fn: str  # e.g. "withdrawVested"
+    withdraw_shape: str  # "amount" | "noarg" | "to"
+    withdraw_sig: str  # canonical, e.g. "withdrawVested()"
+    deposit_fn: str  # payable no-arg deposit funding this variant
+
 
 @dataclass
 class VaultInterface:
     """A detected (deposit, withdraw) pair the reentrancy attacker can use.
 
-    Phase 1 supports the canonical shape: a payable deposit-like function
-    and a withdraw-like function taking a single ``uint`` amount. Anything
-    fancier (multi-param withdraws, share-based flows) is skipped with an
-    honest note instead of a broken attacker.
+    Supported withdraw shapes: ``withdraw(uint256)`` ("amount"), bare
+    ``withdraw()`` ("noarg"), and ``withdrawTo(address)`` ("to"). Every
+    withdraw-like function on the target becomes a re-entry variant in
+    :attr:`variants` (the primary pair is ``variants[0]``); anything
+    fancier (multi-param withdraws, share-based flows, withdraws with no
+    payable no-arg deposit behind them) is skipped with an honest note in
+    :attr:`skipped` instead of a broken attacker.
     """
 
     deposit_fn: str  # e.g. "deposit"
     deposit_sig: str  # e.g. "deposit()"
     withdraw_fn: str  # e.g. "withdraw"
     withdraw_sig: str  # e.g. "withdraw(uint256)"
+    withdraw_shape: str  # "amount" | "noarg" | "to"
+    variants: tuple[ReenterVariant, ...] = ()
+    skipped: tuple[str, ...] = ()
 
 
 @dataclass
@@ -57,26 +113,129 @@ class AttackerSpec:
     purpose: str  # plain-language note for reports/logs
 
 
-def detect_vault_interface(functions: list[FunctionSig]) -> VaultInterface | None:
-    """Find a (deposit, withdraw) pair usable by the reentrancy attacker."""
-    deposit: FunctionSig | None = None
-    withdraw: FunctionSig | None = None
-    for fn in functions:
-        lname = fn.name.lower()
-        if deposit is None and lname in _DEPOSIT_ALIASES and fn.state_changing:
-            deposit = fn
-        if withdraw is None and lname in _WITHDRAW_ALIASES and fn.state_changing:
-            # Needs a single uint amount parameter to be attackable.
-            if len(fn.params) == 1 and fn.params[0][0].startswith("uint"):
-                withdraw = fn
-    if deposit is None or withdraw is None:
+def _matches_alias(name: str, aliases: tuple[str, ...]) -> bool:
+    """True for an exact alias or a verb-prefixed extension of one.
+
+    ``withdrawVested`` / ``depositVested`` (cross-function reentrancy
+    fixtures) and ``depositETH`` match via the prefix; unrelated names do
+    not. The profit-gated invariant keeps over-matching honest: deploying
+    the attacker is never itself a finding.
+    """
+    lname = name.lower()
+    return lname in aliases or lname.startswith(aliases)
+
+
+def _verb_suffix(name: str) -> str:
+    """The part of a deposit/withdraw name after the verb.
+
+    Used to pair a withdraw-like function with the deposit-like function
+    that funds the balance it reads: ``withdrawVested`` <->>
+    ``depositVested`` (suffix ``"vested"``), ``withdraw`` <-> ``deposit``
+    (suffix ``""``).
+    """
+    lname = name.lower()
+    for verb in sorted(_DEPOSIT_ALIASES + _WITHDRAW_ALIASES, key=len, reverse=True):
+        if lname.startswith(verb) and len(lname) > len(verb):
+            return lname[len(verb):]
+    return ""
+
+
+def _canonical_type(tp: str) -> str:
+    """ABI-canonical form of a parameter type for encodeWithSignature."""
+    tp = tp.replace(" payable", "").strip()
+    return {"uint": "uint256", "int": "int256"}.get(tp, tp)
+
+
+def _withdraw_shape(fn: FunctionSig) -> str | None:
+    """Classify a withdraw-like function into a drivable shape (or None)."""
+    if not fn.state_changing:
         return None
-    dep_types = ",".join(t for t, _ in deposit.params)
+    if not _matches_alias(fn.name, _WITHDRAW_ALIASES):
+        return None
+    if len(fn.params) == 0:
+        return _WITHDRAW_SHAPE_NOARG
+    if len(fn.params) == 1:
+        ptype = fn.params[0][0]
+        if ptype.startswith("uint"):
+            return _WITHDRAW_SHAPE_AMOUNT
+        if ptype.startswith("address"):
+            return _WITHDRAW_SHAPE_TO
+    return None
+
+
+def _is_deposit_fn(fn: FunctionSig) -> bool:
+    return fn.state_changing and _matches_alias(fn.name, _DEPOSIT_ALIASES)
+
+
+def _paired_deposit(
+    wfn: FunctionSig,
+    deposits: list[FunctionSig],
+    primary: FunctionSig,
+) -> FunctionSig | None:
+    """The payable no-arg deposit funding the balance ``wfn`` reads.
+
+    Prefers the deposit-like function whose name shares ``wfn``'s verb
+    suffix (``depositVested`` for ``withdrawVested``); falls back to the
+    primary deposit. Returns None when no candidate is a payable no-arg
+    function — the variant is then skipped, not mis-driven.
+    """
+    suffix = _verb_suffix(wfn.name)
+    for dep in deposits:
+        if (
+            _verb_suffix(dep.name) == suffix
+            and dep.mutability == "payable"
+            and not dep.params
+        ):
+            return dep
+    if primary.mutability == "payable" and not primary.params:
+        return primary
+    return None
+
+
+def detect_vault_interface(functions: list[FunctionSig]) -> VaultInterface | None:
+    """Find a (deposit, withdraw) pair usable by the reentrancy attacker.
+
+    Every withdraw-like function becomes a re-entry variant (see
+    :class:`ReenterVariant`); the primary pair is ``variants[0]``.
+    """
+    deposits = [fn for fn in functions if _is_deposit_fn(fn)]
+    if not deposits:
+        return None
+    primary_dep = deposits[0]
+    variants: list[ReenterVariant] = []
+    skipped: list[str] = []
+    for fn in functions:
+        shape = _withdraw_shape(fn)
+        if shape is None:
+            continue
+        dep = _paired_deposit(fn, deposits, primary_dep)
+        if dep is None:
+            skipped.append(
+                f"{fn.name}: no payable no-arg deposit-like function funds "
+                "its balance — re-entry variant skipped"
+            )
+            continue
+        sig_types = ",".join(_canonical_type(t) for t, _ in fn.params)
+        variants.append(
+            ReenterVariant(
+                withdraw_fn=fn.name,
+                withdraw_shape=shape,
+                withdraw_sig=f"{fn.name}({sig_types})",
+                deposit_fn=dep.name,
+            )
+        )
+    if not variants:
+        return None
+    v0 = variants[0]
+    dep_types = ",".join(t for t, _ in primary_dep.params)
     return VaultInterface(
-        deposit_fn=deposit.name,
-        deposit_sig=f"{deposit.name}({dep_types})",
-        withdraw_fn=withdraw.name,
-        withdraw_sig=f"{withdraw.name}(uint256)",
+        deposit_fn=primary_dep.name,
+        deposit_sig=f"{primary_dep.name}({dep_types})",
+        withdraw_fn=v0.withdraw_fn,
+        withdraw_sig=v0.withdraw_sig,
+        withdraw_shape=v0.withdraw_shape,
+        variants=tuple(variants),
+        skipped=tuple(skipped),
     )
 
 
@@ -226,6 +385,8 @@ def select_attackers(
                 ),
             )
         )
+        for s in vault.skipped:
+            notes.append(f"reentrancy variant skipped: {s}")
     else:
         notes.append(
             "no (deposit, withdraw) pair detected: reentrancy attacker not deployed for this target"
@@ -247,3 +408,80 @@ def select_attackers(
             "spender not deployed for this target"
         )
     return specs, notes
+
+
+def has_share_mechanics(source: str) -> bool:
+    """True when the target has share-price/mint mechanics.
+
+    Only then is a forced ETH donation a legitimate test (the ERC-4626 /
+    share-inflation bug class). Pure string matching over the source —
+    deterministic, no toolchain needed.
+    """
+    import re as _re
+
+    return any(_re.search(pat, source) for pat in _SHARE_MECHANICS_RES)
+
+
+def exact_equality_invariants(
+    invariants: list[Invariant],
+) -> list[Invariant]:
+    """Invariants asserting an exact accounting equality.
+
+    Template invariants are classified by their spec
+    (``TemplateSpec.accounting_class``); sharp/LLM-drafted rules go through
+    the assertion-shape heuristic. A forced donation breaks these by
+    construction, so they are what the donation-attacker scoping keys on.
+    """
+    from web3guard.invariants.templates import (
+        is_exact_equality_accounting as _heuristic,
+    )
+    from web3guard.invariants.templates import (
+        template_accounting_class as _class_of,
+    )
+
+    out: list[Invariant] = []
+    for inv in invariants:
+        if _class_of(inv.id) == "exact-equality":
+            out.append(inv)
+        elif _class_of(inv.id) == "agnostic" and _heuristic(inv):
+            # Unknown (non-template) id + the exact-equality assertion
+            # shape: a sharp/LLM rule of the donation-sensitive kind.
+            out.append(inv)
+    return out
+
+
+def should_deploy_donation_attacker(
+    source: str,
+    invariants: list[Invariant],
+) -> tuple[bool, str]:
+    """Decide whether the donation attacker may fire in this campaign.
+
+    Returns (deploy, reason). The donation attacker is stood down when the
+    campaign's invariants assert exact accounting equality AND the target
+    has no share-price/mint mechanics that forced donations could
+    legitimately break — there a donation can only manufacture false
+    positives (the batch_01 n1/n2/n9 shape). Everywhere else (share
+    mechanics present, or no exact-equality invariant) it stays fully
+    active, so the ERC-4626 donation-inflation class keeps working.
+    """
+    exact = exact_equality_invariants(invariants)
+    if not exact:
+        return True, (
+            "donation attacker ACTIVE: no invariant asserts exact "
+            "accounting equality"
+        )
+    if has_share_mechanics(source):
+        return True, (
+            "donation attacker ACTIVE: exact-equality invariant(s) "
+            + ", ".join(f"'{inv.id}'" for inv in exact)
+            + " present but the target has share-price/mint mechanics, "
+            "so forced donations are a legitimate test "
+            "(ERC-4626 inflation class)"
+        )
+    return False, (
+        "donation attacker STOOD DOWN (Fix B): invariant(s) "
+        + ", ".join(f"'{inv.id}'" for inv in exact)
+        + " assert exact accounting equality and the target has no "
+        "share-price/mint mechanics — a forced donation would only "
+        "manufacture a false positive here"
+    )
