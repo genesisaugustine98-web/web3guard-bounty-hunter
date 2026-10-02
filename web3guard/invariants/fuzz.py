@@ -67,6 +67,29 @@ _COMPILE_FAIL_RES = (
 
 _MAX_LOG_CHARS = 6000
 
+#: Lines worth surfacing when a campaign fails to compile (weakness-hunt
+#: round, target 2: silence about compile failures is the worst failure
+#: mode — these lines make the INCONCLUSIVE verdict specific).
+_COMPILE_ERROR_LINE_RE = re.compile(
+    r"(?i)^.*\b(error(\s*\(\d+\))?|parsererror|declarationerror|typeerror|"
+    r"compiler run failed)\b.*$"
+)
+
+
+def extract_compile_errors(output: str, *, limit: int = 5) -> list[str]:
+    """Pull the most informative compiler-error lines out of forge output."""
+    errors: list[str] = []
+    for line in output.splitlines():
+        text = line.strip()
+        if len(text) > 220:
+            text = text[:220] + "…"
+        if _COMPILE_ERROR_LINE_RE.match(text):
+            if text not in errors:
+                errors.append(text)
+        if len(errors) >= limit:
+            break
+    return errors
+
 
 def _sanitized_invariant_fn(inv_id: str) -> str:
     clean = re.sub(r"[^A-Za-z0-9_]", "_", "invariant_" + inv_id)

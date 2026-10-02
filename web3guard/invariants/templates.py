@@ -748,9 +748,12 @@ def resolve_ghost_templates(
     silently wrong — so the template is skipped with a loud note instead.
     Returns (kept invariants, notes).
     """
-    from web3guard.invariants.harness import extract_functions as _ef
+    from web3guard.invariants.harness import extract_target_functions as _etf
 
-    sigs = {s.name: s for s in _ef(source) if s.fuzzable}
+    # Target-scoped (weakness-hunt round, target 2): ghost tracking must
+    # resolve against the deploy-target contract's functions, not every
+    # function in a multi-contract file.
+    sigs = {s.name: s for s in _etf(source) if s.fuzzable}
     kept: list[Invariant] = []
     notes: list[str] = []
     for inv in invariants:
@@ -901,7 +904,10 @@ def render_ghost_project(
         sender_pool,
     )
     from web3guard.invariants.harness import (
-        extract_functions as _ef,
+        extract_contract_names as _ecn,
+    )
+    from web3guard.invariants.harness import (
+        extract_target_functions as _etf,
     )
 
     notes: list[str] = []
@@ -913,7 +919,17 @@ def render_ghost_project(
     if not specs:
         raise ValueError("no ghost templates to render")
 
-    sigs = [s for s in _ef(contract_source) if s.fuzzable]
+    # Weakness-hunt round, target 2: only the deploy-target contract's own
+    # functions are wrapped. Auxiliary contracts in the same file still
+    # compile as dependencies; their functions are never called against
+    # the target (that used to be a compile failure + silent no-verdict).
+    _all_names = _ecn(contract_source)
+    sigs = [s for s in _etf(contract_source) if s.fuzzable]
+    if len(_all_names) > 1:
+        notes.append(
+            f"ghost harness: multi-contract file ({', '.join(_all_names)}); "
+            f"fuzzing '{contract_name}' only"
+        )
     # Sender pool (weakness-hunt round, target 1): handler itself first,
     # then built-ins, configured senders, and mined hardcoded addresses.
     pool_addrs = ["address(this)"] + sender_pool(contract_source, bounds)

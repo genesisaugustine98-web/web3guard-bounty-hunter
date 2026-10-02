@@ -230,3 +230,8 @@ class PipelineResult:
     #: Rules the proof gate quarantined (pre-render or post-campaign), as
     #: dicts with invariant_id / reason / stage. Additive (Phase 3).
     quarantined_rules: list[Any] = field(default_factory=list)
+    #: Weakness-hunt round, target 2: explicit "could not check" verdicts.
+    #: A compile failure (or render failure) anywhere in the pipeline lands
+    #: here — it must NEVER read as a clean "no findings". The hunt report
+    #: renders these loudly.
+    inconclusive: list[str] = field(default_factory=list)

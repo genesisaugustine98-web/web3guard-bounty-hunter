@@ -213,6 +213,176 @@ def test_ghost_handler_has_phishing_action() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Target 2a: multi-contract files — per-contract targeting
+# ---------------------------------------------------------------------------
+
+_MULTI_SRC = """\
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+// Two contracts in one file: the harness must fuzz FeeVaultExact only.
+// Wrapping FeeToken.recv against the FeeVaultExact deployment used to be
+// a compile failure + silent no-verdict (24 batch_02 regressions).
+contract FeeVaultExact {
+    FeeToken public token;
+    uint256 public totalAssets;
+    mapping(address => uint256) public balanceOf;
+    constructor() { token = new FeeToken(); }
+    function deposit(uint256 amt) external {
+        uint256 received = token.recv(amt); // vault actually gets amt - 1%
+        totalAssets += amt;                 // BUG: credits amt, not received
+        balanceOf[msg.sender] += amt;
+    }
+}
+contract FeeToken {
+    mapping(address => uint256) public balanceOf;
+    function recv(uint256 amt) external returns (uint256) {
+        uint256 fee = amt / 100;
+        uint256 got = amt - fee;
+        balanceOf[msg.sender] += got;
+        return got;
+    }
+}
+"""
+
+
+def test_split_contracts_finds_both() -> None:
+    from web3guard.invariants.harness import (
+        extract_contract_names,
+        extract_target_functions,
+        extract_target_name,
+        split_contracts,
+    )
+
+    blocks = split_contracts(_MULTI_SRC)
+    assert [(b.name, b.kind) for b in blocks] == [
+        ("FeeVaultExact", "contract"),
+        ("FeeToken", "contract"),
+    ]
+    assert extract_contract_names(_MULTI_SRC) == ["FeeVaultExact", "FeeToken"]
+    assert extract_target_name(_MULTI_SRC) == "FeeVaultExact"
+    assert [f.name for f in extract_target_functions(_MULTI_SRC)] == ["deposit"]
+    # the legacy whole-file extractor still sees both (compat)
+    from web3guard.invariants.harness import extract_functions
+
+    assert [f.name for f in extract_functions(_MULTI_SRC)] == ["deposit", "recv"]
+
+
+def test_split_contracts_ignores_braces_in_comments_and_strings() -> None:
+    from web3guard.invariants.harness import split_contracts
+
+    src = """\
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+// a } stray brace in a comment, and "{" inside a string below
+contract A {
+    string public s = "not { a contract }";
+    function f() external {}
+}
+/* multi-line comment with { braces } */
+interface I { function g() external; }
+"""
+    blocks = split_contracts(src)
+    assert [(b.name, b.kind) for b in blocks] == [("A", "contract"), ("I", "interface")]
+
+
+def test_attack_handler_wraps_only_target_functions() -> None:
+    from web3guard.invariants.harness import extract_target_name
+
+    files = render_solidity_project(
+        _MULTI_SRC, extract_target_name(_MULTI_SRC),
+        [_inv("fee-aware", "target.totalAssets() == target.token().balanceOf(address(target))")],
+        FuzzBounds(),
+    )
+    handler = files["test/AttackHandler.sol"]
+    assert "function act_deposit(" in handler
+    # the auxiliary contract's function must never be called on the target
+    assert "target.recv(" not in handler
+    assert "act_recv" not in handler
+    # ... but the aux contract still compiles as a dependency
+    assert "contract FeeToken" in files["src/FeeVaultExact.sol"]
+
+
+def test_ghost_handler_wraps_only_target_functions() -> None:
+    invs = [i for i in tmpl.template_invariants(_MULTI_SRC)
+            if i.id in tmpl.GHOST_TEMPLATE_IDS]
+    files, notes = tmpl.render_ghost_project(
+        _MULTI_SRC, "FeeVaultExact", invs, FuzzBounds())
+    test_src = files["test/Invariant.t.sol"]
+    assert "target.recv(" not in test_src
+    assert any("multi-contract file" in n for n in notes)
+
+
+# ---------------------------------------------------------------------------
+# Target 2b: compile failures are INCONCLUSIVE, never silent
+# ---------------------------------------------------------------------------
+
+
+def test_extract_compile_errors_pulls_error_lines() -> None:
+    from web3guard.invariants.fuzz import extract_compile_errors
+
+    log = """Compiling 2 files with Solc 0.8.34
+Compiler run failed:
+Error (9582): Member "recv" not found or not visible after argument-dependent lookup in contract GhostHandler.
+  --> test/Invariant.t.sol:42:9
+"""
+    errors = extract_compile_errors(log)
+    assert any("9582" in e for e in errors)
+
+
+def test_parse_forge_output_marks_compile_failure() -> None:
+    from web3guard.invariants.fuzz import parse_forge_output
+
+    _findings, campaign = parse_forge_output("Compiler run failed:\nError (1234): oops", [])
+    assert campaign.compile_ok is False
+
+
+def test_pipeline_marks_uncompilable_source_inconclusive(forge_env: dict) -> None:
+    from web3guard.invariants.pipeline import run_invariant_pipeline_full
+
+    # Template-matching shape (so it reaches the fuzz stage) with a syntax
+    # error (so forge cannot compile it).
+    src = """// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+contract Broken {
+    uint256 public totalSupply;
+    uint256 public totalAssets;
+    function deposit() external payable {
+        totalSupply += msg.value;
+        totalAssets += msg.value;
+    }
+    function oops() external { uint256 y = ; }  // syntax error
+}
+"""
+    d = Path(tempfile.mkdtemp(prefix="wg-wh-", dir="/tmp"))
+    os.chmod(d, 0o755)
+    (d / "Broken.sol").write_text(src)
+    cfg = {"invariants": {"runs": 8, "depth": 4, "timeout_seconds": 120,
+                          "ai_enabled": False}}
+    res = run_invariant_pipeline_full(str(d / "Broken.sol"), cfg)
+    assert res.findings == []
+    assert res.inconclusive, "a compile failure must be an explicit INCONCLUSIVE verdict"
+    assert any("did not compile" in i for i in res.inconclusive)
+
+
+def test_hunt_report_shouts_inconclusive_loudly() -> None:
+    from web3guard.hunt import HuntResult, render_hunt_markdown
+
+    result = HuntResult(target="x", resolved_path="/tmp/x", started_at="2026-10-02")
+    result.inconclusive.append(
+        "Broken.sol:Broken: the fuzz campaign did not compile. "
+        "No invariant verdict — this target was NOT checked, "
+        "treat it as unknown, not clean."
+    )
+    md = render_hunt_markdown(result)
+    assert "What I could NOT check (1)" in md
+    assert "not a clean bill of health" in md
+    assert "No findings\" does not cover" in md
+    # and the machine-readable report carries it too
+    from web3guard.hunt import hunt_report_dict
+
+    assert hunt_report_dict(result)["hunt"]["inconclusive"] == result.inconclusive
+
+# ---------------------------------------------------------------------------
 # E2E (forge): owner FP gone, tx.origin caught, mined sender reaches role
 # ---------------------------------------------------------------------------
 
@@ -306,3 +476,27 @@ def test_e2e_mined_sender_reaches_hardcoded_role(forge_env: dict) -> None:
     # through the passthrough (sender=0xdEaD) or via the phishing action
     # whose pool sender resolved to it
     assert "0x000000000000000000000000000000000000dEaD" in pocs or "act_phish(" in pocs, pocs[:500]
+
+
+@needs_forge
+def test_e2e_multi_contract_file_compiles_and_bug_caught(forge_env: dict) -> None:
+    """Target 2a: a two-contract file compiles (no silent no-verdict) and
+    the fee bug in the target contract is caught through the real
+    multi-contract deployment (target deploys its own FeeToken)."""
+    from web3guard.invariants.fuzz import run_fuzz_campaign
+    from web3guard.invariants.harness import extract_target_name
+
+    d = Path(tempfile.mkdtemp(prefix="wg-wh-", dir="/tmp"))
+    os.chmod(d, 0o755)
+    bounds = FuzzBounds(runs=64, depth=16, timeout_seconds=240)
+    invs = [_inv("fee-aware",
+                 "target.totalAssets() == target.token().balanceOf(address(target))")]
+    files = render_solidity_project(
+        _MULTI_SRC, extract_target_name(_MULTI_SRC), invs, bounds)
+    notes: list[str] = []
+    campaign, findings = run_fuzz_campaign(
+        d, files, invs, bounds, {}, contract_name="FeeVaultExact", notes=notes)
+    assert campaign.compile_ok, f"multi-contract project must compile: {notes}"
+    by_id = {f.metadata.get("invariant_id") for f in findings}
+    assert "fee-aware" in by_id, (
+        f"expected the fee-accounting bug to be caught, got {sorted(by_id)}")

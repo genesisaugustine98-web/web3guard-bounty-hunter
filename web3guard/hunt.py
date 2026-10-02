@@ -149,6 +149,10 @@ class HuntResult:
     llm_calls: int = 0
     error: str = ""
     report_paths: dict[str, str] = field(default_factory=dict)
+    #: Weakness-hunt round, target 2: explicit "could not check" verdicts
+    #: (compile/render failures in the invariant stage). Rendered loudly in
+    #: the plain-English report — never a silent "no findings".
+    inconclusive: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -246,14 +250,22 @@ def _static_scan(resolved: Path, cfg: dict[str, Any], workdir: Path,
 
 
 def _invariant_stage(resolved: Path, cfg: dict[str, Any],
-                     max_contracts: int) -> tuple[list[Finding], list[str]]:
+                     max_contracts: int) -> tuple[list[Finding], list[str], list[str]]:
+    """Run the invariant pipeline over the target's contracts.
+
+    Returns (findings, notes, inconclusive): ``inconclusive`` carries the
+    weakness-hunt round's explicit "could not check" verdicts (compile /
+    render failures) so they can reach the report loudly instead of
+    reading as a clean "no findings".
+    """
     findings: list[Finding] = []
     notes: list[str] = []
+    inconclusive: list[str] = []
     contracts = _contract_files(resolved, max_contracts)
     if not contracts:
         notes.append("invariant stage: no Solidity/Vyper/Cairo contracts "
                      "found under the target; nothing to fuzz.")
-        return findings, notes
+        return findings, notes, inconclusive
     for contract in contracts:
         run_notes: list[str] = []
         try:
@@ -264,13 +276,18 @@ def _invariant_stage(resolved: Path, cfg: dict[str, Any],
                    "continuing without it.")
             LOGGER.exception(msg)
             notes.append(msg)
+            inconclusive.append(
+                f"{contract.name}: the invariant pipeline crashed ({exc}); "
+                "this contract was NOT checked."
+            )
             continue
         for finding in pipeline_result.findings:
             finding.metadata["hunt_source"] = "invariants"
             findings.append(finding)
         for note in run_notes:
             notes.append(f"{contract.name}: {note}")
-    return findings, notes
+        inconclusive.extend(pipeline_result.inconclusive)
+    return findings, notes, inconclusive
 
 
 # ---------------------------------------------------------------------------
@@ -633,12 +650,15 @@ def run_hunt(
         say("stage 2/5: invariant synthesis + fuzzing")
         stage = HuntStage(name="invariants", ran=True)
         try:
-            inv_findings, inv_notes = _invariant_stage(
+            inv_findings, inv_notes, inv_inconclusive = _invariant_stage(
                 resolved, cfg,
                 int(hunt_cfg.get("max_invariant_contracts", 5) or 5))
             stage.notes.extend(inv_notes)
             stage.findings = len(inv_findings)
             result.ai_findings.extend(inv_findings)
+            # Weakness-hunt round, target 2: "could not check" verdicts are
+            # first-class — they reach the report loudly, never as silence.
+            result.inconclusive.extend(inv_inconclusive)
         except Exception as exc:  # noqa: BLE001
             stage.ran = False
             stage.skipped_reason = f"invariant stage crashed: {exc}"
@@ -953,6 +973,23 @@ def render_hunt_markdown(result: HuntResult) -> str:
         lines.append(f"- Note: {note}")
     lines.append("")
 
+    # -- what could NOT be checked --------------------------------------
+    # Weakness-hunt round, target 2: a compile/render failure anywhere in
+    # the pipeline is an explicit INCONCLUSIVE verdict. It must NEVER read
+    # as a clean "no findings" — this section makes that impossible.
+    if result.inconclusive:
+        lines.append(f"## What I could NOT check ({len(result.inconclusive)})")
+        lines.append("")
+        lines.append("These targets could not be fuzz-tested — usually the "
+                     "test setup failed to compile, which is a problem with "
+                     "the test rig, not proof your code is broken. **A "
+                     "missing check is not a clean bill of health:** treat "
+                     "everything below as unknown, not safe.")
+        lines.append("")
+        for inc in result.inconclusive:
+            lines.append(f"- {inc[:400]}")
+        lines.append("")
+
     # -- findings ------------------------------------------------------
     lines.append(f"## What I found ({len(result.findings)})")
     lines.append("")
@@ -962,6 +999,12 @@ def render_hunt_markdown(result: HuntResult) -> str:
                      "inspectors that could have found something were "
                      "among the skipped ones above — check the skip "
                      "reasons before celebrating.")
+        if result.inconclusive:
+            lines.append("")
+            lines.append("**Important:** the \"What I could NOT check\" "
+                         "section above lists targets that were never "
+                         "actually tested. \"No findings\" does not cover "
+                         "them.")
     order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
     for finding in sorted(result.findings,
                           key=lambda f: order.get(str(f.severity).upper(), 5)):
@@ -1147,6 +1190,7 @@ def hunt_report_dict(result: HuntResult) -> dict[str, Any]:
             "error": result.error,
             "offline_notes": result.offline_notes,
             "notes": result.notes,
+            "inconclusive": result.inconclusive,
             "verification_notes": result.verification_notes,
             "verification_ledger": result.verification_ledger,
         },

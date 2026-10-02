@@ -31,6 +31,7 @@ from web3guard.invariants import templates as _templates
 from web3guard.invariants import vyper_harness as _vyper_harness  # noqa: F401
 from web3guard.invariants.fuzz import (
     discover_forge,
+    extract_compile_errors,
     run_echidna_fallback,
     run_fuzz_campaign,
 )
@@ -41,7 +42,7 @@ from web3guard.invariants.fuzz import (
 from web3guard.invariants.fuzz_cairo import run_cairo_campaign
 from web3guard.invariants.fuzz_vyper import run_vyper_campaign
 from web3guard.invariants.harness import (
-    extract_contract_name,
+    extract_target_name,
     render_project,
     write_project,
 )
@@ -84,7 +85,9 @@ def detect_language(contract_path: Path) -> str:
 def _safe_contract_name(path: Path, language: str, source: str) -> str:
     """Best-effort contract name: Solidity parses its own; others use the file stem."""
     if language == "solidity":
-        return extract_contract_name(source)
+        # Weakness-hunt round, target 2: the deploy-target contract (first
+        # concrete contract), so multi-contract files target the right one.
+        return extract_target_name(source)
     stem = re.sub(r"\W", "_", path.stem) or "Target"
     if stem[0].isdigit():
         stem = "C_" + stem
@@ -216,7 +219,9 @@ def run_invariant_pipeline_full(
 
     # 2. Render the language-specific fuzz project. A ValueError means the
     #    source cannot be turned into a runnable harness (e.g. a Cairo file
-    #    without #[starknet::contract]) — an honest skip, not a crash.
+    #    without #[starknet::contract]).
+    #    Weakness-hunt round, target 2: a render failure is an explicit
+    #    INCONCLUSIVE verdict, never a silent skip.
     bounds = FuzzBounds.from_config(config)
     try:
         if ghost_mode:
@@ -235,6 +240,10 @@ def run_invariant_pipeline_full(
         )
         LOGGER.warning(msg)
         note_sink.append(msg)
+        result.inconclusive.append(
+            f"{label}: no fuzz campaign could be built ({exc}). "
+            "This target was NOT checked — treat it as unknown, not clean."
+        )
         return result
 
     # 3. Fuzz with the language's toolchain (honest skip when missing).
@@ -295,6 +304,17 @@ def run_invariant_pipeline_full(
         )
         result.campaign = campaign
         result.findings.extend(findings)
+        # Weakness-hunt round, target 2: a campaign that did not compile is
+        # an explicit INCONCLUSIVE verdict — it must never read as a clean
+        # "no findings". The hunt report renders this loudly.
+        if campaign is not None and not campaign.skipped and not campaign.compile_ok:
+            err_lines = extract_compile_errors(campaign.raw_stdout)
+            detail = (" " + " | ".join(err_lines)) if err_lines else ""
+            result.inconclusive.append(
+                f"{label}: the fuzz campaign did not compile.{detail} "
+                "No invariant verdict — this target was NOT checked, "
+                "treat it as unknown, not clean."
+            )
     return result
 
 

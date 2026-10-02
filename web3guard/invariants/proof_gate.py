@@ -49,7 +49,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from web3guard.invariants.harness import extract_functions
+from web3guard.invariants.harness import extract_target_functions
 from web3guard.invariants.models import CampaignResult, Invariant
 
 LOGGER = logging.getLogger("web3guard.invariants.proof_gate")
@@ -117,8 +117,13 @@ _FN_RETURN_RE = re.compile(
 
 
 def _known_target_calls(source: str) -> set[str]:
-    """Public-ish function names + public state variable names in ``source``."""
-    names = {sig.name for sig in extract_functions(source)}
+    """Public-ish function names + public state variable names in ``source``.
+
+    Function names are scoped to the deploy-target contract (weakness-hunt
+    round, target 2): a rule referencing an auxiliary contract's function
+    would fail compilation, so it is quarantined here instead.
+    """
+    names = {sig.name for sig in extract_target_functions(source)}
     for m in _PUBLIC_VAR_RE.finditer(source):
         names.add(m.group(1))
     return names

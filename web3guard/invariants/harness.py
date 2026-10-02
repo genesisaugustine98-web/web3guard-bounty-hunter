@@ -49,6 +49,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 from web3guard.invariants import attackers as _attackers
@@ -74,6 +75,149 @@ def extract_contract_name(source: str) -> str:
     """Return the first concrete contract name, defaulting to "Target"."""
     m = _CONTRACT_RE.search(source)
     return m.group(1) if m else "Target"
+
+
+@dataclass
+class ContractBlock:
+    """One top-level contract/interface/library block with its body span."""
+
+    name: str
+    kind: str  # "contract" | "interface" | "library" | "abstract"
+    start: int  # index of the opening brace
+    end: int  # index just past the matching closing brace
+    body: str  # source between the braces
+
+
+_CONTRACT_DEF_RE = re.compile(
+    r"\b(?:(abstract)\s+)?contract\s+(\w+)"
+    r"|\binterface\s+(\w+)"
+    r"|\blibrary\s+(\w+)"
+)
+
+
+def _code_mask(source: str) -> list[bool]:
+    """Mark each character as code (True) vs comment/string (False)."""
+    mask = [True] * len(source)
+    i, n = 0, len(source)
+    while i < n:
+        c = source[i]
+        nxt = source[i + 1] if i + 1 < n else ""
+        if c == "/" and nxt == "/":
+            j = source.find("\n", i)
+            j = n if j == -1 else j
+            for k in range(i, j):
+                mask[k] = False
+            i = j
+        elif c == "/" and nxt == "*":
+            j = source.find("*/", i + 2)
+            j = n if j == -1 else j + 2
+            for k in range(i, j):
+                mask[k] = False
+            i = j
+        elif c in ("\"", "'"):
+            j = i + 1
+            while j < n:
+                if source[j] == "\\":
+                    j += 2
+                    continue
+                if source[j] == c:
+                    j += 1
+                    break
+                j += 1
+            for k in range(i, min(j, n)):
+                mask[k] = False
+            i = j
+        else:
+            i += 1
+    return mask
+
+
+def split_contracts(source: str) -> list[ContractBlock]:
+    """Split source into top-level contract/interface/library blocks.
+
+    Brace matching is comment/string-aware, so braces inside comments or
+    string literals cannot corrupt the spans. Nested definitions are
+    attributed to the outermost block.
+    """
+    mask = _code_mask(source)
+    blocks: list[ContractBlock] = []
+    for m in _CONTRACT_DEF_RE.finditer(source):
+        if not mask[m.start()]:
+            continue
+        if m.group(2) is not None:
+            name, kind = m.group(2), "abstract" if m.group(1) else "contract"
+        elif m.group(3) is not None:
+            name, kind = m.group(3), "interface"
+        else:
+            name, kind = m.group(4), "library"
+        # find the opening brace after the match (skipping inheritance list)
+        i = m.end()
+        depth = 0
+        open_idx = -1
+        while i < len(source):
+            if not mask[i]:
+                i += 1
+                continue
+            if source[i] == "{":
+                open_idx = i
+                depth = 1
+                i += 1
+                break
+            if source[i] == ";":
+                break  # forward declaration / import-ish; no body
+            i += 1
+        if open_idx == -1:
+            continue
+        while i < len(source) and depth > 0:
+            if mask[i]:
+                if source[i] == "{":
+                    depth += 1
+                elif source[i] == "}":
+                    depth -= 1
+            i += 1
+        if depth != 0:
+            continue  # unbalanced; skip rather than misattribute
+        blocks.append(ContractBlock(name, kind, open_idx, i, source[open_idx + 1:i - 1]))
+    return blocks
+
+
+def extract_contract_names(source: str) -> list[str]:
+    """All top-level contract/interface/library names, in source order."""
+    return [b.name for b in split_contracts(source)]
+
+
+def extract_target_name(source: str) -> str:
+    """The contract the harness deploys: first concrete contract.
+
+    Falls back to the first block of any kind, then to "Target". (The
+    legacy :func:`extract_contract_name` returns the first ``contract``
+    keyword match, which may be an un-deployable stub; this is the
+    deployability-aware version.)
+    """
+    blocks = split_contracts(source)
+    for b in blocks:
+        if b.kind == "contract":
+            return b.name
+    if blocks:
+        return blocks[0].name
+    return extract_contract_name(source)
+
+
+def extract_target_functions(source: str) -> list[FunctionSig]:
+    """Function signatures belonging to the deploy-target contract only.
+
+    Weakness-hunt round, target 2: the harness used to wrap EVERY function
+    in the file against the single deployed target, so any multi-contract
+    file failed to compile (and died silently). Only the target's own
+    functions are wrapped now; auxiliary contracts still compile as
+    dependencies of the same source file.
+    """
+    blocks = split_contracts(source)
+    target = extract_target_name(source)
+    for b in blocks:
+        if b.name == target:
+            return extract_functions(b.body)
+    return extract_functions(source)
 
 
 def extract_pragma(source: str) -> str:
@@ -417,7 +561,7 @@ def _render_attack_project(
 ) -> dict[str, str]:
     """Render the attack harness (default): handler + attacker contracts."""
     pragma = extract_pragma(contract_source)
-    functions = extract_functions(contract_source)
+    functions = extract_target_functions(contract_source)
     specs, attacker_notes = _attackers.select_attackers(pragma, functions)
     weights, primary, _planned, _selector = _strategies.plan_campaign(
         contract_source,
