@@ -172,7 +172,7 @@ def parse_forge_output(
     findings: list[Finding] = []
     for fn, sequence in by_inv.items():
         inv = by_fn.get(fn)
-        inv_id = inv.id if inv else fn[len("invariant_"):]
+        inv_id = inv.id if inv else fn[len("invariant_") :]
         bug_class = inv.bug_class if inv else "other"
         severity = inv.severity if inv else "HIGH"
         statement = inv.statement if inv else "violated invariant"
@@ -188,7 +188,7 @@ def parse_forge_output(
             confidence += 0.05
         confidence = min(confidence, 0.95)
 
-        seq_text = "\n".join(f"  {i+1}. {step}" for i, step in enumerate(sequence))
+        seq_text = "\n".join(f"  {i + 1}. {step}" for i, step in enumerate(sequence))
         poc = (
             "# Forge invariant counterexample (machine-checked).\n"
             f"# Reproduce: run this pipeline against {target_label or contract_name}\n"
@@ -197,9 +197,7 @@ def parse_forge_output(
             "# Call sequence that breaks it:\n"
             f"{seq_text if seq_text else '  (forge did not print a call sequence)'}\n"
         )
-        fingerprint = hashlib.sha256(
-            f"{inv_id}:{sequence}".encode()
-        ).hexdigest()[:16]
+        fingerprint = hashlib.sha256(f"{inv_id}:{sequence}".encode()).hexdigest()[:16]
         findings.append(
             Finding(
                 target=target_label or contract_name,
@@ -209,9 +207,7 @@ def parse_forge_output(
                 category="invariant-violation",
                 severity=severity,
                 confidence=confidence,
-                description=(
-                    f"Foundry invariant fuzzing broke '{inv_id}': {statement}"
-                ),
+                description=(f"Foundry invariant fuzzing broke '{inv_id}': {statement}"),
                 reasoning=(
                     f"A bounded fuzz campaign ({campaign.runs} runs, "
                     f"{campaign.calls} calls) found a concrete transaction "
@@ -324,10 +320,26 @@ def run_fuzz_campaign(
 
     label = target_label or contract_name
     LOGGER.info(
-        "starting invariant fuzz campaign for %s: runs=%d depth=%d timeout=%ds (forge=%s)",
-        label, bounds.runs, bounds.depth, bounds.timeout_seconds, forge,
+        "starting invariant fuzz campaign for %s: runs=%d depth=%d timeout=%ds seed=%d (forge=%s)",
+        label,
+        bounds.runs,
+        bounds.depth,
+        bounds.timeout_seconds,
+        bounds.seed,
+        forge,
     )
-    cmd = [forge, "test", "--match-contract", "InvariantTest", "-vv"]
+    # --fuzz-seed: the fixed default campaign seed (FuzzBounds.seed, 1337
+    # unless overridden). Verified against this Foundry build: campaigns
+    # reproduce bit-identically across reruns for a fixed seed.
+    cmd = [
+        forge,
+        "test",
+        "--match-contract",
+        "InvariantTest",
+        "-vv",
+        "--fuzz-seed",
+        str(bounds.seed),
+    ]
     started = time.monotonic()
     try:
         rc, stdout, stderr = run_sandboxed(
@@ -369,12 +381,11 @@ def run_fuzz_campaign(
         target_label=label,
     )
     campaign.elapsed_seconds = elapsed
+    _record_strategy_feedback(files, bounds, findings, campaign)
     if campaign.skipped:
         return campaign, []
     if findings:
-        LOGGER.warning(
-            "invariant fuzzing broke %d invariant(s) for %s", len(findings), label
-        )
+        LOGGER.warning("invariant fuzzing broke %d invariant(s) for %s", len(findings), label)
     else:
         LOGGER.info("invariant fuzzing clean for %s (%.1fs)", label, elapsed)
     if notes is not None and not campaign.compile_ok and not campaign.clean:
@@ -383,6 +394,63 @@ def run_fuzz_campaign(
             "No invariant verdict either way."
         )
     return campaign, findings
+
+
+def _extract_strategy_markers(
+    files: Mapping[str, str],
+) -> tuple[list[str], str]:
+    """Read the WG-STRATEGIES / WG-PRIMARY-STRATEGY markers from the rendered test.
+
+    The attack harness stamps its strategy plan into the test file header;
+    the plain harness has no markers (returns empty).
+    """
+    strategies: list[str] = []
+    primary = ""
+    test_src = files.get("test/Invariant.t.sol", "")
+    for line in test_src.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("// WG-STRATEGIES:"):
+            strategies = [
+                part.strip() for part in stripped.split(":", 1)[1].split(",") if part.strip()
+            ]
+        elif stripped.startswith("// WG-PRIMARY-STRATEGY:"):
+            primary = stripped.split(":", 1)[1].strip()
+    return strategies, primary
+
+
+def _record_strategy_feedback(
+    files: Mapping[str, str],
+    bounds: FuzzBounds,
+    findings: list[Finding],
+    campaign: CampaignResult,
+) -> None:
+    """Fold this campaign's outcome into the adaptive strategy selector.
+
+    Phase 1: the bandit learns which strategies produce evidence. Findings
+    attribute credit to the strategies whose handler actions appear in the
+    PoC call sequence; clean campaigns give every used strategy a small
+    participation reward. Persisted to the strategy state file so the next
+    campaign's render-time pick adapts. Never breaks a campaign.
+    """
+    try:
+        campaign.campaign_seed = bounds.seed
+        strategies_used, primary = _extract_strategy_markers(files)
+        if not strategies_used and primary:
+            strategies_used = [primary]
+        campaign.strategies_used = strategies_used
+        if not strategies_used:
+            return  # plain harness: nothing to learn
+        from web3guard.invariants import strategies as _strategies
+
+        _strategies.record_campaign_outcome(
+            _strategies.resolve_state_path(),
+            strategies_used,
+            [f.poc_code or "" for f in findings],
+            epsilon=bounds.strategy_epsilon,
+            seed=bounds.seed,
+        )
+    except Exception:  # bookkeeping must never break a campaign
+        LOGGER.debug("strategy feedback failed (non-fatal)", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -412,16 +480,24 @@ def run_echidna_fallback(
         return []
     out_file = project_dir / "echidna_report.json"
     cmd = [
-        echidna, str(src),
-        "--contract", contract_name,
-        "--format", "json",
-        "--output", str(out_file),
-        "--test-limit", "10000",
-        "--seq-len", "50",
+        echidna,
+        str(src),
+        "--contract",
+        contract_name,
+        "--format",
+        "json",
+        "--output",
+        str(out_file),
+        "--test-limit",
+        "10000",
+        "--seq-len",
+        "50",
     ]
     try:
         _rc, _stdout, _stderr = run_sandboxed(
-            cmd, cwd=project_dir, timeout=min(timeout, 180),
+            cmd,
+            cwd=project_dir,
+            timeout=min(timeout, 180),
         )
     except (FileNotFoundError, RuntimeError) as exc:
         LOGGER.info("echidna fallback failed (%s); skipping", exc)
@@ -436,7 +512,7 @@ def run_echidna_fallback(
     for issue in data.get("issues", []) or []:
         tx_seq = issue.get("tx_seq", [])
         poc = "# Echidna assertion-mode counterexample\n" + "\n".join(
-            f"  {i+1}. {tx}" for i, tx in enumerate(tx_seq)
+            f"  {i + 1}. {tx}" for i, tx in enumerate(tx_seq)
         )
         findings.append(
             Finding(
@@ -451,9 +527,8 @@ def run_echidna_fallback(
                 status="POTENTIAL",
                 poc_code=poc,
                 exploit_log=json.dumps(issue)[:_MAX_LOG_CHARS],
-                fingerprint="echidna-" + hashlib.sha256(
-                    json.dumps(issue, sort_keys=True).encode()
-                ).hexdigest()[:16],
+                fingerprint="echidna-"
+                + hashlib.sha256(json.dumps(issue, sort_keys=True).encode()).hexdigest()[:16],
                 tool_consensus=["echidna"],
                 dynamically_confirmed=True,
                 metadata={"engine": "echidna", "invariant_source": "assertion-mode"},
