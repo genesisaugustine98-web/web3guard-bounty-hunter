@@ -308,6 +308,247 @@ def addr_expr(hex_addr: str) -> str:
     return f"address(uint160({int(hex_addr, 16)}))"
 
 
+# ---------------------------------------------------------------------------
+# Compromised-key analysis (Fix A: weakness 1's overcorrection)
+# ---------------------------------------------------------------------------
+# The neutral-deployer fix made the harness unable to act as the owner at
+# all — so owner-gated functions became untestable and 8 "compromised owner
+# key" batch cases regressed. The compromised-key leg impersonates the
+# owner ON DEMAND (prank as the neutral deployer) in a separate bounded
+# campaign; these helpers decide when that leg applies and which rules it
+# may assert.
+
+#: Modifiers that conventionally gate a function on the owner key
+#: (matched case-insensitively against the function's header).
+_OWNER_MODIFIERS = frozenset({
+    "onlyowner",
+    "onlyadmin",
+    "onlyadministrator",
+    "onlygovernor",
+    "onlypauser",
+    "onlyminter",
+    "onlyauthority",
+    "onlymanager",
+    "onlyoperator",
+    "onlyguardian",
+    "onlysuperadmin",
+})
+
+_CONSTRUCTOR_RE = re.compile(r"\bconstructor\s*\([^)]*\)[^{;]*\{")
+_INITIALIZER_RE = re.compile(
+    r"\bfunction\s+(?:initialize|init|setup)\s*\([^)]*\)[^{;]*\{"
+)
+#: `<name> = msg.sender` — the deployer-key assignment (constructor or
+#: proxy-style initializer).
+_SENDER_ASSIGN_RE = re.compile(r"\b([A-Za-z_]\w*)\s*=\s*msg\.sender\b")
+#: `require(msg.sender == <role>)` / `assert(msg.sender == <role>)`
+#: (and the reversed `<role> == msg.sender` form).
+_SENDER_CHECK_RES = (
+    re.compile(r"\b(?:require|assert)\s*\(\s*msg\.sender\s*==\s*([A-Za-z_]\w*)"),
+    re.compile(r"\b(?:require|assert)\s*\(\s*([A-Za-z_]\w*)\s*==\s*msg\.sender"),
+    re.compile(
+        r"\bif\s*\(\s*msg\.sender\s*!=\s*([A-Za-z_]\w*)\s*\)\s*revert\b"
+    ),
+    re.compile(
+        r"\bif\s*\(\s*([A-Za-z_]\w*)\s*!=\s*msg\.sender\s*\)\s*revert\b"
+    ),
+)
+
+
+def _brace_span(text: str, open_idx: int, mask: list[bool]) -> tuple[int, int]:
+    """Return (body_start, body_end) for the brace at ``open_idx``.
+
+    ``body_end`` is the index just past the matching close brace;
+    ``(-1, -1)`` when unbalanced.
+    """
+    depth = 0
+    i = open_idx
+    n = len(text)
+    while i < n:
+        if mask[i]:
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    return open_idx + 1, i
+        i += 1
+    return -1, -1
+
+
+def _iter_function_spans(
+    body: str,
+) -> list[tuple[str, str, str]]:
+    """Yield (name, header, fn_body) for each function defined in ``body``.
+
+    Comment/string-aware: braces inside comments or literals cannot corrupt
+    the spans. ``header`` runs from the ``function`` keyword to the opening
+    brace (so modifiers like ``onlyOwner`` are visible); ``fn_body`` is the
+    code between the braces.
+    """
+    mask = _code_mask(body)
+    spans: list[tuple[str, str, str]] = []
+    for m in _FUNC_RE.finditer(body):
+        if not mask[m.start()]:
+            continue
+        i = m.end()
+        n = len(body)
+        while i < n:
+            if mask[i]:
+                if body[i] == "{":
+                    break
+                if body[i] == ";":
+                    break  # declaration without a body (interface/abstract)
+            i += 1
+        if i >= n or body[i] != "{":
+            continue
+        start, end = _brace_span(body, i, mask)
+        if start == -1:
+            continue
+        spans.append((m.group(1), body[m.start():i], body[start:end]))
+    return spans
+
+
+def _owner_roles_in(body: str) -> set[str]:
+    """State-variable names that hold the deployer/owner key.
+
+    A role qualifies when the constructor (or a proxy-style
+    ``initialize``/``init``/``setup`` function) assigns it ``msg.sender`` —
+    the precise "the deployer is this role" signal, not a name guess.
+    """
+    roles: set[str] = set()
+    mask = _code_mask(body)
+    for pattern in (_CONSTRUCTOR_RE, _INITIALIZER_RE):
+        for m in pattern.finditer(body):
+            if not mask[m.start()]:
+                continue
+            start, end = _brace_span(body, m.end() - 1, mask)
+            if start == -1:
+                continue
+            ctor_body = body[start:end]
+            for am in _SENDER_ASSIGN_RE.finditer(ctor_body):
+                roles.add(am.group(1))
+    return roles
+
+
+def detect_owner_gated_functions(
+    source: str,
+    functions: list[FunctionSig] | None = None,
+) -> list[FunctionSig]:
+    """Return the state-changing functions gated on the deployer/owner key.
+
+    A function counts as owner-gated when it is state-changing and either
+
+    - its header carries an owner-style modifier (``onlyOwner`` and kin), or
+    - its body checks ``msg.sender`` against a role the constructor (or a
+      proxy-style initializer) assigned ``msg.sender`` — i.e. the role the
+      neutral deployer impersonates in the compromised-key leg.
+
+    Deliberately NOT matched: ``tx.origin`` gates (those belong to the
+    phishing threat model, tested in the neutral leg) and gates on
+    hardcoded non-deployer addresses (covered by sender mining).
+    """
+    sigs = functions if functions is not None else extract_target_functions(source)
+    target_body = source
+    target = extract_target_name(source)
+    for b in split_contracts(source):
+        if b.name == target:
+            target_body = b.body
+            break
+    roles = _owner_roles_in(target_body)
+    spans = {name: (header, fbody) for name, header, fbody in _iter_function_spans(target_body)}
+    gated: list[FunctionSig] = []
+    for sig in sigs:
+        if not sig.state_changing:
+            continue
+        span = spans.get(sig.name)
+        if span is None:
+            continue
+        header, fbody = span
+        if _header_has_owner_modifier(header):
+            gated.append(sig)
+            continue
+        for rx in _SENDER_CHECK_RES:
+            hit = False
+            for m in rx.finditer(fbody):
+                if m.group(1) in roles:
+                    gated.append(sig)
+                    hit = True
+                    break
+            if hit:
+                break
+    return gated
+
+
+def _header_has_owner_modifier(header: str) -> bool:
+    """True when the function header names an owner-style modifier."""
+    for m in re.finditer(r"\b([A-Za-z_]\w*)\b", header):
+        if m.group(1).lower() in _OWNER_MODIFIERS:
+            return True
+    return False
+
+
+#: Invariant assertions that reference an owner-identity view
+#: (``owner()``, ``deployer()``, ``admin()``, ...). Such rules encode the
+#: benign-owner assumption — "this only changes via the trusted role" —
+#: which is vacuous once the owner key itself is the attacker, so the
+#: compromised-key leg must not assert them.
+_OWNER_IDENTITY_CALL_RE = re.compile(
+    r"\.\s*(owner|deployer|admin|administrator|governor|pauser|minter|"
+    r"authority|manager|operator|guardian|superadmin)\s*\(",
+    re.IGNORECASE,
+)
+
+#: Invariant assertions of the "never changes" shape:
+#: ``target.<view>(...) == <literal>`` (or ``!=``). These encode "this
+#: state never moves from its constant value" — again a benign-owner
+#: assumption: a compromised owner legitimately exercising an owner-gated
+#: setter would break them, manufacturing a false positive.
+_CONSTANT_EQ_RE = re.compile(
+    r"target\.\s*[A-Za-z_]\w*\s*\([^)]*\)\s*(?:==|!=)\s*"
+    r"(?:false|true|0x0+|0+|[0-9][0-9_]*(?:\.[0-9]+)?(?:[eE][0-9]+)?"
+    r"|address\s*\(\s*0\s*\))\b",
+    re.IGNORECASE,
+)
+
+
+def split_compromised_key_invariants(
+    invariants: list[Invariant],
+) -> tuple[list[Invariant], list[tuple[str, str]]]:
+    """Split invariants into (eligible, [(id, reason), ...] excluded).
+
+    The compromised-key leg may only assert invariants that still make
+    sense when the owner is adversarial — consequence bounds like "price
+    can't jump >10%" or "fee can't exceed the cap". Excluded:
+
+    - rules referencing owner-identity views (``owner()``, ``deployer()``,
+      ...): "ownership never changes without the owner" is vacuous when
+      the owner key is compromised (batch_01 ``n5-owner-clean``);
+    - "never changes" equalities (``target.paused() == false``): a
+      compromised owner legitimately pausing would break them
+      (batch_01 ``n7-pausable-clean``).
+
+    Without this split the leg would reintroduce exactly the
+    owner-confusion false alarms the neutral-deployer fix removed.
+    """
+    eligible: list[Invariant] = []
+    excluded: list[tuple[str, str]] = []
+    for inv in invariants:
+        assertion = inv.assertion or ""
+        if _OWNER_IDENTITY_CALL_RE.search(assertion):
+            excluded.append(
+                (inv.id, "references an owner-identity view (benign-owner assumption)")
+            )
+            continue
+        if _CONSTANT_EQ_RE.search(" ".join(assertion.split())):
+            excluded.append(
+                (inv.id, "'never changes' equality (benign-owner assumption)")
+            )
+            continue
+        eligible.append(inv)
+    return eligible, excluded
+
+
 def sender_pool(
     source: str, bounds: FuzzBounds, *, extra: list[str] | None = None,
 ) -> list[str]:
@@ -599,16 +840,78 @@ def _generic_action(fn: FunctionSig) -> str:
     return "\n".join(lines)
 
 
+def _compromised_action(fn: FunctionSig) -> str:
+    """A handler action calling one owner-gated function AS the owner.
+
+    Compromised-key leg (Fix A): deployment stays neutral — the harness
+    is never the owner by accident — but this action impersonates the
+    owner ON DEMAND via ``prank`` as the neutral deployer, for this one
+    call only. Findings from campaigns using these actions are labeled
+    with the compromised-key scenario.
+    """
+    params = ", ".join(f"{t} p{i}" for i, (t, _) in enumerate(fn.params))
+    args = ", ".join(f"p{i}" for i in range(len(fn.params)))
+    sig_params = ", ".join(([params] if params else []) + ["uint256 _wgValue", "uint256 _wgUser"])
+    lines = [f"    function act_ck_{fn.name}({sig_params}) public {{"]
+    lines.append("        // compromised-key scenario: the owner key is held by the")
+    lines.append("        // attacker. Impersonate the owner (the neutral deployer)")
+    lines.append("        // ON DEMAND for this call only.")
+    lines.append("        WGVM.prank(WG_NEUTRAL_DEPLOYER);")
+    if fn.mutability == "payable":
+        lines.append("        uint256 v = _wgCap(_wgValue);")
+        lines.append(f"        target.{fn.name}{{value: v}}({args});")
+    else:
+        lines.append(f"        target.{fn.name}({args});")
+    lines.append("    }")
+    return "\n".join(lines)
+
+
 def _render_attack_project(
     contract_source: str,
     contract_name: str,
     invariants: list[Invariant],
     bounds: FuzzBounds,
+    *,
+    compromised_key: bool = False,
 ) -> dict[str, str]:
-    """Render the attack harness (default): handler + attacker contracts."""
+    """Render the attack harness (default): handler + attacker contracts.
+
+    ``compromised_key=True`` renders the compromised-key leg variant
+    (Fix A): deployment stays neutral, but the handler impersonates the
+    owner ON DEMAND via ``act_ck_*`` actions (prank as the neutral
+    deployer). Only owner-gated functions are wrapped; the external-
+    attacker machinery (heists, donation attacker, phishing, time-warp)
+    is omitted — it belongs to the neutral leg's threat model.
+    """
     pragma = extract_pragma(contract_source)
     functions = extract_target_functions(contract_source)
+    # Compromised-key leg (Fix A): restrict the whole entry space to the
+    # owner-gated functions — the scenario's delta is exactly those calls
+    # made AS the owner. Everything else is already covered by the
+    # neutral leg.
+    ck_gated: list[FunctionSig] = []
+    if compromised_key:
+        ck_gated = [
+            fn
+            for fn in detect_owner_gated_functions(contract_source, functions)
+            if fn.fuzzable
+        ]
+        action_functions = ck_gated
+    else:
+        action_functions = functions
     specs, attacker_notes = _attackers.select_attackers(pragma, functions)
+    # Weakness-hunt round, fix B: scope the donation attacker. A forced ETH
+    # donation breaks exact-equality accounting invariants BY CONSTRUCTION;
+    # on targets with no share-price/mint mechanics that can only
+    # manufacture false positives (batch_01 n1/n2/n9), so the donation
+    # attacker is stood down there. The reentrancy + approval attackers are
+    # unaffected, and the donation attacker stays fully active wherever
+    # share mechanics exist (the ERC-4626 inflation class).
+    deploy_donation, donation_note = _attackers.should_deploy_donation_attacker(
+        contract_source, invariants
+    )
+    if not deploy_donation:
+        specs = [s for s in specs if s.name != "DonationAttacker"]
     weights, primary, _planned, _selector = _strategies.plan_campaign(
         contract_source,
         functions,
@@ -619,13 +922,18 @@ def _render_attack_project(
     vault = _attackers.detect_vault_interface(functions)
     by_name = {fn.name: fn for fn in functions}
     dep_fn = by_name.get(vault.deposit_fn) if vault else None
-    # Canonical ETH-vault shape the scripted attacks can drive: a payable
-    # deposit() taking no arguments plus a withdraw(uint256).
+    # Scripted reentrancy/heist attacks need a payable no-arg deposit to
+    # seed the target plus at least one drivable withdraw variant. Shapes:
+    # withdraw(uint256), bare withdraw(), withdrawTo(address) — and sibling
+    # entries such as withdrawVested() for cross-function reentrancy (each
+    # variant pairs the withdraw with the payable no-arg deposit funding
+    # the balance it reads).
     eth_vault = bool(
         vault is not None
         and dep_fn is not None
         and dep_fn.mutability == "payable"
         and not dep_fn.params
+        and vault.variants
     )
     approve_fn = next(
         (
@@ -642,12 +950,26 @@ def _render_attack_project(
     render_drain = has_drainer and approve_fn is not None
 
     notes: list[str] = list(attacker_notes)
+    # Fix B: the donation-attacker scoping decision is always loud.
+    notes.append(f"donation attacker: {donation_note}")
+    if compromised_key:
+        notes.append(
+            "compromised-key leg (Fix A): deployment stays neutral, but the "
+            "handler impersonates the owner ON DEMAND (prank as the neutral "
+            f"deployer) across {len(ck_gated)} owner-gated function(s): "
+            + (", ".join(fn.name for fn in ck_gated) or "(none)")
+            + ". Findings from this leg are labeled with the "
+            "compromised-key scenario."
+        )
     if vault is not None and not eth_vault:
         notes.append(
             f"vault-like pair ({vault.deposit_sig}, {vault.withdraw_sig}) "
             "detected but the deposit is not a no-arg payable function: "
             "scripted reentrancy/heist actions are disabled for this target"
         )
+    if vault is not None:
+        for s in vault.skipped:
+            notes.append(f"reentrancy variant skipped: {s}")
     if has_drainer and approve_fn is None:
         notes.append(
             "approval drainer deployed but no standard approve(address,uint) "
@@ -690,14 +1012,28 @@ def _render_attack_project(
                     )
             action_fns.append(body)
 
-    for fn in functions:
+    for fn in action_functions:
         if not fn.fuzzable or fn.name in _RESERVED_ACTIONS:
             continue
-        add_action(f"act_{fn.name}", _generic_action(fn))
+        if compromised_key:
+            # Owner-gated functions are called AS the owner (compromised
+            # key); the plain sender-pool actions would all revert here.
+            add_action(f"act_ck_{fn.name}", _compromised_action(fn))
+        else:
+            add_action(f"act_{fn.name}", _generic_action(fn))
 
-    if eth_vault and vault is not None:
-        dep, wd = vault.deposit_fn, vault.withdraw_fn
-        wd_sig = vault.withdraw_sig
+    if eth_vault and vault is not None and not compromised_key:
+        dep = vault.deposit_fn
+        wd, wd_shape = vault.withdraw_fn, vault.withdraw_shape
+        if wd_shape == "amount":
+            wd_cycle_call = f"target.{wd}(w)"
+            wd_cycle_guard = "if (w > 0)"
+        elif wd_shape == "noarg":
+            wd_cycle_call = f"target.{wd}()"
+            wd_cycle_guard = "if (v > 0)"
+        else:  # "to": withdraw to the cycling user itself
+            wd_cycle_call = f"target.{wd}(payable(u))"
+            wd_cycle_guard = "if (v > 0)"
         add_action(
             "act_vaultCycle",
             f"""    // value-heavy: coherent deposit -> (partial) withdraw cycle.
@@ -707,14 +1043,18 @@ def _render_attack_project(
         WGVM.prank(u);
         target.{dep}{{value: v}}();
         uint256 w = (v * (_wgFrac % 101)) / 100;
-        if (w > 0) {{
+        {wd_cycle_guard} {{
             WGVM.prank(u);
-            target.{wd}(w);
+            {wd_cycle_call};
         }}
     }}""",
         )
 
-    if not warp_disabled:
+    # Compromised-key leg (Fix A): the external-attacker machinery below
+    # (time-warp, forced donations, tx.origin phishing, approval drain)
+    # belongs to the neutral leg's threat model and is omitted here —
+    # this leg is the owner key itself, acting on demand.
+    if not warp_disabled and not compromised_key:
         add_action(
             "act_warpTime",
             """    // time-warped: advance the clock / block height, then keep attacking.
@@ -726,17 +1066,22 @@ def _render_attack_project(
     }""",
         )
 
-    add_action(
-        "act_donateForcedEth",
-        """    // value-heavy: force-feed ETH past receive()/fallback via selfdestruct.
+    if not compromised_key:
+        add_action(
+            "act_donateForcedEth",
+            """    // value-heavy: force-feed ETH past receive()/fallback via selfdestruct.
     // Breaks any naive `balance == deposits - withdrawals` accounting.
+    // Fix B: no-op when the donation attacker was scoped out of this
+    // campaign (stood down against exact-equality invariants on targets
+    // with no share mechanics).
     function act_donateForcedEth(uint256 _wgValue) public {
+        if (address(donationAttacker) == address(0)) return;
         _wgFundAttacker(address(donationAttacker), _wgCap(_wgValue));
         if (address(donationAttacker).balance > 0) {
             donationAttacker.donate(payable(address(target)));
         }
     }""",
-    )
+        )
 
     # Phishing action (weakness-hunt round, target 1): the tx.origin threat
     # model. The neutral owner is tricked into interacting with a malicious
@@ -749,11 +1094,12 @@ def _render_attack_project(
     # Weakness-hunt round, target 6: suspicious-first ordering for the
     # deterministic coverage sweep (seed-1337 dilution fix).
     dispatcher_entries = coverage_order(
-        [fn for fn in functions if fn.fuzzable], invariants
+        [fn for fn in action_functions if fn.fuzzable], invariants
     )
-    add_action(
-        "act_phishOrigin",
-        """    // phishing model for tx.origin bugs (see header): msg.sender is a
+    if not compromised_key:
+        add_action(
+            "act_phishOrigin",
+            """    // phishing model for tx.origin bugs (see header): msg.sender is a
     // pool sender, tx.origin is the neutral owner. Clean contracts revert;
     // tx.origin-authed contracts let the call through.
     function act_phishOrigin(uint256 _wgFn, uint256 _wgA, uint256 _wgB, uint256 _wgUser) public {
@@ -762,7 +1108,7 @@ def _render_attack_project(
         _wgCallEntry(_wgFn, u, _wgA, _wgB, _wgUser);
         _wgCoverageStep();
     }""",
-    )
+        )
     dispatcher_src = _render_entry_dispatcher(
         contract_name, dispatcher_entries, via_passthrough=False,
     )
@@ -772,7 +1118,7 @@ def _render_attack_project(
             "sender impersonation: mined from source: " + ", ".join(mined)
         )
 
-    if render_drain and approve_fn is not None:
+    if render_drain and approve_fn is not None and not compromised_key:
         add_action(
             "act_approvalDrain",
             f"""    // attacker-contract: victim approves the drainer, drainer pulls via transferFrom.
@@ -798,30 +1144,56 @@ def _render_attack_project(
         if not warp_disabled else ""
     )
     if eth_vault and vault is not None:
-        dep, wd = vault.deposit_fn, vault.withdraw_fn
-        wd_sig = vault.withdraw_sig
+        dep = vault.deposit_fn
+        variant_blocks: list[str] = []
+        for _v in vault.variants:
+            _vdep, _vwd = _v.deposit_fn, _v.withdraw_fn
+            if _v.withdraw_shape == "amount":
+                _sig, _extra, _trigger = (
+                    f"{_vwd}(uint256)",
+                    ", v",
+                    f"target.{_vwd}(v)",
+                )
+            elif _v.withdraw_shape == "noarg":
+                _sig, _extra, _trigger = f"{_vwd}()", "", f"target.{_vwd}()"
+            else:  # "to": the reentrant call pays the attacker itself
+                _sig, _extra, _trigger = (
+                    f"{_vwd}(address)",
+                    ", address(a)",
+                    f"target.{_vwd}(payable(address(a)))",
+                )
+            variant_blocks.append(
+                f"""        // re-entry variant: {_v.withdraw_sig} (balance funded via {_vdep}).
+        _wgFundAttacker(a, v);
+        reenterAttacker.arm(
+            address(target),
+            abi.encodeWithSignature("{_sig}"{_extra}),
+            3
+        );
+        WGVM.prank(a);
+        target.{_vdep}{{value: v}}();
+        WGVM.prank(a);
+        {_trigger};
+        reenterAttacker.disarm();"""
+            )
+        _variant_src = "\n".join(variant_blocks)
         core_fns.append(
             f"""    // Core reentrancy attack, shared by act_attack_reenter, act_heist and
     // the adaptive bandit. Victim money goes in first (there must be
-    // something to steal), the attacker is funded (ghost-accounted), then
-    // the handler withdraws AS the attacker contract so receive()
-    // re-enters the target mid-call.
+    // something to steal), then EVERY withdraw-like entry point is driven
+    // in turn: the attacker is funded (ghost-accounted), deposits as
+    // itself, and the handler withdraws AS the attacker contract so
+    // receive() re-enters the target mid-call through that same entry.
+    // Driving each entry separately is what catches cross-function
+    // reentrancy (a guarded withdraw() next to an unguarded
+    // withdrawVested()): the guarded variant's reentry reverts harmlessly
+    // while the unguarded one drains.
     function _wgDoReenter(uint256 v, uint256 userSeed) internal {{
         if (address(reenterAttacker) == address(0) || v == 0) return;
         address a = address(reenterAttacker);
         WGVM.prank(_wgPickSender(userSeed));
         target.{dep}{{value: v}}();
-        _wgFundAttacker(a, v);
-        reenterAttacker.arm(
-            address(target),
-            abi.encodeWithSignature("{wd_sig}", v),
-            3
-        );
-        WGVM.prank(a);
-        target.{dep}{{value: v}}();
-        WGVM.prank(a);
-        target.{wd}(v);
-        reenterAttacker.disarm();
+{_variant_src}
     }}
 
     // attacker-contract strategy: single-action reentrancy strike.
@@ -840,7 +1212,10 @@ def _render_attack_project(
         target.{dep}{{value: v}}();
 {_warp_heist}        _wgDoReenter(v, userSeed + 1);
         uint256 dust = v / 100;
-        if (dust > 0 && address(donationAttacker).balance == 0) {{
+        // Fix B: the kicker is inert when the donation attacker was scoped
+        // out of this campaign (address(0) — never fund or call it).
+        if (dust > 0 && address(donationAttacker) != address(0)
+                && address(donationAttacker).balance == 0) {{
             _wgFundAttacker(address(donationAttacker), dust);
             donationAttacker.donate(payable(address(target)));
         }}
@@ -892,10 +1267,18 @@ def _render_attack_project(
     # Neutral deployment: the target is deployed as WG_NEUTRAL_DEPLOYER
     # (pranked in the constructor body, rendered below) so the harness is
     # never the contract's owner. Attacker contracts deploy as the handler
-    # itself, as before.
-    deploy_attackers = [
-        "donationAttacker = new DonationAttacker();",
-    ]
+    # itself, as before. Compromised-key leg: no attacker contracts — the
+    # owner key itself is the threat actor in this leg.
+    deploy_attackers = (
+        [
+            "donationAttacker = new DonationAttacker();",
+        ]
+        # Fix B: the donation attacker is only deployed when the scoping
+        # decision allows it (stood down against exact-equality invariants
+        # on targets with no share mechanics — it can only FP there).
+        if not compromised_key and deploy_donation
+        else []
+    )
     if any(s.name == "ReentrancyAttacker" for s in specs):
         deploy_attackers.append("reenterAttacker = new ReentrancyAttacker();")
     if any(s.name == "ApprovalDrainer" for s in specs):
@@ -922,6 +1305,16 @@ def _render_attack_project(
         f'import "./attackers/{name}.sol";'
         for name in ("DonationAttacker", "ReentrancyAttacker", "ApprovalDrainer")
     )
+
+    # Compromised-key leg (Fix A): the deterministic coverage sweep also
+    # impersonates the owner, so owner-gated entries are covered even when
+    # the fuzzer never picks the compromised action.
+    if compromised_key:
+        _ck_coverage_prank = "        WGVM.prank(WG_NEUTRAL_DEPLOYER);\n"
+        _ck_coverage_sender = "WG_NEUTRAL_DEPLOYER"
+    else:
+        _ck_coverage_prank = ""
+        _ck_coverage_sender = "address(0)"
 
     handler_src = f"""// SPDX-License-Identifier: MIT
 {pragma}
@@ -1043,11 +1436,15 @@ contract AttackHandler {{
     // piggybacked on every action, advances a persistent cursor through
     // the entry points (suspicious-first order) independent of the seed.
     // The _wgCovering guard prevents recursion.
+    // Compromised-key leg (Fix A): the sweep also runs AS the owner, so
+    // owner-gated entries are covered deterministically, not just by the
+    // fuzzer's random action picks.
     function _wgCoverageStep() internal {{
         if (_wgCovering) return;
         if (wgCoverageCursor >= WG_ENTRY_COUNT) return;
         _wgCovering = true;
-        _wgCallEntry(wgCoverageCursor, address(0), wgCoverageCursor, wgCoverageCursor, wgCoverageCursor);
+{_ck_coverage_prank}\
+        _wgCallEntry(wgCoverageCursor, {_ck_coverage_sender}, wgCoverageCursor, wgCoverageCursor, wgCoverageCursor);
         wgCoverageCursor += 1;
         _wgCovering = false;
     }}
@@ -1143,6 +1540,7 @@ def render_solidity_project(
     bounds: FuzzBounds,
     *,
     attack: bool | None = None,
+    compromised_key: bool = False,
 ) -> dict[str, str]:
     """Render a complete Foundry project as {relative_path: content}.
 
@@ -1150,10 +1548,19 @@ def render_solidity_project(
     default, so the pipeline gets the attacking simulator with no changes.
     Pass ``attack=False`` for the legacy plain harness (baselining), or
     ``attack=True`` to force the attack harness.
+
+    ``compromised_key=True`` renders the compromised-key leg variant of
+    the attack harness (Fix A): deployment stays neutral, but the handler
+    impersonates the owner ON DEMAND (prank as the neutral deployer) so
+    owner-gated invariants stay testable. Only meaningful with
+    ``attack=True``.
     """
     use_attack = bounds.attack_enabled if attack is None else bool(attack)
     if use_attack:
-        return _render_attack_project(contract_source, contract_name, invariants, bounds)
+        return _render_attack_project(
+            contract_source, contract_name, invariants, bounds,
+            compromised_key=compromised_key,
+        )
     return _render_plain_project(contract_source, contract_name, invariants, bounds)
 
 

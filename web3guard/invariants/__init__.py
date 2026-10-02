@@ -40,11 +40,13 @@ from web3guard.invariants.fuzz_vyper import (
 # ``render_project("vyper"/"cairo", ...)`` resolve for direct users of
 # this package (the pipeline imports them too, belt and suspenders).
 from web3guard.invariants.harness import (
+    detect_owner_gated_functions,
     extract_contract_name,
     extract_functions,
     register_renderer,
     render_project,
     render_solidity_project,
+    split_compromised_key_invariants,
     write_project,
 )
 from web3guard.invariants.models import (
@@ -80,6 +82,7 @@ __all__ = [
     "PipelineResult",
     "SynthesisResult",
     "detect_language",
+    "detect_owner_gated_functions",
     "discover_cairo_toolchain",
     "discover_forge",
     "discover_vyper_runner",
@@ -97,6 +100,7 @@ __all__ = [
     "run_invariant_pipeline",
     "run_invariant_pipeline_full",
     "run_vyper_campaign",
+    "split_compromised_key_invariants",
     "synthesize_invariants",
     "template_invariants",
     "write_project",

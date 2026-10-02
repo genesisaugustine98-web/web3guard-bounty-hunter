@@ -119,6 +119,13 @@ class FuzzBounds:
     # Lets an operator point the fuzzer at a known privileged address
     # (e.g. a multisig) without editing the contract. Empty by default.
     impersonate_senders: tuple[str, ...] = ()
+    # Fix A (weakness 1's overcorrection): run the compromised-key leg — a
+    # separate bounded campaign where the handler impersonates the owner
+    # ON DEMAND (prank as the neutral deployer), so owner-gated
+    # invariants stay testable without reintroducing owner-confusion
+    # false alarms. ON by default; disable with
+    # ``invariants: {compromised_key_leg: false}``.
+    compromised_key_leg: bool = True
 
     @classmethod
     def from_config(cls, config: Any) -> FuzzBounds:
@@ -158,6 +165,9 @@ class FuzzBounds:
         if "impersonate_senders" in inv_cfg:
             bounds.impersonate_senders = _coerce_address_list(
                 inv_cfg["impersonate_senders"])
+        if "compromised_key_leg" in inv_cfg:
+            bounds.compromised_key_leg = _coerce_bool(
+                inv_cfg["compromised_key_leg"], True)
         return bounds
 
     @property
@@ -212,6 +222,12 @@ class CampaignResult:
     raw_stdout: str = ""
     raw_stderr: str = ""
     engine: str = "foundry-invariant"
+    # Fix D (resource-exhaustion mislabeling): a campaign that dies by
+    # signal (SIGKILL/OOM, exit 137) or by the wall-clock timeout is a
+    # RESOURCE_EXHAUSTED verdict, NEVER "did not compile". resource_detail
+    # names the signal/timeout so the report can say exactly what happened.
+    resource_exhausted: bool = False
+    resource_detail: str = ""
     # Phase 1 (additive): which attack strategies the campaign emphasized,
     # and the campaign seed actually used. Empty for legacy campaigns.
     strategies_used: list[str] = field(default_factory=list)
