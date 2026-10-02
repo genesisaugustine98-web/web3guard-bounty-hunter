@@ -469,6 +469,12 @@ class _FailoverProvider(AIProvider):
         self._inner = inner
         self._clock = clock or time.monotonic
         self.name = inner.name
+        # Forward the inner provider's vendor-specific model (plain
+        # attribute, not a property: the base class declares
+        # preferred_model as a writable attribute).
+        self.preferred_model: str | None = getattr(
+            inner, "preferred_model", None
+        )
         self._backoff_until = 0.0
         self._consec_429 = 0
         self._parked_until = 0.0

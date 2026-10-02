@@ -105,6 +105,13 @@ def _enforce_zero_dollar_providers(config: dict[str, Any]) -> None:
     for p in providers:
         base_url = str(p.get("base_url", "")).lower()
         model = str(p.get("model", "")).lower()
+        # Explicit free-tier attestation (e.g. Gemini via a Google AI
+        # Studio free key) bypasses the host blocklist: the blocklist
+        # targets paid endpoints, and a free-tier key on the same host
+        # costs $0.
+        if p.get("free_tier") is True:
+            kept.append(p)
+            continue
         blocked = any(
             base_url == h or base_url.endswith("." + h) or ("/" + h) in base_url
             or (h.endswith(".com") and base_url.endswith(h))
@@ -252,8 +259,32 @@ def _function_name_at(lines: list[str], line_idx: int) -> str:
 
 DEFAULT_CONFIG: dict[str, Any] = {
     # AI providers (in priority order). The scanner tries them in
-    # sequence and falls through on failure.
+    # sequence and falls through on failure. Each entry pins its own
+    # vendor-specific ``model`` (wired through in _build_ai_client);
+    # the top-level ``model`` key is only a fallback.
     "ai_providers": [
+        {
+            "type": "groq",
+            "name": "groq",
+            "base_url": "https://api.groq.com/openai/v1",
+            "api_key_env": "GROQ_API_KEY",
+            "rpm": 30,
+            "model": "openai/gpt-oss-20b",
+            "supports_seed": True,
+        },
+        {
+            "type": "gemini",
+            "name": "gemini",
+            "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+            "api_key_env": "GEMINI_API_KEY",
+            "rpm": 15,
+            "model": "gemini-2.5-flash",
+            # Gemini's OpenAI-compatible endpoint rejects `seed`.
+            "supports_seed": False,
+            # Google AI Studio free-tier key: $0 (see router's
+            # renewable_free_tier classification).
+            "free_tier": True,
+        },
         {
             "type": "nim",
             "name": "nim-deepseek",
@@ -261,25 +292,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "api_key_env": "NIM_API_KEY",
             "rpm": 35,
             "model": "deepseek-ai/deepseek-v4-flash-0731",
-        },
-        {
-            "type": "openrouter",
-            "name": "openrouter-deepseek",
-            "base_url": "https://openrouter.ai/api/v1",
-            "api_key_env": "OPENROUTER_API_KEY",
-            "rpm": 60,
-            "model": "deepseek/deepseek-chat",
-        },
-        {
-            "type": "groq",
-            "name": "groq-llama",
-            "base_url": "https://api.groq.com/openai/v1",
-            "api_key_env": "GROQ_API_KEY",
-            "rpm": 30,
-            "model": "llama-3.3-70b-versatile",
+            "supports_seed": True,
         },
     ],
-    "model": "deepseek-ai/deepseek-v4-flash-0731",
+    "model": "openai/gpt-oss-20b",
     "max_repair_attempts": 2,
     "max_cost_usd": 50.0,
     "default_seed": 0,
@@ -569,6 +585,12 @@ class Scanner:
                     timeout=float(p.get("timeout", 120.0)),
                     name=p.get("name", p["type"]),
                     use_streaming=bool(p.get("use_streaming", True)),
+                    # Per-provider model pin + seed capability (see
+                    # AIProvider.preferred_model). Without this every
+                    # vendor in the rotation would be called with the
+                    # first vendor's model ID.
+                    supports_seed=bool(p.get("supports_seed", True)),
+                    default_model=p.get("model"),
                 ))
             except Exception as e:  # noqa: BLE001
                 LOGGER.warning("failed to build provider %s: %s", p.get("name"), e)

@@ -374,7 +374,7 @@ def test_program_tiers_have_free_entry():
 
 def test_load_config_default():
     cfg = load_config(None)
-    assert cfg["model"] == "deepseek-ai/deepseek-v4-flash-0731"
+    assert cfg["model"] == "openai/gpt-oss-20b"
     assert cfg["max_cost_usd"] == 50.0
     assert "solidity" in cfg["languages"]
 

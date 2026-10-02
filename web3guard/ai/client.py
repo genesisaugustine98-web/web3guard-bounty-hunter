@@ -237,16 +237,13 @@ class AIClient:
             ChatMessage(role="user", content=user_quarantined),
         ]
         # v3.3: resolve the model for this role (per-role override first).
+        # Each provider may pin its own vendor-specific model ID via
+        # ``preferred_model``; the per-provider call model is resolved
+        # inside the loop below and the response cache is keyed on it,
+        # so a cached answer from one vendor is never served for another.
         model = self._role_models.get(role, self._model)
-        # 3. Cache check
-        key = self._cache_key(messages, model=model, temperature=temperature,
-                              max_tokens=max_tokens, seed=self._seed)
-        cached = self._cache_get(key, model=model)
-        if cached is not None:
-            LOGGER.info("cache hit: %s", key[:12])
-            return cached
 
-        # 4. Walk providers
+        # 3+4. Walk providers (cache check per provider model).
         last_error: ProviderError | None = None
         eligible: list[AIProvider] = []
         for provider in self._providers:
@@ -263,6 +260,14 @@ class AIClient:
             LOGGER.warning("all providers excluded; using full rotation")
             eligible = list(self._providers)
         for provider in eligible:
+            call_model = getattr(provider, "preferred_model", None) or model
+            key = self._cache_key(messages, model=call_model,
+                                  temperature=temperature,
+                                  max_tokens=max_tokens, seed=self._seed)
+            cached = self._cache_get(key, model=call_model)
+            if cached is not None:
+                LOGGER.info("cache hit: %s", key[:12])
+                return cached
             state = self._circuit[provider.name]
             if state.is_open(cooldown=self._cooldown):
                 LOGGER.warning("circuit open for %s, skipping", provider.name)
@@ -271,7 +276,7 @@ class AIClient:
                 try:
                     response = provider.chat(
                         messages,
-                        model=model,
+                        model=call_model,
                         max_tokens=max_tokens,
                         temperature=temperature,
                         seed=self._seed,
@@ -309,7 +314,7 @@ class AIClient:
                     # 6. Record cost
                     self._cost.record(
                         provider=provider.name,
-                        model=response.model or model,
+                        model=response.model or call_model,
                         prompt_tokens=response.prompt_tokens,
                         completion_tokens=response.completion_tokens,
                         role=role,

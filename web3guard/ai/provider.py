@@ -96,6 +96,13 @@ class AIProvider(abc.ABC):
 
     name: str
 
+    # Optional vendor-specific model ID. When set, AIClient calls this
+    # provider with ``preferred_model`` instead of the client's default
+    # model string (which is only valid on the first vendor in the
+    # failover rotation). Wrappers must forward the inner provider's
+    # value.
+    preferred_model: str | None = None
+
     @abc.abstractmethod
     def chat(
         self,
@@ -156,6 +163,7 @@ class OpenAICompatibleProvider(AIProvider):
         name: str = "openai-compatible",
         use_streaming: bool = True,
         supports_seed: bool = True,
+        default_model: str | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key_env = api_key_env
@@ -164,6 +172,8 @@ class OpenAICompatibleProvider(AIProvider):
         self.name = name
         self.use_streaming = use_streaming
         self.supports_seed = supports_seed
+        # Vendor-specific model ID (see AIProvider.preferred_model).
+        self.preferred_model = default_model
         self._last_request_ts: float = 0.0
         # The OpenAI client library is optional; if it's not installed
         # we fall back to raw urllib.
