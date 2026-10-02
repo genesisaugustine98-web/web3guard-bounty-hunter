@@ -12,8 +12,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # Primitive Solidity types the entry-point generator can fuzz.
+# "address payable" is included (weakness-hunt round, target 3): it must
+# survive parameter parsing, or functions like `sweep(address payable to)`
+# become unrenderable.
 _PRIMITIVE_RE = re.compile(
-    r"^(uint(8|16|32|64|128|256)?|int(8|16|32|64|128|256)?|address|bool|bytes32)$"
+    r"^(uint(8|16|32|64|128|256)?|int(8|16|32|64|128|256)?|address(\s+payable)?|bool|bytes32)$"
 )
 
 

@@ -383,6 +383,60 @@ def test_hunt_report_shouts_inconclusive_loudly() -> None:
     assert hunt_report_dict(result)["hunt"]["inconclusive"] == result.inconclusive
 
 # ---------------------------------------------------------------------------
+# Target 3: `payable` preserved in `address payable` parameters
+# ---------------------------------------------------------------------------
+
+_PAYABLE_SRC = """\
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+// batch_01 _C5 shape: sweep(address payable to) used to lose `payable`
+// during parsing -> `target.sweep(p0)` with p0: address -> compile failure.
+contract SweepVault {
+    address public owner;
+    uint256 public feeAccrued;
+    uint256 public sweeps;
+    constructor() { owner = msg.sender; }
+    function fund() external payable { feeAccrued += msg.value; }
+    function sweep(address payable to) external {
+        uint256 amt = feeAccrued;
+        feeAccrued = 0;
+        sweeps += 1;
+        (bool ok, ) = to.call{value: amt}("");
+        require(ok, "send failed");
+    }
+}
+"""
+
+
+def test_extract_functions_preserves_payable() -> None:
+    from web3guard.invariants.harness import extract_functions
+
+    sigs = {s.name: s for s in extract_functions(_PAYABLE_SRC)}
+    assert sigs["sweep"].params == [("address payable", "to")]
+    assert sigs["sweep"].fuzzable
+    assert sigs["fund"].params == []
+    assert sigs["fund"].mutability == "payable"
+
+
+def test_attack_handler_renders_payable_param() -> None:
+    files = render_solidity_project(
+        _PAYABLE_SRC, "SweepVault", [_inv("x", "target.sweeps() >= 0")], FuzzBounds())
+    handler = files["test/AttackHandler.sol"]
+    assert "function act_sweep(address payable p0, uint256 _wgValue, uint256 _wgUser)" in handler
+    assert "target.sweep(p0);" in handler
+
+
+def test_ghost_passthrough_renders_payable_param() -> None:
+    invs = [i for i in tmpl.template_invariants(_PAYABLE_SRC)
+            if i.id in tmpl.GHOST_TEMPLATE_IDS]
+    assert invs
+    files, _notes = tmpl.render_ghost_project(
+        _PAYABLE_SRC, "SweepVault", invs, FuzzBounds())
+    test_src = files["test/Invariant.t.sol"]
+    assert "function sweep(address payable p0, uint256 _wgSender) public" in test_src
+
+
+# ---------------------------------------------------------------------------
 # E2E (forge): owner FP gone, tx.origin caught, mined sender reaches role
 # ---------------------------------------------------------------------------
 
@@ -500,3 +554,12 @@ def test_e2e_multi_contract_file_compiles_and_bug_caught(forge_env: dict) -> Non
     by_id = {f.metadata.get("invariant_id") for f in findings}
     assert "fee-aware" in by_id, (
         f"expected the fee-accounting bug to be caught, got {sorted(by_id)}")
+
+
+@needs_forge
+def test_e2e_payable_param_contract_compiles_and_runs(forge_env: dict) -> None:
+    """Target 3: the batch_01 payable-param regression — the campaign must
+    compile and run instead of dying on `address` vs `address payable`."""
+    res = _run_pipeline(_PAYABLE_SRC, "SweepVault")
+    assert res.campaign is not None and res.campaign.compile_ok
+    assert not res.inconclusive

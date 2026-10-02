@@ -193,3 +193,13 @@ Technical notes: full test suite 735 passed / 4 failed / 16 skipped — all 4 fa
 **Proof it works.** 9 new regression tests, all passing: the file splitter correctly finds both contracts (and isn't fooled by braces inside comments or strings), both engine modes wrap only the target's functions, a deliberately broken contract yields an INCONCLUSIVE verdict instead of a clean report, and the report renders the loud warning section. A live end-to-end run on the exact two-contract shape from the attack test library now compiles and catches the planted fee-accounting bug. Full suite still green; ruff + mypy clean.
 
 **Honest residual risk.** Only the first concrete contract in a file is fuzzed; if a file's *second* contract is the interesting one, it won't be checked (a loud note says which contract was chosen). Truly exotic file layouts (a contract defined inside another contract) may confuse the file splitter — it skips rather than misattributes, and the skip is logged.
+
+## 2026-10-02 — Weakness hunt, fix 3 of 6: `payable` no longer dropped from parameters (plain-language note)
+
+**What was wrong.** When the engine read a contract's functions, it silently dropped the word `payable` from parameters like `sweep(address payable to)`. The generated test then tried to call the function with a plain address where a payable address was required — the test setup failed to compile, and (before fix 2) that failure was silent too.
+
+**What changed.** Parameter parsing now preserves `address payable` as a proper type, and the engine's type checker accepts it as a fuzzable type. Both engine modes (attack and ghost) now render the correct signature and compile.
+
+**Proof it works.** 4 new regression tests, all passing: parsing keeps `("address payable", "to")`, both renderers emit the right signature, and a live forge run on the exact contract shape from the attack test library compiles and runs cleanly. Full suite still green; ruff + mypy clean.
+
+**Honest residual risk.** None significant — this was a pure parsing bug with a complete fix. Exotic parameter types (function types, nested structs) were already out of the fuzzable set and remain skipped with a note.

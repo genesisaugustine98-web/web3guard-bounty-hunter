@@ -243,7 +243,15 @@ def extract_functions(source: str) -> list[FunctionSig]:
                 if not tokens:
                     continue
                 ptype = tokens[0]
-                pname = tokens[1] if len(tokens) > 1 else f"p{i}"
+                # Weakness-hunt round, target 3: preserve `payable` in
+                # `address payable` parameters. Dropping it produced
+                # `target.sweep(p0)` with p0: address against
+                # `sweep(address payable to)` — a compile failure.
+                rest = tokens[1:]
+                if "payable" in rest:
+                    ptype += " payable"
+                    rest = [t for t in rest if t != "payable"]
+                pname = rest[0] if rest else f"p{i}"
                 # strip data-location / calldata keywords leaking into the type
                 ptype = ptype.replace("calldata", "").replace("memory", "").strip()
                 params.append((ptype, re.sub(r"\W", "", pname) or f"p{i}"))
