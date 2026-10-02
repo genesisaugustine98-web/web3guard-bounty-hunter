@@ -93,16 +93,12 @@ def render_text(summary: dict, title: str = "Audit fix history") -> str:
     if not versions:
         return "\n".join(lines + ["No versions were analysed yet."])
 
-    total_fixed = 0
-    total_open = 0
     for version in versions:
         counts = per_version.get(version, {})
         fixed = counts.get("fixed", 0)
         band_aid = counts.get("band_aid", 0)
         still_open = counts.get("still_open", 0)
         regressed = counts.get("regressed", 0)
-        total_fixed += fixed
-        total_open += still_open + band_aid + regressed
         bits = [
             f"{fixed} {_plural(fixed, 'issue')} fully fixed",
             f"{band_aid} patched only on the surface",
@@ -111,17 +107,30 @@ def render_text(summary: dict, title: str = "Audit fix history") -> str:
         ]
         lines.append(f"Version {version}: " + ", ".join(bits) + ".")
 
+    # The bottom line speaks about the *latest* version checked — so it
+    # must count only that version. Summing across versions would report
+    # issues as needing attention even when they were fixed in the
+    # latest version (e.g. STILL OPEN at v1, FIXED at v2).
     lines.append("")
-    if total_fixed and not total_open:
+    latest_counts = per_version.get(versions[-1], {})
+    latest_fixed = latest_counts.get("fixed", 0)
+    latest_open = (
+        latest_counts.get("still_open", 0)
+        + latest_counts.get("band_aid", 0)
+        + latest_counts.get("regressed", 0)
+    )
+    if latest_fixed and not latest_open:
         lines.append(
             "Bottom line: every past issue we tracked is fully fixed in "
             "the latest version we checked."
         )
-    elif total_open:
+    elif latest_open:
+        verb = "needs" if latest_open == 1 else "need"
         lines.append(
-            f"Bottom line: {total_open} {_plural(total_open, 'issue')} still "
-            "need attention in the latest version we checked — either never "
-            "fixed, only patched on the surface, or back after a fix."
+            f"Bottom line: {latest_open} {_plural(latest_open, 'issue')} "
+            f"still {verb} attention in the latest version we checked — "
+            "either never fixed, only patched on the surface, or back "
+            "after a fix."
         )
     else:
         lines.append("Bottom line: no issues were tracked across these versions.")

@@ -805,3 +805,35 @@ def test_adjacent_leads_are_queued_until_resolved(tmp_path: Path) -> None:
     assert len(queue.unresolved()) == 1
     queue.resolve(added[0].id, "checked, clean", outcome=RESOLVED_FIXED)
     assert queue.unresolved() == []
+
+
+def test_sync_from_history_uses_finding_title_for_queued_items(
+    tmp_path: Path,
+) -> None:
+    """Queued band-aid/regressed items should carry the finding's human
+    title — regression: sync_from_history called add_from_verdicts
+    without the finding, so queue items were titled with the raw
+    finding id (e.g. 'H-01') instead of 'Reentrancy in withdraw...'.
+    The still-open item already used the real title."""
+    queue = RediveQueue(tmp_path / "q.json")
+    finding = _finding()  # id H-01, title "Reentrancy in withdraw drains the vault"
+    verdicts = [
+        VersionVerdict("H-01", "v1", STILL_OPEN, "high", ["e1"]),
+        VersionVerdict("H-01", "v2", BAND_AID, "high", ["e2"]),
+    ]
+    added = queue.sync_from_history("H-01", verdicts, finding)
+    assert len(added) == 1
+    assert added[0].title == finding.title
+    assert added[0].finding_id == "H-01"
+
+
+def test_sync_from_history_without_finding_falls_back_to_id(
+    tmp_path: Path,
+) -> None:
+    """When no finding object is supplied, the finding id stays the
+    title (documented fallback — nothing to crash on)."""
+    queue = RediveQueue(tmp_path / "q.json")
+    verdicts = [VersionVerdict("H-42", "v2", BAND_AID, "high", ["e2"])]
+    added = queue.sync_from_history("H-42", verdicts, None)
+    assert len(added) == 1
+    assert added[0].title == "H-42"

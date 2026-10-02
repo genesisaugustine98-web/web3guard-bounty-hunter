@@ -374,7 +374,12 @@ class RediveQueue:
         Idempotent: re-running never duplicates or drops items.
         """
         mine = [v for v in verdicts if v.finding_id == finding_id]
-        added = self.add_from_verdicts(mine)
+        # Pass the finding through so queued band-aid/regressed items
+        # carry the human-readable title (not the raw finding id) —
+        # add_from_verdicts falls back to the id when no finding is given.
+        added = self.add_from_verdicts(
+            mine, {finding_id: finding} if finding is not None else None
+        )
         title = finding.title if finding else finding_id
         severity = str(finding.severity).lower() if finding else ""
 

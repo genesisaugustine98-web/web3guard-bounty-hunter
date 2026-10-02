@@ -426,3 +426,38 @@ def test_queue_default_path_follows_repo_convention(tmp_path: Path) -> None:
     from web3guard.history.redive import default_queue_path
 
     assert default_queue_path(tmp_path) == tmp_path / ".web3guard" / "redive_queue.json"
+
+
+def test_render_text_bottom_line_reflects_latest_version_only() -> None:
+    """The bottom line claims the state of *the latest version checked* —
+    it must not count issues that were fixed in it. Regression: the old
+    code summed open issues across ALL versions, so STILL OPEN at v1
+    with FIXED at v2 still warned about the issue 'in the latest
+    version'."""
+    from web3guard.history.report import render_text, summarize_verdicts
+    from web3guard.history.verdicts import FIXED, STILL_OPEN, VersionVerdict
+
+    verdicts = [
+        VersionVerdict("H-01", "v1.0", STILL_OPEN, "high", ["bad"]),
+        VersionVerdict("H-01", "v2.0", FIXED, "high", ["fixed"]),
+    ]
+    text = render_text(summarize_verdicts(verdicts, ["v1.0", "v2.0"]))
+    assert "every past issue we tracked is fully fixed" in text
+    assert "still need attention" not in text and "still needs attention" not in text
+
+
+def test_render_text_bottom_line_uses_latest_open_issue() -> None:
+    """An issue open in the latest version still surfaces in the bottom
+    line (the fix must not swing the other way and hide it)."""
+    from web3guard.history.report import render_text, summarize_verdicts
+    from web3guard.history.verdicts import BAND_AID, FIXED, STILL_OPEN, VersionVerdict
+
+    verdicts = [
+        VersionVerdict("H-01", "v1.0", STILL_OPEN, "high", ["bad"]),
+        VersionVerdict("H-01", "v2.0", FIXED, "high", ["fixed"]),
+        VersionVerdict("H-02", "v2.0", BAND_AID, "medium", ["surface"]),
+    ]
+    text = render_text(summarize_verdicts(verdicts, ["v1.0", "v2.0"]))
+    assert "1 issue still needs attention" in text
+    # The per-version lines keep the historical totals intact.
+    assert "Version v1.0: 0 issues fully fixed" in text
