@@ -183,9 +183,37 @@ def test_detect_vault_interface_finds_deposit_withdraw_pair() -> None:
     )
 
 
-def test_detect_vault_interface_rejects_unattackable_shapes() -> None:
-    # withdraw with no amount param: not drivable by the attacker
+def test_detect_vault_interface_supports_noarg_and_to_shapes() -> None:
+    # bare withdraw(): now a drivable "noarg" shape (was rejected before)
     fns = [FunctionSig("deposit", [], "payable"), FunctionSig("withdraw", [], "")]
+    v = attackers_mod.detect_vault_interface(fns)
+    assert v is not None
+    assert (v.withdraw_fn, v.withdraw_sig, v.withdraw_shape) == (
+        "withdraw",
+        "withdraw()",
+        "noarg",
+    )
+    assert len(v.variants) == 1 and v.variants[0].deposit_fn == "deposit"
+    # withdrawTo(address): now a drivable "to" shape
+    fns2 = [
+        FunctionSig("deposit", [], "payable"),
+        FunctionSig("withdrawTo", [("address payable", "to")], ""),
+    ]
+    v2 = attackers_mod.detect_vault_interface(fns2)
+    assert v2 is not None
+    assert (v2.withdraw_fn, v2.withdraw_sig, v2.withdraw_shape) == (
+        "withdrawTo",
+        "withdrawTo(address)",
+        "to",
+    )
+
+
+def test_detect_vault_interface_rejects_unattackable_shapes() -> None:
+    # withdraw with two params: not drivable by the attacker
+    fns = [
+        FunctionSig("deposit", [], "payable"),
+        FunctionSig("withdraw", [("uint256", "a"), ("uint256", "b")], ""),
+    ]
     assert attackers_mod.detect_vault_interface(fns) is None
     # no pair at all
     assert (
@@ -195,6 +223,24 @@ def test_detect_vault_interface_rejects_unattackable_shapes() -> None:
     fns2 = [FunctionSig("stake", [], "payable"), FunctionSig("unstake", [("uint256", "a")], "")]
     v2 = attackers_mod.detect_vault_interface(fns2)
     assert v2 is not None and v2.deposit_fn == "stake"
+
+
+def test_detect_vault_interface_pairs_cross_function_variants() -> None:
+    # Guard-gap shape: guarded withdraw() next to unguarded withdrawVested()
+    # funded by depositVested(). Both become re-entry variants.
+    fns = [
+        FunctionSig("deposit", [], "payable"),
+        FunctionSig("depositVested", [], "payable"),
+        FunctionSig("withdraw", [], ""),
+        FunctionSig("withdrawVested", [], ""),
+    ]
+    v = attackers_mod.detect_vault_interface(fns)
+    assert v is not None
+    by_fn = {x.withdraw_fn: x for x in v.variants}
+    assert set(by_fn) == {"withdraw", "withdrawVested"}
+    assert by_fn["withdraw"].deposit_fn == "deposit"
+    assert by_fn["withdrawVested"].deposit_fn == "depositVested"
+    assert all(x.withdraw_shape == "noarg" for x in v.variants)
 
 
 def test_select_attackers_deploys_reentrancy_for_vault() -> None:

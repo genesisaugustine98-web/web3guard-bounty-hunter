@@ -17,7 +17,9 @@ loud skip with a note, never an exception escaping to the caller.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
+import os
 import re
 import tempfile
 from collections.abc import Mapping
@@ -42,8 +44,11 @@ from web3guard.invariants.fuzz import (
 from web3guard.invariants.fuzz_cairo import run_cairo_campaign
 from web3guard.invariants.fuzz_vyper import run_vyper_campaign
 from web3guard.invariants.harness import (
+    detect_owner_gated_functions,
     extract_target_name,
     render_project,
+    render_solidity_project,
+    split_compromised_key_invariants,
     write_project,
 )
 from web3guard.invariants.models import (
@@ -269,6 +274,32 @@ def run_invariant_pipeline_full(
                 contract_path=str(path), contract_name=contract_name,
                 target_label=label, notes=note_sink,
             )
+            # Compromised-key leg (Fix A): a separate bounded campaign
+            # where the handler impersonates the owner ON DEMAND. The
+            # neutral leg stays default (no owner-confusion false alarms);
+            # this leg only asserts invariants that make sense with an
+            # adversarial owner, and labels its findings with the
+            # scenario. Runs for both the attack harness and the ghost
+            # harness (ghost targets get a compromised-key ghost leg).
+            _ck_campaign, ck_findings = _run_compromised_key_leg(
+                source=source,
+                contract_name=contract_name,
+                invariants=invariants,
+                bounds=bounds,
+                config=config,
+                parent_dir=project_dir,
+                contract_path=str(path),
+                target_label=label,
+                notes=note_sink,
+                ghost_mode=ghost_mode,
+                skip_invariant_ids={
+                    str(f.metadata.get("invariant_id"))
+                    for f in findings
+                    if isinstance(getattr(f, "metadata", None), dict)
+                    and f.metadata.get("invariant_id") is not None
+                },
+            )
+            findings.extend(ck_findings)
         # Phase 3 proof gate, stage 2: no rule becomes a finding without
         # machine proof. Also detect rules that were already false at
         # deployment (bad RULE, not a bug) and quarantine them instead of
@@ -307,15 +338,196 @@ def run_invariant_pipeline_full(
         # Weakness-hunt round, target 2: a campaign that did not compile is
         # an explicit INCONCLUSIVE verdict — it must never read as a clean
         # "no findings". The hunt report renders this loudly.
+        # Fix D: verdict labels are provable-or-absent. A signal/OOM/timeout
+        # kill is RESOURCE_EXHAUSTED (never "did not compile"); "did not
+        # compile" requires actual compiler-error lines in the output;
+        # anything else unparseable is an honest unknown-cause verdict.
         if campaign is not None and not campaign.skipped and not campaign.compile_ok:
-            err_lines = extract_compile_errors(campaign.raw_stdout)
-            detail = (" " + " | ".join(err_lines)) if err_lines else ""
-            result.inconclusive.append(
-                f"{label}: the fuzz campaign did not compile.{detail} "
-                "No invariant verdict — this target was NOT checked, "
-                "treat it as unknown, not clean."
-            )
+            if campaign.resource_exhausted:
+                result.inconclusive.append(
+                    f"{label}: RESOURCE_EXHAUSTED "
+                    f"({campaign.resource_detail or 'resource limit hit'}). "
+                    "No invariant verdict — this target was NOT checked, "
+                    "treat it as unknown, not clean."
+                )
+            else:
+                err_lines = extract_compile_errors(campaign.raw_stdout)
+                if err_lines:
+                    detail = (" " + " | ".join(err_lines)) if err_lines else ""
+                    result.inconclusive.append(
+                        f"{label}: the fuzz campaign did not compile.{detail} "
+                        "No invariant verdict — this target was NOT checked, "
+                        "treat it as unknown, not clean."
+                    )
+                else:
+                    result.inconclusive.append(
+                        f"{label}: the fuzz campaign ended with no parseable "
+                        "suite result and no compiler errors in the output "
+                        "(cause unknown — NOT a proven compile failure). "
+                        "No invariant verdict — this target was NOT checked, "
+                        "treat it as unknown, not clean."
+                    )
     return result
+
+
+def _tag_compromised_key_finding(finding: Finding) -> None:
+    """Label a finding as produced by the compromised-key leg.
+
+    The description/reasoning carry the scenario so reports attribute the
+    finding correctly: it proves the bug is reachable by the OWNER key, a
+    strictly stronger claim than "reachable by some sender".
+    """
+    meta = finding.metadata
+    if isinstance(meta, dict):
+        meta["scenario"] = "compromised-key"
+        consensus = finding.tool_consensus
+        if isinstance(consensus, list) and "compromised-key" not in consensus:
+            consensus.append("compromised-key")
+    finding.description = "[compromised-key scenario] " + finding.description
+    finding.reasoning = (
+        "Compromised-key leg: the harness impersonated the contract owner "
+        "(deployer key) on demand while deployment stayed neutral. This "
+        "finding proves the violation is reachable by the OWNER key itself. "
+    ) + finding.reasoning
+
+
+def _run_compromised_key_leg(
+    *,
+    source: str,
+    contract_name: str,
+    invariants: list[Invariant],
+    bounds: FuzzBounds,
+    config: Mapping[str, Any] | None,
+    parent_dir: Path,
+    contract_path: str,
+    target_label: str,
+    notes: list[str] | None,
+    skip_invariant_ids: set[str],
+    ghost_mode: bool = False,
+) -> tuple[CampaignResult | None, list[Finding]]:
+    """Run the compromised-key leg (Fix A).
+
+    A separate BOUNDED campaign (capped runs/timeout) where the handler
+    impersonates the owner ON DEMAND (prank as the neutral deployer).
+    Deployment stays neutral — the neutral leg's owner-confusion fix is
+    untouched. Only invariants that make sense with an adversarial owner
+    are asserted (see :func:`split_compromised_key_invariants`), and
+    invariants the neutral leg already broke are skipped (no duplicates).
+
+    ``ghost_mode`` selects the ghost-harness renderer (owner-gated
+    passthroughs prank as the owner; attacker contracts, attack actions,
+    and phishing disabled) instead of the attack harness.
+
+    Returns ``(None, [])`` when the leg does not apply: no owner-gated
+    functions, no eligible invariants, attacks disabled, or the operator
+    turned the leg off. Never raises — worst case is a note.
+    """
+    if not bounds.compromised_key_leg:
+        return None, []
+    if not bounds.attack_enabled:
+        return None, []
+    try:
+        gated = detect_owner_gated_functions(source)
+        if not gated:
+            return None, []
+        eligible, excluded = split_compromised_key_invariants(invariants)
+        leg_invariants = [
+            inv for inv in eligible if inv.id not in skip_invariant_ids
+        ]
+        if not leg_invariants:
+            return None, []
+        if notes is not None:
+            notes.append(
+                f"compromised-key leg for {target_label}: {len(gated)} "
+                f"owner-gated function(s) ({', '.join(f.name for f in gated)}); "
+                f"asserting {len(leg_invariants)} invariant(s) that hold "
+                "against an adversarial owner"
+                + (
+                    f"; {len(excluded)} rule(s) excluded as benign-owner "
+                    "assumptions"
+                    if excluded
+                    else ""
+                )
+                + "."
+            )
+        # Bounded leg: the scenario's delta is a single privileged call per
+        # function, so a fraction of the main budget suffices.
+        leg_bounds = dataclasses.replace(
+            bounds,
+            runs=min(bounds.runs, 64),
+            timeout_seconds=min(bounds.timeout_seconds, 120),
+        )
+        if ghost_mode:
+            files, _ck_render_notes = _templates.render_ghost_project(
+                source,
+                contract_name,
+                leg_invariants,
+                leg_bounds,
+                attack=False,
+                compromised_key=True,
+            )
+            if notes is not None:
+                notes.extend(_ck_render_notes)
+        else:
+            files = render_solidity_project(
+                source,
+                contract_name,
+                leg_invariants,
+                leg_bounds,
+                attack=True,
+                compromised_key=True,
+            )
+        leg_dir = parent_dir / "compromised_key"
+        leg_dir.mkdir(exist_ok=True)
+        # The sandboxed forge child drops to ``nobody``: like
+        # _prepare_project_dir, the (ephemeral) parent tree must be
+        # traversable. The neutral leg's project dir is already opened up;
+        # this covers direct/test callers with a 0700 parent.
+        try:
+            os.chmod(parent_dir, 0o777)
+        except OSError:
+            pass
+        campaign, findings = run_fuzz_campaign(
+            leg_dir,
+            files,
+            leg_invariants,
+            leg_bounds,
+            config,
+            contract_path=contract_path,
+            contract_name=contract_name,
+            target_label=target_label + " [compromised-key]",
+            notes=notes,
+        )
+        if campaign is not None and not campaign.skipped:
+            baseline_ids = set(
+                _proof_gate.extract_baseline_failures(
+                    campaign.raw_stdout, leg_invariants
+                )
+            )
+            if baseline_ids:
+                if notes is not None:
+                    notes.append(
+                        "compromised-key leg: "
+                        f"{len(baseline_ids)} rule(s) already false at "
+                        "deployment — quarantined, not emitted as findings."
+                    )
+                findings = [
+                    f
+                    for f in findings
+                    if not (
+                        isinstance(getattr(f, "metadata", None), dict)
+                        and f.metadata.get("invariant_id") in baseline_ids
+                    )
+                ]
+        for finding in findings:
+            _tag_compromised_key_finding(finding)
+        return campaign, findings
+    except Exception as exc:  # noqa: BLE001 - the scan must survive us
+        msg = f"compromised-key leg failed ({exc}); continuing without it."
+        LOGGER.warning(msg)
+        if notes is not None:
+            notes.append(msg)
+        return None, []
 
 
 def _run_solidity_campaign(

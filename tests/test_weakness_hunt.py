@@ -534,9 +534,10 @@ def test_e2e_mined_sender_reaches_hardcoded_role(forge_env: dict) -> None:
     assert by_id, "expected the unbacked-mint invariant to break"
     pocs = " ".join((f.poc_code or "") for f in res.findings)
     # the fuzzer called mint() AS the hardcoded pauser: either directly
-    # through the passthrough (sender=0xdEaD) or via the phishing action
+    # through the passthrough (sender=0xdEaD, resolved from the sender
+    # seed through the handler's pool) or via the phishing action
     # whose pool sender resolved to it
-    assert "0x000000000000000000000000000000000000dEaD" in pocs or "act_phish(" in pocs, pocs[:500]
+    assert "0x000000000000000000000000000000000000dead" in pocs.lower() or "act_phish(" in pocs, pocs[:500]
 
 
 @needs_forge

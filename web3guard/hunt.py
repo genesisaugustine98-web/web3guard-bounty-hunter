@@ -980,11 +980,12 @@ def render_hunt_markdown(result: HuntResult) -> str:
     if result.inconclusive:
         lines.append(f"## What I could NOT check ({len(result.inconclusive)})")
         lines.append("")
-        lines.append("These targets could not be fuzz-tested — usually the "
-                     "test setup failed to compile, which is a problem with "
-                     "the test rig, not proof your code is broken. **A "
-                     "missing check is not a clean bill of health:** treat "
-                     "everything below as unknown, not safe.")
+        lines.append("These targets could not be fuzz-tested — each note below "
+                     "names the reason: a compile failure, a resource kill "
+                     "(RESOURCE_EXHAUSTED), or an unknown cause. This is a "
+                     "problem with the test rig, not proof your code is "
+                     "broken. **A missing check is not a clean bill of "
+                     "health:** treat everything below as unknown, not safe.")
         lines.append("")
         for inc in result.inconclusive:
             lines.append(f"- {inc[:400]}")

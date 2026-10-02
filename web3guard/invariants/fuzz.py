@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -31,7 +32,7 @@ from typing import Any
 from web3guard.invariants.harness import write_project
 from web3guard.invariants.models import CampaignResult, FuzzBounds, Invariant
 from web3guard.scanner import Finding
-from web3guard.security.sandbox_guard import run_sandboxed
+from web3guard.security.sandbox_guard import SandboxPolicy, run_sandboxed
 
 LOGGER = logging.getLogger("web3guard.invariants.fuzz")
 
@@ -67,6 +68,15 @@ _COMPILE_FAIL_RES = (
 
 _MAX_LOG_CHARS = 6000
 
+#: Fix C (weakness-hunt round, target 3): the sandbox truncates campaign
+#: stdout/stderr at 8 KiB (head+tail), which used to destroy the
+#: human-readable [FAIL] blocks sitting in the middle of the output while
+#: the machine-readable JSON failure events at the END of stderr survived.
+#: Campaign output gets a higher truncation floor so the [FAIL] blocks and
+#: their call sequences usually survive intact too. The JSON events remain
+#: the primary (truncation-proof) signal regardless.
+_CAMPAIGN_OUTPUT_CAP_BYTES = 65536
+
 #: Lines worth surfacing when a campaign fails to compile (weakness-hunt
 #: round, target 2: silence about compile failures is the worst failure
 #: mode — these lines make the INCONCLUSIVE verdict specific).
@@ -89,6 +99,81 @@ def extract_compile_errors(output: str, *, limit: int = 5) -> list[str]:
         if len(errors) >= limit:
             break
     return errors
+
+
+# ---------------------------------------------------------------------------
+# resource-exhaustion verdicts (Fix D)
+# ---------------------------------------------------------------------------
+# A campaign that dies by signal (SIGKILL/OOM -> exit 137 in shell
+# convention, -9 in Python's Popen convention) or by the wall-clock timeout
+# must NEVER be labeled "did not compile". classify_process_kill() names the
+# cause; runners turn it into a RESOURCE_EXHAUSTED verdict with the
+# signal/timeout named. "Did not compile" requires actual compiler-failure
+# evidence (see extract_compile_errors) — provable or absent.
+
+#: Shell exit-code convention for signal deaths: 128 + signo.
+_SHELL_SIGNAL_EXIT = {128 + 9: "SIGKILL", 128 + 15: "SIGTERM"}
+
+#: stderr markers left behind by the OOM killer / a dying allocator.
+_OOM_MARKERS = (
+    "out of memory",
+    "memory exhausted",
+    "cannot allocate memory",
+    "killed process",
+)
+
+
+def classify_process_kill(
+    rc: int | None,
+    stdout: str | None = "",
+    stderr: str | None = "",
+) -> str | None:
+    """Name the resource-exhaustion cause when a campaign process died badly.
+
+    Returns a human-readable cause (e.g. ``"SIGKILL (shell exit 137) —
+    likely killed by the OOM killer or the sandbox memory ceiling"``) or
+    ``None`` when the exit looks unrelated to resource exhaustion (normal
+    exits, nonzero-but-parsed forge failures, and the 124 timeout which the
+    runners handle with their own message).
+    """
+    if rc is None or rc == 124:
+        return None
+    if rc == 0:
+        return None
+    detail: str | None = None
+    if rc < 0:
+        # Python's Popen convention: negative == killed by signal -rc.
+        signo = -rc
+        try:
+            name = signal.Signals(signo).name
+        except ValueError:
+            name = f"SIG{signo}"
+        detail = f"{name} (killed by signal {signo})"
+        if signo == signal.SIGKILL:
+            detail += (
+                " — likely the OOM killer or the sandbox memory ceiling "
+                "(shells report this as exit 137)"
+            )
+        elif signo == signal.SIGXCPU:
+            detail += " — CPU time limit (RLIMIT_CPU) hit"
+        elif signo == signal.SIGXFSZ:
+            detail += " — file-size limit (RLIMIT_FSIZE) hit"
+    elif rc in _SHELL_SIGNAL_EXIT:
+        # Some launchers report 128+signo instead of Python's negative rc.
+        name = _SHELL_SIGNAL_EXIT[rc]
+        detail = f"{name} (shell exit {rc})"
+        if rc == 137:
+            detail += " — likely the OOM killer or the sandbox memory ceiling"
+    if detail is None:
+        # No signal evidence: only OOM-marker text can still implicate
+        # resource exhaustion (e.g. the allocator died but the rc is odd).
+        haystack = f"{stderr or ''}\n{stdout or ''}".lower()
+        if any(marker in haystack for marker in _OOM_MARKERS):
+            detail = (
+                "process output reports memory exhaustion "
+                f"(exit code {rc}) — likely OOM-killed"
+            )
+    return detail
 
 
 def _sanitized_invariant_fn(inv_id: str) -> str:
@@ -139,6 +224,164 @@ def _extract_failure_blocks(output: str) -> list[dict[str, Any]]:
     return blocks
 
 
+def parse_forge_json_events(text: str) -> list[dict[str, Any]]:
+    """Extract forge's NDJSON invariant-failure events from campaign output.
+
+    Forge (1.x) prints one JSON object per line on stderr for every
+    invariant it breaks, even in plain text mode (no ``--json`` flag)::
+        {"timestamp":...,"event":"failure","invariant":"invariant_foo",
+         "target":"test/Invariant.t.sol:InvariantTest","reason":"..."}
+
+    These events are the truncation-proof PRIMARY signal (Fix C): they are
+    emitted at the very END of stderr, so they survive the sandbox's
+    head+tail output truncation even when the human-readable ``[FAIL]``
+    block in the middle of stdout is destroyed. A named invariant failure
+    here is a machine-checked catch — forge only emits the event after
+    fuzzing actually found a violating call sequence. Rules that are false
+    at deployment produce ``failed to set up invariant testing
+    environment`` and NO failure event (verified against forge
+    1.6.0-nightly), so an event can never be a false-at-deployment
+    artifact.
+    """
+    events: list[dict[str, Any]] = []
+    if not text:
+        return events
+    for line in text.splitlines():
+        s = line.strip()
+        # Event lines are tiny (~200 bytes). Skip anything huge without
+        # attempting a parse (e.g. a --json suite blob is one giant line).
+        if len(s) < 2 or len(s) > 8192 or not s.startswith("{"):
+            continue
+        if '"event"' not in s or '"invariant"' not in s:
+            continue
+        try:
+            obj = json.loads(s)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if (
+            isinstance(obj, dict)
+            and obj.get("event") == "failure"
+            and isinstance(obj.get("invariant"), str)
+            and obj["invariant"]
+        ):
+            events.append(obj)
+    return events
+
+
+_POOL_PUSH_RE = re.compile(r"wgSenderPool\.push\(([^;]+)\);")
+_UINT160_RE = re.compile(r"address\(uint160\((0x[0-9a-fA-F]+|\d+)\)\)")
+_PASSTHROUGH_RE = re.compile(r"function (\w+)\([^)]*uint256 _wgSender\)")
+_STEP_CALLDATA_RE = re.compile(r"calldata=(\w+)\(")
+_STEP_ARGS_RE = re.compile(r"args=\[(.*)\]\s*$")
+
+
+def _extract_sender_pool(test_source: str) -> list[str]:
+    """Extract the handler's sender pool in push order.
+
+    The ghost/attack handler resolves a fuzzer-chosen sender seed via
+    ``wgSenderPool[seed % len]`` and pranks as that address — so forge's
+    ``sender=`` field shows the outer EOA, NOT the address the target
+    actually saw. Resolving the seed through the pool (rendered into
+    ``test/Invariant.t.sol``) reveals the true caller for PoC honesty.
+    ``address(uint160(N))`` entries become lowercase hex; anything else
+    (``address(this)``, contract variables) is kept verbatim as a marker.
+    """
+    pool: list[str] = []
+    for m in _POOL_PUSH_RE.finditer(test_source or ""):
+        expr = m.group(1).strip()
+        um = _UINT160_RE.fullmatch(expr)
+        if um:
+            raw = um.group(1)
+            pool.append("0x" + format(int(raw, 16 if raw.startswith("0x") else 10), "040x"))
+        else:
+            pool.append(expr)
+    return pool
+
+
+def _extract_passthrough_names(test_source: str) -> set[str]:
+    """Names of handler functions taking a trailing sender seed.
+
+    Passthroughs (one per target function, plus a ``uint256 _wgSender``
+    seed) pick their caller from the sender pool; only their steps can
+    have the seed resolved.
+    """
+    return set(_PASSTHROUGH_RE.findall(test_source or ""))
+
+
+def _annotate_step_sender(
+    step: str, pool: list[str], passthroughs: set[str]
+) -> str:
+    """Append the resolved on-chain sender to a PoC step, when knowable.
+
+    A passthrough step like ``calldata=mint(address,uint256,uint256)
+    args=[to, amt, 129157760]`` pranks as ``pool[seed % len(pool)]`` —
+    the address the TARGET saw as ``msg.sender``. Without this, the PoC
+    shows forge's outer EOA (which would revert) and hides the real
+    caller, e.g. a mined hardcoded role address. Unresolvable steps are
+    returned unchanged.
+    """
+    if not pool or not passthroughs:
+        return step
+    cm = _STEP_CALLDATA_RE.search(step)
+    if not cm or cm.group(1) not in passthroughs:
+        return step
+    am = _STEP_ARGS_RE.search(step)
+    if not am:
+        return step
+    args = [a.strip() for a in am.group(1).split(",")]
+    if not args:
+        return step
+    seed_txt = args[-1].split()[0].strip("[]")
+    try:
+        seed = int(seed_txt, 16 if seed_txt.startswith("0x") else 10)
+    except ValueError:
+        return step
+    resolved = pool[seed % len(pool)]
+    return f"{step} [target saw sender {resolved}]"
+
+
+def _recover_truncated_sequences(
+    output: str, wanted: set[str]
+) -> dict[str, list[str]]:
+    """Recover call sequences whose ``[FAIL]`` header was truncated away.
+
+    When the sandbox truncates campaign output mid-table, the ``[FAIL:
+    <reason>]`` header line is destroyed but the per-test ``[Sequence]``
+    steps and the trailing `` invariant_foo() (runs: ...)`` line usually
+    survive in the tail. For each wanted invariant, find its trailing
+    runs-line and walk BACKWARD collecting ``sender=``/``calldata=`` steps
+    until a blank line, another FAIL block, the suite summary, or a JSON
+    event line. The lookback is bounded so a pathological log cannot pin
+    the scanner.
+    """
+    found: dict[str, list[str]] = {}
+    if not wanted:
+        return found
+    lines = output.splitlines()
+    for idx, line in enumerate(lines):
+        m = _FAIL_TRAILING_RE.match(line)
+        if not m or m.group(1) not in wanted or m.group(1) in found:
+            continue
+        steps: list[str] = []
+        for back in range(idx - 1, max(idx - 121, -1), -1):
+            prev = lines[back]
+            if (
+                not prev.strip()
+                or "[FAIL" in prev
+                or _SUITE_RE.search(prev)
+                or prev.lstrip().startswith('{"timestamp"')
+                or _FAIL_TRAILING_RE.match(prev)
+            ):
+                break
+            s = prev.strip()
+            if "sender=" in s and "calldata=" in s and s not in steps:
+                steps.append(s)
+        if steps:
+            steps.reverse()
+            found[m.group(1)] = steps
+    return found
+
+
 def parse_forge_output(
     output: str,
     invariants: list[Invariant],
@@ -146,10 +389,32 @@ def parse_forge_output(
     contract_path: str = "",
     contract_name: str = "Target",
     target_label: str = "",
+    forge_rc: int | None = None,
+    test_source: str = "",
 ) -> tuple[list[Finding], CampaignResult]:
-    """Turn ``forge test`` output into findings + a campaign summary."""
+    """Turn ``forge test`` output into findings + a campaign summary.
+
+    Signal priority (Fix C):
+    1. forge's NDJSON invariant-failure events
+       (:func:`parse_forge_json_events`) — the truncation-proof primary
+       signal; a named invariant failure here is a machine-checked catch
+       regardless of what the truncated text shows;
+    2. the human-readable ``[FAIL]`` text blocks (fallback);
+    3. a clean ``Suite result: ok`` line — or forge's own exit code 0,
+       which is ground truth that the campaign compiled and passed even
+       when the suite line was truncated away.
+
+    ``forge_rc`` is forge's process exit code when known: 0 means the
+    campaign compiled and every test passed.
+    """
     campaign = CampaignResult(engine="foundry-invariant")
     by_fn = {_sanitized_invariant_fn(inv.id): inv for inv in invariants}
+
+    # Sender-pool resolution for PoC honesty: the handler pranks as
+    # pool[seed % len], so forge's sender= field hides the real caller.
+    # Resolving the seed reveals e.g. a mined hardcoded role address.
+    sender_pool = _extract_sender_pool(test_source)
+    passthrough_names = _extract_passthrough_names(test_source)
 
     suite = _SUITE_RE.search(output)
     runs_m = _RUNS_RE.search(output)
@@ -158,6 +423,28 @@ def parse_forge_output(
         campaign.calls = int(runs_m.group(2))
         campaign.reverts = int(runs_m.group(3))
     campaign.raw_stdout = output[-_MAX_LOG_CHARS:]
+
+    # --- Primary signal (Fix C): forge's JSON failure events. ---
+    # A named invariant failure in forge's own event stream is a
+    # machine-checked catch regardless of what the (possibly truncated)
+    # human-readable text shows. This mirrors the old text behavior of
+    # reporting EVERY named failure: the harness auto-adds invariants
+    # (e.g. invariant_attacker_no_profit) that are not in the caller's
+    # list, and those are real catches too (unknown invariants get their
+    # id/bug_class derived from the function name, as before).
+    events = parse_forge_json_events(output)
+    if events:
+        return _findings_from_json_events(
+            events,
+            output,
+            by_fn,
+            campaign,
+            contract_path=contract_path,
+            contract_name=contract_name,
+            target_label=target_label,
+            sender_pool=sender_pool,
+            passthrough_names=passthrough_names,
+        )
 
     if suite and suite.group(1).lower() == "ok":
         campaign.compile_ok = True
@@ -184,6 +471,18 @@ def parse_forge_output(
         if any(rx.search(output) for rx in _COMPILE_FAIL_RES):
             campaign.compile_ok = False
             LOGGER.warning("forge compile failed for %s", target_label or contract_name)
+        elif forge_rc == 0:
+            # Fix C: forge's own exit code is ground truth — 0 means the
+            # campaign compiled and every test passed, even when the
+            # "Suite result: ok" line was truncated away. Without this, a
+            # clean-but-truncated run was mislabeled "did not compile".
+            campaign.compile_ok = True
+            campaign.clean = True
+            LOGGER.info(
+                "forge exited 0 for %s; suite line truncated away, "
+                "marking clean",
+                target_label or contract_name,
+            )
         else:
             LOGGER.warning(
                 "forge exited without a parseable suite result for %s",
@@ -192,6 +491,126 @@ def parse_forge_output(
         return [], campaign
 
     campaign.compile_ok = True
+    findings = _build_invariant_findings(
+        by_inv,
+        by_fn,
+        campaign,
+        contract_path=contract_path,
+        contract_name=contract_name,
+        target_label=target_label,
+        output=output,
+        repeats={fn: sum(1 for b in named if b["invariant"] == fn) for fn in by_inv},
+        sender_pool=sender_pool,
+        passthrough_names=passthrough_names,
+    )
+    return findings, campaign
+
+
+def _findings_from_json_events(
+    events: list[dict[str, Any]],
+    output: str,
+    by_fn: dict[str, Invariant],
+    campaign: CampaignResult,
+    *,
+    contract_path: str,
+    contract_name: str,
+    target_label: str,
+    sender_pool: list[str] | None = None,
+    passthrough_names: set[str] | None = None,
+) -> tuple[list[Finding], CampaignResult]:
+    """Build findings from forge's NDJSON failure events (Fix C primary).
+
+    Every event names an invariant forge itself broke while fuzzing — a
+    machine-checked catch regardless of what the (possibly truncated)
+    human-readable text shows. Call sequences come from the surviving
+    text blocks when intact, else from
+    :func:`_recover_truncated_sequences` (the ``[FAIL]`` header may be
+    gone while the steps and trailing runs-line survive in the tail).
+
+    Like the legacy text path, EVERY named failure becomes a finding —
+    including harness-auto-added invariants (e.g.
+    ``invariant_attacker_no_profit``) that are not in the caller's
+    invariant list; their metadata is derived from the function name.
+    """
+    # Sequences from intact [FAIL] blocks first (existing text extraction).
+    by_inv: dict[str, list[str]] = {}
+    for b in _extract_failure_blocks(output):
+        fn = b["invariant"]
+        if isinstance(fn, str) and fn:
+            seq = by_inv.setdefault(fn, [])
+            for step in b["sequence"]:
+                if step not in seq:
+                    seq.append(step)
+    # Then recover sequences whose [FAIL] header was truncated away.
+    missing = {str(e["invariant"]) for e in events} - set(by_inv)
+    for fn, steps in _recover_truncated_sequences(output, missing).items():
+        by_inv.setdefault(fn, steps)
+    # Events with no recoverable sequence still count: the event itself is
+    # forge's machine-checked verdict (see parse_forge_json_events).
+    for e in events:
+        fn = str(e["invariant"])
+        by_inv.setdefault(fn, [])
+
+    campaign.compile_ok = True
+    campaign.clean = False
+    event_reasons = {str(e["invariant"]): str(e.get("reason") or "") for e in events}
+    # Embed only the STABLE event fields in the PoC: the "timestamp" field
+    # differs on every run and would make the PoC non-reproducible for a
+    # fixed fuzz seed (see test_e2e_campaign_is_reproducible_for_fixed_seed).
+    event_lines = {
+        str(e["invariant"]): json.dumps(
+            {
+                "event": e.get("event"),
+                "invariant": e.get("invariant"),
+                "reason": e.get("reason") or "",
+                "target": e.get("target") or "",
+            },
+            sort_keys=True,
+        )
+        for e in events
+    }
+    findings = _build_invariant_findings(
+        by_inv,
+        by_fn,
+        campaign,
+        contract_path=contract_path,
+        contract_name=contract_name,
+        target_label=target_label,
+        output=output,
+        repeats={fn: 1 for fn in by_inv},
+        event_reasons=event_reasons,
+        event_lines=event_lines,
+        sender_pool=sender_pool,
+        passthrough_names=passthrough_names,
+    )
+    return findings, campaign
+
+
+def _build_invariant_findings(
+    by_inv: dict[str, list[str]],
+    by_fn: dict[str, Invariant],
+    campaign: CampaignResult,
+    *,
+    contract_path: str,
+    contract_name: str,
+    target_label: str,
+    output: str,
+    repeats: dict[str, int],
+    event_reasons: dict[str, str] | None = None,
+    event_lines: dict[str, str] | None = None,
+    sender_pool: list[str] | None = None,
+    passthrough_names: set[str] | None = None,
+) -> list[Finding]:
+    """Build one :class:`Finding` per broken invariant.
+
+    ``event_reasons``/``event_lines`` carry forge's JSON failure-event
+    data when the finding came from the truncation-proof event signal
+    (Fix C); otherwise the finding came from the text blocks.
+    """
+    event_reasons = event_reasons or {}
+    event_lines = event_lines or {}
+    pool = sender_pool or []
+    pthroughs = passthrough_names or set()
     findings: list[Finding] = []
     for fn, sequence in by_inv.items():
         inv = by_fn.get(fn)
@@ -206,21 +625,55 @@ def parse_forge_output(
         confidence = 0.80
         if sequence:
             confidence += 0.05
-        repeats = sum(1 for b in named if b["invariant"] == fn)
-        if repeats > 1:
+        if repeats.get(fn, 1) > 1:
             confidence += 0.05
         confidence = min(confidence, 0.95)
 
-        seq_text = "\n".join(f"  {i + 1}. {step}" for i, step in enumerate(sequence))
+        # PoC honesty: resolve passthrough sender seeds through the
+        # handler's pool so the PoC shows the address the target actually
+        # saw (e.g. a mined hardcoded role), not forge's outer EOA.
+        shown = [_annotate_step_sender(s, pool, pthroughs) for s in sequence]
+        seq_text = "\n".join(f"  {i + 1}. {step}" for i, step in enumerate(shown))
+        event_note = ""
+        if fn in event_lines:
+            event_note = (
+                "# Forge's own JSON event stream reports this invariant "
+                "violated (truncation-proof machine verdict):\n"
+                f"#   {event_lines[fn]}\n"
+            )
+            if event_reasons.get(fn):
+                event_note += f"#   forge reason: {event_reasons[fn]}\n"
+        if seq_text:
+            seq_block = seq_text
+        elif fn in event_lines:
+            seq_block = (
+                "  (call sequence truncated from forge output; the JSON "
+                "failure event above is forge's machine-checked verdict)"
+            )
+        else:
+            seq_block = "  (forge did not print a call sequence)"
         poc = (
             "# Forge invariant counterexample (machine-checked).\n"
             f"# Reproduce: run this pipeline against {target_label or contract_name}\n"
             f"# Failing invariant: {fn}\n"
             f"#   {inv_id} [{bug_class}]: {statement}\n"
+            f"{event_note}"
             "# Call sequence that breaks it:\n"
-            f"{seq_text if seq_text else '  (forge did not print a call sequence)'}\n"
+            f"{seq_block}\n"
         )
         fingerprint = hashlib.sha256(f"{inv_id}:{sequence}".encode()).hexdigest()[:16]
+        metadata = {
+            "invariant_id": inv_id,
+            "bug_class": bug_class,
+            "engine": "foundry-invariant",
+            "fuzz_runs": campaign.runs,
+            "fuzz_calls": campaign.calls,
+            "invariant_source": inv.source if inv else "unknown",
+        }
+        if fn in event_lines:
+            # Fix C: record which signal produced this finding — the
+            # truncation-proof JSON event, not the text blocks.
+            metadata["proof_signal"] = "forge-json-event"
         findings.append(
             Finding(
                 target=target_label or contract_name,
@@ -243,17 +696,10 @@ def parse_forge_output(
                 fingerprint=f"invariant-{fingerprint}",
                 tool_consensus=["foundry-invariant"],
                 dynamically_confirmed=True,
-                metadata={
-                    "invariant_id": inv_id,
-                    "bug_class": bug_class,
-                    "engine": "foundry-invariant",
-                    "fuzz_runs": campaign.runs,
-                    "fuzz_calls": campaign.calls,
-                    "invariant_source": inv.source if inv else "unknown",
-                },
+                metadata=metadata,
             )
         )
-    return findings, campaign
+    return findings
 
 
 # ---------------------------------------------------------------------------
@@ -364,11 +810,22 @@ def run_fuzz_campaign(
         str(bounds.seed),
     ]
     started = time.monotonic()
+    # Fix C (secondary hardening): campaign output used to be truncated at
+    # the sandbox default of 8 KiB, which destroyed the human-readable
+    # [FAIL] blocks in the middle of long traces. Raise the truncation
+    # floor for campaign output only — everything else about the sandbox
+    # policy (resource limits, env filtering, privilege drop) is
+    # unchanged. The JSON failure events are the primary signal and
+    # survive any truncation; this keeps their call sequences readable.
+    campaign_policy = SandboxPolicy(
+        max_revert_reason_bytes=_CAMPAIGN_OUTPUT_CAP_BYTES
+    )
     try:
         rc, stdout, stderr = run_sandboxed(
             cmd,
             cwd=project_dir,
             timeout=bounds.timeout_seconds,
+            policy=campaign_policy,
             # A writable HOME for the privilege-dropped child (solc cache).
             extra_env={
                 "HOME": str(_sandbox_home()),
@@ -385,14 +842,45 @@ def run_fuzz_campaign(
     output = (stdout or "") + ("\n" + stderr if stderr else "")
 
     if rc == 124 or "timed out after" in (stderr or ""):
+        # Fix D: a timeout is resource exhaustion (the time budget gave
+        # out), never "did not compile".
+        detail = (
+            f"timeout after {bounds.timeout_seconds}s — the campaign "
+            "wall-clock budget was exhausted before forge finished"
+        )
         msg = (
-            f"fuzz campaign for {label} hit the {bounds.timeout_seconds}s "
-            "timeout; treating as inconclusive (no findings)."
+            f"forge campaign for {label} RESOURCE_EXHAUSTED ({detail}); "
+            "no invariant verdict — this target was NOT checked."
         )
         LOGGER.warning(msg)
         if notes is not None:
             notes.append(msg)
-        campaign = CampaignResult(engine="foundry-invariant", raw_stdout=output[-_MAX_LOG_CHARS:])
+        campaign = CampaignResult(
+            engine="foundry-invariant",
+            raw_stdout=output[-_MAX_LOG_CHARS:],
+            resource_exhausted=True,
+            resource_detail=detail,
+        )
+        campaign.elapsed_seconds = elapsed
+        return campaign, []
+
+    kill_detail = classify_process_kill(rc, stdout, stderr)
+    if kill_detail is not None:
+        # Fix D: a signal/OOM kill gets its own loud verdict — never the
+        # "did not compile" label.
+        msg = (
+            f"forge campaign for {label} RESOURCE_EXHAUSTED ({kill_detail}); "
+            "no invariant verdict — this target was NOT checked."
+        )
+        LOGGER.warning(msg)
+        if notes is not None:
+            notes.append(msg)
+        campaign = CampaignResult(
+            engine="foundry-invariant",
+            raw_stdout=output[-_MAX_LOG_CHARS:],
+            resource_exhausted=True,
+            resource_detail=kill_detail,
+        )
         campaign.elapsed_seconds = elapsed
         return campaign, []
 
@@ -402,6 +890,8 @@ def run_fuzz_campaign(
         contract_path=contract_path,
         contract_name=contract_name,
         target_label=label,
+        forge_rc=rc,
+        test_source=files.get("test/Invariant.t.sol", ""),
     )
     campaign.elapsed_seconds = elapsed
     _record_strategy_feedback(files, bounds, findings, campaign)
@@ -412,10 +902,24 @@ def run_fuzz_campaign(
     else:
         LOGGER.info("invariant fuzzing clean for %s (%.1fs)", label, elapsed)
     if notes is not None and not campaign.compile_ok and not campaign.clean:
-        notes.append(
-            f"forge campaign for {label} did not compile; see logs. "
-            "No invariant verdict either way."
-        )
+        # Fix D: "did not compile" requires actual compiler-failure
+        # evidence in the output — provable or absent. A campaign that
+        # died by signal/timeout already returned above with its own
+        # RESOURCE_EXHAUSTED verdict; anything else unparseable gets an
+        # honest unknown-cause note here and in the pipeline verdict.
+        if campaign.resource_exhausted or campaign.skipped:
+            pass
+        elif extract_compile_errors(output):
+            notes.append(
+                f"forge campaign for {label} did not compile; see logs. "
+                "No invariant verdict either way."
+            )
+        else:
+            notes.append(
+                f"forge campaign for {label} ended with no parseable suite "
+                "result and no compiler errors in the output (cause "
+                "unknown); no invariant verdict either way."
+            )
     return campaign, findings
 
 

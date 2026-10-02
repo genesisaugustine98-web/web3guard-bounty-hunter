@@ -25,7 +25,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from web3guard.invariants.fuzz import _prepare_project_dir
+from web3guard.invariants.fuzz import (
+    _prepare_project_dir,
+    classify_process_kill,
+    extract_compile_errors,
+)
 from web3guard.invariants.harness import write_project
 from web3guard.invariants.models import CampaignResult, FuzzBounds, Invariant
 from web3guard.scanner import Finding
@@ -258,15 +262,42 @@ def run_vyper_campaign(
     output = (stdout or "") + ("\n" + stderr if stderr else "")
 
     if rc == 124 or "timed out after" in (stderr or ""):
+        # Fix D: a timeout is resource exhaustion, never "did not compile".
+        detail = (
+            f"timeout after {bounds.timeout_seconds}s — the campaign "
+            "wall-clock budget was exhausted before the runner finished"
+        )
         msg = (
-            f"vyper campaign for {label} hit the {bounds.timeout_seconds}s "
-            "timeout; treating as inconclusive (no findings)."
+            f"vyper campaign for {label} RESOURCE_EXHAUSTED ({detail}); "
+            "no invariant verdict — this target was NOT checked."
         )
         LOGGER.warning(msg)
         if notes is not None:
             notes.append(msg)
         campaign = CampaignResult(
-            engine="titanoboa-invariant", raw_stdout=output[-_MAX_LOG_CHARS:]
+            engine="titanoboa-invariant",
+            raw_stdout=output[-_MAX_LOG_CHARS:],
+            resource_exhausted=True,
+            resource_detail=detail,
+        )
+        campaign.elapsed_seconds = elapsed
+        return campaign, []
+
+    kill_detail = classify_process_kill(rc, stdout, stderr)
+    if kill_detail is not None:
+        # Fix D: signal/OOM kills get their own verdict, never "did not compile".
+        msg = (
+            f"vyper campaign for {label} RESOURCE_EXHAUSTED ({kill_detail}); "
+            "no invariant verdict — this target was NOT checked."
+        )
+        LOGGER.warning(msg)
+        if notes is not None:
+            notes.append(msg)
+        campaign = CampaignResult(
+            engine="titanoboa-invariant",
+            raw_stdout=output[-_MAX_LOG_CHARS:],
+            resource_exhausted=True,
+            resource_detail=kill_detail,
         )
         campaign.elapsed_seconds = elapsed
         return campaign, []
@@ -287,10 +318,22 @@ def run_vyper_campaign(
     else:
         LOGGER.info("vyper invariant fuzzing clean for %s (%.1fs)", label, elapsed)
     if notes is not None and not campaign.compile_ok and not campaign.clean:
-        notes.append(
-            f"vyper campaign for {label} did not compile; see logs. "
-            "No invariant verdict either way."
-        )
+        # Fix D: "did not compile" requires actual compiler-failure
+        # evidence — provable or absent. Signal/timeout kills already
+        # returned above with RESOURCE_EXHAUSTED.
+        if campaign.resource_exhausted or campaign.skipped:
+            pass
+        elif extract_compile_errors(output):
+            notes.append(
+                f"vyper campaign for {label} did not compile; see logs. "
+                "No invariant verdict either way."
+            )
+        else:
+            notes.append(
+                f"vyper campaign for {label} ended with no parseable suite "
+                "result and no compiler errors in the output (cause "
+                "unknown); no invariant verdict either way."
+            )
     return campaign, findings
 
 
