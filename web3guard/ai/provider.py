@@ -155,6 +155,7 @@ class OpenAICompatibleProvider(AIProvider):
         timeout: float = 120.0,
         name: str = "openai-compatible",
         use_streaming: bool = True,
+        supports_seed: bool = True,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key_env = api_key_env
@@ -162,6 +163,7 @@ class OpenAICompatibleProvider(AIProvider):
         self.timeout = timeout
         self.name = name
         self.use_streaming = use_streaming
+        self.supports_seed = supports_seed
         self._last_request_ts: float = 0.0
         # The OpenAI client library is optional; if it's not installed
         # we fall back to raw urllib.
@@ -235,7 +237,7 @@ class OpenAICompatibleProvider(AIProvider):
                 max_tokens=max_tokens,
                 temperature=temperature,
             )
-            if seed is not None:
+            if seed is not None and self.supports_seed:
                 kwargs["seed"] = seed
             if response_format is not None:
                 kwargs["response_format"] = dict(response_format)
@@ -317,7 +319,7 @@ class OpenAICompatibleProvider(AIProvider):
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
-        if seed is not None:
+        if seed is not None and self.supports_seed:
             body["seed"] = seed
         if response_format is not None:
             body["response_format"] = dict(response_format)
@@ -329,6 +331,9 @@ class OpenAICompatibleProvider(AIProvider):
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {api_key}",
+                # Groq (and some WAFs) 403 the stdlib's default
+                # "Python-urllib/x.y" user-agent; identify honestly.
+                "User-Agent": "web3guard/3.4.0",
             },
         )
         try:

@@ -125,6 +125,10 @@ class ProviderSpec:
     # Soft per-minute request budget used by the provider's throttle.
     rpm: int
     per_request_timeout_s: float = 120.0
+    # False for providers whose OpenAI-compatible endpoint rejects the
+    # ``seed`` parameter (Gemini 400s on it); the provider then omits
+    # seed from the request body instead of failing the call.
+    supports_seed: bool = True
     # False means the tier is not really "free": it spends finite,
     # non-renewing credits, so it sits last in the chain.
     renewable_free_tier: bool = True
@@ -141,13 +145,14 @@ PROVIDER_CHAIN: tuple[ProviderSpec, ...] = (
         api_key_envs=("GEMINI_API_KEY", "GOOGLE_AI_STUDIO_API_KEY"),
         default_model="gemini-2.5-flash",
         rpm=15,
+        supports_seed=False,
         notes="Google AI Studio free tier. OpenAI-compatible endpoint.",
     ),
     ProviderSpec(
         name="groq",
         base_url="https://api.groq.com/openai/v1",
         api_key_envs=("GROQ_API_KEY",),
-        default_model="llama-3.3-70b-versatile",
+        default_model="openai/gpt-oss-20b",
         rpm=30,
         notes="GroqCloud free tier. Very high token throughput.",
     ),
@@ -921,6 +926,7 @@ def build_router_client(
                     rpm=rpm,
                     timeout=per_request_timeout,
                     name=d.spec.name,
+                    supports_seed=d.spec.supports_seed,
                 ),
                 clock=clock,
             )
