@@ -325,3 +325,21 @@ You said "hunt those 14 next" — the 14 regressions the weakness-hunt round int
 **Proof it works.** 3 new regression tests (2 gate: a traceless snforge proof is rejected, a traced one admitted; 1 synthesis: a batch of good + duplicate + malformed keeps only the good one). Full suite: 896 passed (was 893), same 4 pre-existing environment failures (forge/vyper-venv permission-denied as root — environmental, unchanged), 16 skipped; ruff + mypy clean. Commits: recovery (c93d9a8) + selfimprove(iteration 5) (58603a7). Not pushed.
 
 **Honest residual risk.** None significant — both fixes narrow the gate and the parser in ways covered by the new tests; the real cairo/forge paths behave exactly as before.
+
+## 2026-10-02 — Self-improvement loop, iteration 6: verification + history engine (plain-language note)
+
+**Setup first.** Working tree was clean on main; no recovery needed.
+
+**Focus this tick.** The loop rotates its audit focus; this run covered the verification + history engine area (the machine-evidence replay, the two-judge adversarial filter, and the history verdict/report/re-dive-queue machinery). The verification code survived intact — the two-judge arbitration, fail-closed machine replay, and calibration checks all behave as documented, so nothing changed there. The history engine had two small, real bugs:
+
+**What was wrong (1).** `RediveQueue.sync_from_history` — the "misses nothing" reconciliation — queued band-aid/regressed items with the raw finding id (e.g. "H-01") as their title, even though the caller's finding object (with the human-readable title) was right there. The still-open item it queues *did* use the real title, so the queue mixed readable and cryptic titles.
+
+**What changed (1).** The finding is now passed through to `add_from_verdicts`, so every queued item carries the human-readable title. When no finding object is supplied, the documented fallback (finding id as title) is unchanged.
+
+**What was wrong (2).** The plain-English report's bottom line claims to describe "the latest version we checked" but summed open issues across *all* versions. A finding that was STILL OPEN at v1 and FIXED at v2 made the bottom line warn "1 issue still need attention in the latest version" — wrong, and wrong grammar ("issue still need").
+
+**What changed (2).** The bottom line now counts only the latest version's verdicts; per-version lines are unchanged (they were always per-version accurate). Singular/plural grammar fixed ("1 issue still needs attention").
+
+**Proof it works.** 4 new regression tests (all passing): band-aid items carry the finding's title; the no-finding fallback still uses the id; the bottom line reports "fully fixed" for an open-then-fixed timeline and "1 issue still needs attention" when an issue is genuinely open at the latest version. Full suite: 900 passed (was 896), same 4 pre-existing environment failures (forge binary permission-denied as root — environmental, unchanged), 16 skipped; ruff + mypy clean. Commit: selfimprove(iteration 6). Not pushed.
+
+**Honest residual risk.** None significant — both fixes are narrowly scoped to queue-item titles and report wording; verdict computation is untouched.
