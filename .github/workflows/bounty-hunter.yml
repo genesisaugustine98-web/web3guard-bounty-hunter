@@ -129,7 +129,7 @@ jobs:
             exit 1
           fi
           "$FOUNDRYUP" --install stable
-          echo "$HOME/.foundry/bin" >> "$GITHUB_PATH"
+          echo "$(dirname "$FOUNDRYUP")" >> "$GITHUB_PATH"
 
       - name: Validate package and run tests
         run: |
