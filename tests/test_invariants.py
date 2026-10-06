@@ -540,3 +540,25 @@ def test_e2e_clean_vault_produces_no_findings(tmp_path: Path) -> None:
     )
     assert not any("fuzz campaign SKIPPED" in n for n in notes), notes
     assert findings == []
+
+
+def test_derive_seeds_is_deterministic_and_spread() -> None:
+    from web3guard.invariants.fuzz import derive_seeds
+    assert derive_seeds(1337, 1) == [1337]
+    seeds = derive_seeds(1337, 4)
+    assert seeds == [1337, 1337 + 7919, 1337 + 2 * 7919, 1337 + 3 * 7919]
+    # Reproducible across calls.
+    assert derive_seeds(1337, 4) == seeds
+    # Different base -> different seeds.
+    assert derive_seeds(42, 4) != seeds
+    # Zero/negative count clamps to a single seed.
+    assert derive_seeds(1337, 0) == [1337]
+
+
+def test_seed_count_config_parsing() -> None:
+    bounds = FuzzBounds.from_config({"invariants": {"seed_count": 3}})
+    assert bounds.seed_count == 3
+    bounds = FuzzBounds.from_config({"invariants": {"seed_count": 0}})
+    assert bounds.seed_count == 1  # invalid values ignored
+    bounds = FuzzBounds.from_config({})
+    assert bounds.seed_count == 1  # default unchanged

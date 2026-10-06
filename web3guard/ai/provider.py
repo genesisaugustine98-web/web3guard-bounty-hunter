@@ -343,7 +343,7 @@ class OpenAICompatibleProvider(AIProvider):
                 "Authorization": f"Bearer {api_key}",
                 # Groq (and some WAFs) 403 the stdlib's default
                 # "Python-urllib/x.y" user-agent; identify honestly.
-                "User-Agent": "web3guard/3.4.0",
+                "User-Agent": "web3guard/3.6.0",
             },
         )
         try:

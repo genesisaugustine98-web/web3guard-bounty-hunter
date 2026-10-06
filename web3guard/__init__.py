@@ -15,7 +15,7 @@ This is the package entry point. The CLI entry point lives in
 
 from __future__ import annotations
 
-__version__ = "3.4.0"
+__version__ = "3.6.0"
 __author__ = "AG Koodanga <agkoodanga@gmail.com>"
 __license__ = "MIT"
 

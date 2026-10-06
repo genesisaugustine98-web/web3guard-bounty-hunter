@@ -110,6 +110,13 @@ class FuzzBounds:
     timeout_seconds: int = 300  # hard wall-clock cap per campaign
     fail_on_revert: bool = False
     seed: int = 1337  # fixed default campaign seed
+    # Fix-campaign #7 (seed dilution): on very large contracts a single
+    # fixed seed can deterministically miss the vulnerable function. When
+    # seed_count > 1, the campaign runs that many seeds (deterministically
+    # derived from `seed`) and aggregates findings across all runs.
+    # Each seed run is fully reproducible; total wall-clock scales with
+    # seed_count. Default 1 = legacy single-seed behavior.
+    seed_count: int = 1
     attack_enabled: bool = True  # attack harness ON by default
     attack_depth: int = 64  # attack call-sequence depth
     attack_max_value_wei: int = 10_000_000_000_000_000_000  # 10 ETH/call
@@ -135,7 +142,7 @@ class FuzzBounds:
         inv_cfg = config.get("invariants")
         if not isinstance(inv_cfg, dict):
             return bounds
-        for key in ("runs", "depth", "timeout_seconds"):
+        for key in ("runs", "depth", "timeout_seconds", "seed_count"):
             if key in inv_cfg:
                 try:
                     val = int(inv_cfg[key])
@@ -232,6 +239,9 @@ class CampaignResult:
     # and the campaign seed actually used. Empty for legacy campaigns.
     strategies_used: list[str] = field(default_factory=list)
     campaign_seed: int = 1337
+    # Fix-campaign #7 (seed dilution): seeds actually run in a multi-seed
+    # campaign. Single-element (or empty for legacy) when seed_count == 1.
+    seeds_run: list[int] = field(default_factory=list)
 
 
 @dataclass

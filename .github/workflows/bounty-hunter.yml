@@ -118,6 +118,19 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
+      - name: Install Foundry (hunt-pipeline tests need forge for invariants)
+        run: |
+          curl -L https://foundry.paradigm.xyz | bash
+          for p in "$HOME/.foundry/bin/foundryup" "$HOME/.config/.foundry/bin/foundryup"; do
+            if [ -x "$p" ]; then FOUNDRYUP="$p"; break; fi
+          done
+          if [ -z "${FOUNDRYUP:-}" ]; then
+            echo "::error::foundryup not found after install"
+            exit 1
+          fi
+          "$FOUNDRYUP" --install stable
+          echo "$HOME/.foundry/bin" >> "$GITHUB_PATH"
+
       - name: Validate package and run tests
         run: |
           python -m pip check
@@ -176,7 +189,12 @@ jobs:
 
   live-exploit-e2e:
     name: Live exploit E2E (real model)
-    if: github.event_name == 'workflow_dispatch' && inputs.run_live_e2e
+    # Fix-campaign #9: the real-model path must be exercised regularly, not
+    # only on opt-in manual dispatch. Runs on the weekly schedule as a
+    # non-blocking informational job (continue-on-error), and blocking on
+    # explicit manual dispatch (the operator asked for it).
+    if: (github.event_name == 'workflow_dispatch' && inputs.run_live_e2e) || github.event_name == 'schedule'
+    continue-on-error: ${{ github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -285,8 +303,14 @@ jobs:
 
       - name: Run benchmark with regression floor (SmartBugs corpus)
         run: |
+          # The SmartBugs corpus labels exploitable vulnerability classes only.
+          # These six detectors emit legitimate SWC hygiene findings
+          # (SWC-100/103/111/119/132/136) that zero corpus units label, so
+          # they are definitionally out-of-taxonomy here and excluded from
+          # scoring. They remain active in real scans.
           python -m web3guard.cli bench \
             --corpus bench/smartbugs/corpus.json \
+            --exclude-categories default-visibility,floating-pragma,deprecated,shadowing,private-data,strict-balance-equality \
             --fail-below 0.98,0.8 \
             --max-fp 2 \
             --json bench/smartbugs/reports/current.json
@@ -570,6 +594,15 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           TARGETS_CONFIG: ${{ inputs.targets_config || vars.WEB3GUARD_TARGETS_CONFIG || '' }}
+          # Fix-campaign #10: the scheduled scan was a no-op ("No targets
+          # configured"). Default to the repo's own contracts so the weekly
+          # pipeline proves itself against reality: deliberately-vulnerable
+          # SmartBugs samples (should find known bugs) + clean fixtures
+          # (should stay silent). A repo variable
+          # (vars.WEB3GUARD_TARGETS_CONFIG) overrides this default.
+          DEFAULT_TARGETS: |
+            bench/smartbugs/samples|max
+            test_contracts/clean|max
           MIN_SEVERITY: ${{ inputs.min_severity || 'LOW' }}
           FORK_URL: ${{ inputs.fork_url || '' }}
           ENABLE_EXPLOIT: ${{ github.event_name != 'workflow_dispatch' || inputs.enable_exploit }}
@@ -577,7 +610,7 @@ jobs:
         run: |
           set -e
           mkdir -p .web3guard
-          printf '%s\n' "$TARGETS_CONFIG" > .web3guard/targets.txt
+          printf '%s\n' "${TARGETS_CONFIG:-$DEFAULT_TARGETS}" > .web3guard/targets.txt
           if ! grep -q '[^[:space:]]' .web3guard/targets.txt; then
             echo "::warning::No targets configured; set WEB3GUARD_TARGETS_CONFIG for scheduled runs."
             exit 0

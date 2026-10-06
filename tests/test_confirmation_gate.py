@@ -124,6 +124,29 @@ def test_ghost_file_is_refused(tmp_path: Path) -> None:
     assert verdict.checks.get("grounding") is None
 
 
+def test_nested_basename_is_grounded_recursively(tmp_path: Path) -> None:
+    """A finding carrying only a bare filename (e.g. Cairo's ``src/``
+    layout) grounds via recursive basename search under the target."""
+    nested = tmp_path / "src"
+    nested.mkdir()
+    (nested / "reward.cairo").write_text("// cairo", encoding="utf-8")
+    gate = _gate(_SeqFactory([_IMPACT, _IMPACT]))
+    finding = _Finding(file="reward.cairo")
+    path = gate._ground(tmp_path, finding)
+    assert path == nested / "reward.cairo"
+    assert finding.metadata["source_sha256"]
+
+
+def test_ambiguous_basename_is_not_grounded(tmp_path: Path) -> None:
+    """Two files with the same basename: grounding refuses to guess."""
+    for sub in ("a", "b"):
+        d = tmp_path / sub
+        d.mkdir()
+        (d / "dup.cairo").write_text("// cairo", encoding="utf-8")
+    gate = _gate(_SeqFactory([_IMPACT, _IMPACT]))
+    assert gate._ground(tmp_path, _Finding(file="dup.cairo")) is None
+
+
 def test_no_impact_evidence_is_refused(target: Path) -> None:
     """A sandbox pass with no machine markers confirms nothing."""
     gate = _gate(_SeqFactory([_IMPACT]))

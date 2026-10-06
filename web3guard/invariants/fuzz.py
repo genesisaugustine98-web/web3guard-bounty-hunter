@@ -29,6 +29,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from web3guard.invariants.deps import bundle_dependencies
 from web3guard.invariants.harness import write_project
 from web3guard.invariants.models import CampaignResult, FuzzBounds, Invariant
 from web3guard.scanner import Finding
@@ -47,6 +48,24 @@ FOUNDRY_SANDBOX_HOME = FOUNDRY_BIN_DIR.parent / "sandbox-home"
 
 #: Env override for the forge binary, honored first.
 FORGE_BIN_ENV = "WEB3GUARD_FORGE_BIN"
+
+#: Prime stride for deterministic multi-seed derivation (fix-campaign #7).
+#: Seeds are base, base+stride, base+2*stride, ... — deterministic per base
+#: seed (reproducible), well-spread across forge's seed space.
+_SEED_STRIDE = 7919
+
+
+def derive_seeds(base_seed: int, count: int) -> list[int]:
+    """Derive ``count`` deterministic campaign seeds from ``base_seed``.
+
+    Fix-campaign #7 (seed dilution): a single fixed seed can
+    deterministically miss the vulnerable function on very large
+    contracts. Derived seeds are reproducible per base seed and spread
+    across the seed space via a prime stride.
+    """
+    count = max(1, int(count))
+    return [int(base_seed) + i * _SEED_STRIDE for i in range(count)]
+
 
 # ---------------------------------------------------------------------------
 # forge output parsing
@@ -170,8 +189,7 @@ def classify_process_kill(
         haystack = f"{stderr or ''}\n{stdout or ''}".lower()
         if any(marker in haystack for marker in _OOM_MARKERS):
             detail = (
-                "process output reports memory exhaustion "
-                f"(exit code {rc}) — likely OOM-killed"
+                f"process output reports memory exhaustion (exit code {rc}) — likely OOM-killed"
             )
     return detail
 
@@ -308,9 +326,7 @@ def _extract_passthrough_names(test_source: str) -> set[str]:
     return set(_PASSTHROUGH_RE.findall(test_source or ""))
 
 
-def _annotate_step_sender(
-    step: str, pool: list[str], passthroughs: set[str]
-) -> str:
+def _annotate_step_sender(step: str, pool: list[str], passthroughs: set[str]) -> str:
     """Append the resolved on-chain sender to a PoC step, when knowable.
 
     A passthrough step like ``calldata=mint(address,uint256,uint256)
@@ -340,9 +356,7 @@ def _annotate_step_sender(
     return f"{step} [target saw sender {resolved}]"
 
 
-def _recover_truncated_sequences(
-    output: str, wanted: set[str]
-) -> dict[str, list[str]]:
+def _recover_truncated_sequences(output: str, wanted: set[str]) -> dict[str, list[str]]:
     """Recover call sequences whose ``[FAIL]`` header was truncated away.
 
     When the sandbox truncates campaign output mid-table, the ``[FAIL:
@@ -479,8 +493,7 @@ def parse_forge_output(
             campaign.compile_ok = True
             campaign.clean = True
             LOGGER.info(
-                "forge exited 0 for %s; suite line truncated away, "
-                "marking clean",
+                "forge exited 0 for %s; suite line truncated away, marking clean",
                 target_label or contract_name,
             )
         else:
@@ -771,7 +784,25 @@ def run_fuzz_campaign(
     target_label: str = "",
     notes: list[str] | None = None,
 ) -> tuple[CampaignResult, list[Finding]]:
-    """Write the project, run ``forge test`` sandboxed, parse the output."""
+    """Write the project, run ``forge test`` sandboxed, parse the output.
+
+    Fix-campaign #7 (seed dilution): when ``bounds.seed_count > 1``,
+    runs one campaign per derived seed (see :func:`derive_seeds`) and
+    aggregates findings across all seeds, deduplicated by fingerprint.
+    Each seed run is reproducible; the finding metadata records which
+    seeds produced it (``seeds_found``).
+
+    Fix #11 (dependency-aware harness): before writing, the target's
+    transitive import closure (OpenZeppelin, sibling files, ...) is
+    bundled into the project so real-world contracts compile. Isolated
+    fixtures (no contract_path) are untouched.
+    """
+    files = bundle_dependencies(
+        files,
+        contract_path,
+        notes,
+        target_harness_path=f"src/{contract_name}.sol",
+    )
     write_project(project_dir, files)
     _prepare_project_dir(project_dir)
 
@@ -787,6 +818,86 @@ def run_fuzz_campaign(
             notes.append(msg)
         return CampaignResult(skipped=True, skip_reason=msg), []
 
+    seeds = derive_seeds(bounds.seed, bounds.seed_count)
+    if len(seeds) > 1 and notes is not None:
+        notes.append(
+            f"multi-seed fuzzing: {len(seeds)} seeds "
+            f"({', '.join(map(str, seeds))}); findings aggregated across runs."
+        )
+
+    all_findings: list[Finding] = []
+    seen_fps: set[str] = set()
+    campaigns: list[CampaignResult] = []
+    for seed in seeds:
+        campaign, findings = _run_one_seed_campaign(
+            project_dir,
+            files,
+            invariants,
+            bounds,
+            config,
+            forge=forge,
+            seed=seed,
+            contract_path=contract_path,
+            contract_name=contract_name,
+            target_label=target_label,
+            notes=notes,
+        )
+        campaigns.append(campaign)
+        # Aggregate: dedupe by fingerprint, track which seeds found it.
+        for f in findings:
+            fp = f.fingerprint or f"{f.category}:{f.function}:{f.file}"
+            meta = f.metadata if isinstance(f.metadata, dict) else {}
+            if fp in seen_fps:
+                for prev in all_findings:
+                    pfp = prev.fingerprint or f"{prev.category}:{prev.function}:{prev.file}"
+                    if pfp == fp:
+                        pm = prev.metadata if isinstance(prev.metadata, dict) else {}
+                        sf = pm.get("seeds_found", [])
+                        if seed not in sf:
+                            sf.append(seed)
+                        pm["seeds_found"] = sf
+                        break
+                continue
+            seen_fps.add(fp)
+            meta["seeds_found"] = [seed]
+            all_findings.append(f)
+        # A resource-exhausted or skipped seed aborts the remaining seeds:
+        # the project/time budget is seed-independent, so later seeds would
+        # hit the same wall.
+        if campaign.skipped or campaign.resource_exhausted:
+            break
+
+    # Combine per-seed campaigns into one verdict.
+    combined = campaigns[-1]
+    combined.seeds_run = [s for s, c in zip(seeds, campaigns, strict=False)]
+    combined.elapsed_seconds = sum(c.elapsed_seconds for c in campaigns)
+    combined.clean = all(c.clean for c in campaigns)
+    combined.compile_ok = any(c.compile_ok for c in campaigns)
+    if len(campaigns) > 1:
+        LOGGER.info(
+            "multi-seed campaign for %s: %d seeds, %d unique finding(s)",
+            target_label or contract_name,
+            len(campaigns),
+            len(all_findings),
+        )
+    return combined, all_findings
+
+
+def _run_one_seed_campaign(
+    project_dir: Path,
+    files: Mapping[str, str],
+    invariants: list[Invariant],
+    bounds: FuzzBounds,
+    config: Mapping[str, Any] | None,
+    *,
+    forge: str,
+    seed: int,
+    contract_path: str = "",
+    contract_name: str = "Target",
+    target_label: str = "",
+    notes: list[str] | None = None,
+) -> tuple[CampaignResult, list[Finding]]:
+    """Run a single ``forge test`` campaign with one fuzz seed."""
     label = target_label or contract_name
     LOGGER.info(
         "starting invariant fuzz campaign for %s: runs=%d depth=%d timeout=%ds seed=%d (forge=%s)",
@@ -794,12 +905,11 @@ def run_fuzz_campaign(
         bounds.runs,
         bounds.depth,
         bounds.timeout_seconds,
-        bounds.seed,
+        seed,
         forge,
     )
-    # --fuzz-seed: the fixed default campaign seed (FuzzBounds.seed, 1337
-    # unless overridden). Verified against this Foundry build: campaigns
-    # reproduce bit-identically across reruns for a fixed seed.
+    # --fuzz-seed: verified against this Foundry build: campaigns reproduce
+    # bit-identically across reruns for a fixed seed.
     cmd = [
         forge,
         "test",
@@ -807,7 +917,7 @@ def run_fuzz_campaign(
         "InvariantTest",
         "-vv",
         "--fuzz-seed",
-        str(bounds.seed),
+        str(seed),
     ]
     started = time.monotonic()
     # Fix C (secondary hardening): campaign output used to be truncated at
@@ -817,9 +927,7 @@ def run_fuzz_campaign(
     # policy (resource limits, env filtering, privilege drop) is
     # unchanged. The JSON failure events are the primary signal and
     # survive any truncation; this keeps their call sequences readable.
-    campaign_policy = SandboxPolicy(
-        max_revert_reason_bytes=_CAMPAIGN_OUTPUT_CAP_BYTES
-    )
+    campaign_policy = SandboxPolicy(max_revert_reason_bytes=_CAMPAIGN_OUTPUT_CAP_BYTES)
     try:
         rc, stdout, stderr = run_sandboxed(
             cmd,
@@ -894,7 +1002,7 @@ def run_fuzz_campaign(
         test_source=files.get("test/Invariant.t.sol", ""),
     )
     campaign.elapsed_seconds = elapsed
-    _record_strategy_feedback(files, bounds, findings, campaign)
+    _record_strategy_feedback(files, bounds, findings, campaign, seed=seed)
     if campaign.skipped:
         return campaign, []
     if findings:
@@ -950,6 +1058,8 @@ def _record_strategy_feedback(
     bounds: FuzzBounds,
     findings: list[Finding],
     campaign: CampaignResult,
+    *,
+    seed: int | None = None,
 ) -> None:
     """Fold this campaign's outcome into the adaptive strategy selector.
 
@@ -960,7 +1070,7 @@ def _record_strategy_feedback(
     campaign's render-time pick adapts. Never breaks a campaign.
     """
     try:
-        campaign.campaign_seed = bounds.seed
+        campaign.campaign_seed = seed if seed is not None else bounds.seed
         strategies_used, primary = _extract_strategy_markers(files)
         if not strategies_used and primary:
             strategies_used = [primary]

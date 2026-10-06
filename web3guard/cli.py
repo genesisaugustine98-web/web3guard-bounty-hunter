@@ -276,6 +276,12 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Path to a corpus manifest JSON (default: built-in)")
     bench.add_argument("--min-severity", default="LOW",
                        choices=["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"])
+    bench.add_argument("--exclude-categories", default=None,
+                       dest="exclude_categories",
+                       help="Comma-separated finding categories to drop before "
+                            "scoring (e.g. code-hygiene SWC classes a corpus "
+                            "never labels, so they cannot be true positives "
+                            "there). Real scans still emit them.")
     bench.add_argument("--json", type=Path, default=None, dest="json_out",
                        help="Write the full machine-readable report here")
     bench.add_argument("--fail-below", default=None,
@@ -551,7 +557,10 @@ def _cmd_bench(args: argparse.Namespace) -> int:
               f"({len(corpus.units)} units)")
         return 0
 
-    report = run_benchmark(corpus, min_severity=args.min_severity)
+    excluded = ([c.strip() for c in args.exclude_categories.split(",")]
+                if getattr(args, "exclude_categories", None) else None)
+    report = run_benchmark(corpus, min_severity=args.min_severity,
+                           exclude_categories=excluded)
 
     o = report.overall
     print("=" * 66)
