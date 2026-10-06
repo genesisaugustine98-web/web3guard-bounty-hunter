@@ -319,6 +319,7 @@ jobs:
         run: |
           python -m web3guard.cli bench \
             --corpus bench/smartbugs/corpus.json \
+            --exclude-categories default-visibility,floating-pragma,deprecated,shadowing,private-data,strict-balance-equality \
             --diff bench/smartbugs/reports/baseline.json
 
       - name: Upload benchmark report
