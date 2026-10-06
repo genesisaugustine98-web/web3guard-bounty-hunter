@@ -594,6 +594,15 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           TARGETS_CONFIG: ${{ inputs.targets_config || vars.WEB3GUARD_TARGETS_CONFIG || '' }}
+          # Fix-campaign #10: the scheduled scan was a no-op ("No targets
+          # configured"). Default to the repo's own contracts so the weekly
+          # pipeline proves itself against reality: deliberately-vulnerable
+          # SmartBugs samples (should find known bugs) + clean fixtures
+          # (should stay silent). A repo variable
+          # (vars.WEB3GUARD_TARGETS_CONFIG) overrides this default.
+          DEFAULT_TARGETS: |
+            bench/smartbugs/samples|max
+            test_contracts/clean|max
           MIN_SEVERITY: ${{ inputs.min_severity || 'LOW' }}
           FORK_URL: ${{ inputs.fork_url || '' }}
           ENABLE_EXPLOIT: ${{ github.event_name != 'workflow_dispatch' || inputs.enable_exploit }}
@@ -601,7 +610,7 @@ jobs:
         run: |
           set -e
           mkdir -p .web3guard
-          printf '%s\n' "$TARGETS_CONFIG" > .web3guard/targets.txt
+          printf '%s\n' "${TARGETS_CONFIG:-$DEFAULT_TARGETS}" > .web3guard/targets.txt
           if ! grep -q '[^[:space:]]' .web3guard/targets.txt; then
             echo "::warning::No targets configured; set WEB3GUARD_TARGETS_CONFIG for scheduled runs."
             exit 0
