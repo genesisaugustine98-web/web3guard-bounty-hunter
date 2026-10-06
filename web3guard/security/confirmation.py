@@ -109,13 +109,39 @@ class ConfirmationGate:
         Returns the resolved path, or None when the finding cannot be
         grounded (ghost finding). The SHA-256 is stored in
         ``finding.metadata["source_sha256"]``.
+
+        Resolution order: ``target_path / finding.file``, then
+        ``Path(finding.file)`` relative to CWD, then a recursive basename
+        search under ``target_path`` (project layouts like Cairo's
+        ``src/`` nesting mean the finding may only carry the bare filename).
         """
         candidate = target_path / str(finding.file)
-        path = candidate if candidate.is_file() else Path(str(finding.file))
-        if not path.is_file():
+        path: Path | None = (candidate if candidate.is_file()
+                             else Path(str(finding.file)))
+        if not (path and path.is_file()):
+            path = self._ground_recursive(target_path, str(finding.file))
+        if path is None or not path.is_file():
             return None
         finding.metadata["source_sha256"] = file_sha256(path)
         return path
+
+    @staticmethod
+    def _ground_recursive(target_path: Path, file_ref: str) -> Path | None:
+        """Search ``target_path`` recursively for the basename of ``file_ref``.
+
+        Returns the single match, or None when there are zero or multiple
+        matches (ambiguity is not resolved by guessing).
+        """
+        name = Path(file_ref).name
+        if not name:
+            return None
+        try:
+            matches = [p for p in target_path.rglob(name) if p.is_file()]
+        except OSError:
+            return None
+        if len(matches) == 1:
+            return matches[0]
+        return None
 
     @staticmethod
     def _impact_of(output: str) -> tuple[int, int] | None:
