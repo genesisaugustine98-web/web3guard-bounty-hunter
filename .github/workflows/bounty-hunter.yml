@@ -285,8 +285,14 @@ jobs:
 
       - name: Run benchmark with regression floor (SmartBugs corpus)
         run: |
+          # The SmartBugs corpus labels exploitable vulnerability classes only.
+          # These six detectors emit legitimate SWC hygiene findings
+          # (SWC-100/103/111/119/132/136) that zero corpus units label, so
+          # they are definitionally out-of-taxonomy here and excluded from
+          # scoring. They remain active in real scans.
           python -m web3guard.cli bench \
             --corpus bench/smartbugs/corpus.json \
+            --exclude-categories default-visibility,floating-pragma,deprecated,shadowing,private-data,strict-balance-equality \
             --fail-below 0.98,0.8 \
             --max-fp 2 \
             --json bench/smartbugs/reports/current.json

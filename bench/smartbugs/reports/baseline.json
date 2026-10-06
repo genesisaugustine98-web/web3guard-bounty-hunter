@@ -1,31 +1,31 @@
 {
   "corpus": "smartbugs",
-  "units": 10,
-  "clean_units": 0,
-  "findings": 13,
+  "units": 47,
+  "clean_units": 2,
+  "findings": 62,
   "overall": {
     "precision": 1.0,
-    "recall": 0.8333,
-    "f1": 0.9091,
+    "recall": 1.0,
+    "f1": 1.0,
     "weighted_precision": 1.0,
-    "weighted_recall": 0.6333,
-    "weighted_f1": 0.7755,
-    "tp": 13,
+    "weighted_recall": 0.7425,
+    "weighted_f1": 0.8522,
+    "tp": 62,
     "fp": 0,
-    "fn": 2,
-    "tp_categories": 10
+    "fn": 0,
+    "tp_categories": 53
   },
   "per_language": {
     "solidity": {
       "precision": 1.0,
-      "recall": 0.8333,
-      "f1": 0.9091,
+      "recall": 1.0,
+      "f1": 1.0,
       "weighted_precision": 1.0,
-      "weighted_recall": 0.6333,
-      "weighted_f1": 0.7755,
-      "tp": 13,
+      "weighted_recall": 0.7425,
+      "weighted_f1": 0.8522,
+      "tp": 62,
       "fp": 0,
-      "fn": 2
+      "fn": 0
     }
   },
   "per_category": {
@@ -36,29 +36,29 @@
       "weighted_precision": 1.0,
       "weighted_recall": 0.85,
       "weighted_f1": 0.9189,
-      "tp": 2,
+      "tp": 6,
       "fp": 0,
       "fn": 0
     },
     "arithmetic": {
-      "precision": 0.0,
-      "recall": 0.0,
-      "f1": 0.0,
-      "weighted_precision": 0.0,
-      "weighted_recall": 0.0,
-      "weighted_f1": 0.0,
-      "tp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "weighted_precision": 1.0,
+      "weighted_recall": 0.7,
+      "weighted_f1": 0.8235,
+      "tp": 12,
       "fp": 0,
-      "fn": 1
+      "fn": 0
     },
     "denial-of-service": {
       "precision": 1.0,
       "recall": 1.0,
       "f1": 1.0,
       "weighted_precision": 1.0,
-      "weighted_recall": 0.65,
-      "weighted_f1": 0.7879,
-      "tp": 4,
+      "weighted_recall": 0.6556,
+      "weighted_f1": 0.7919,
+      "tp": 18,
       "fp": 0,
       "fn": 0
     },
@@ -69,7 +69,7 @@
       "weighted_precision": 1.0,
       "weighted_recall": 0.7,
       "weighted_f1": 0.8235,
-      "tp": 4,
+      "tp": 14,
       "fp": 0,
       "fn": 0
     },
@@ -80,7 +80,7 @@
       "weighted_precision": 1.0,
       "weighted_recall": 0.85,
       "weighted_f1": 0.9189,
-      "tp": 9,
+      "tp": 31,
       "fp": 0,
       "fn": 0
     },
@@ -91,43 +91,34 @@
       "weighted_precision": 1.0,
       "weighted_recall": 0.8,
       "weighted_f1": 0.8889,
-      "tp": 2,
+      "tp": 20,
       "fp": 0,
       "fn": 0
     },
     "short-address": {
-      "precision": 0.0,
-      "recall": 0.0,
-      "f1": 0.0,
-      "weighted_precision": 0.0,
-      "weighted_recall": 0.0,
-      "weighted_f1": 0.0,
-      "tp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "weighted_precision": 1.0,
+      "weighted_recall": 0.6,
+      "weighted_f1": 0.75,
+      "tp": 4,
       "fp": 0,
-      "fn": 1
+      "fn": 0
     },
     "unchecked-external-call": {
       "precision": 1.0,
       "recall": 1.0,
       "f1": 1.0,
       "weighted_precision": 1.0,
-      "weighted_recall": 0.7,
-      "weighted_f1": 0.8235,
-      "tp": 2,
+      "weighted_recall": 0.62,
+      "weighted_f1": 0.7654,
+      "tp": 10,
       "fp": 0,
       "fn": 0
     }
   },
-  "missed_categories": [
-    {
-      "file": "samples/BecToken.sol",
-      "category": "arithmetic"
-    },
-    {
-      "file": "samples/MyToken.sol",
-      "category": "short-address"
-    }
-  ],
+  "missed_categories": [],
   "false_positives": [],
   "clean_hits": []
 }
