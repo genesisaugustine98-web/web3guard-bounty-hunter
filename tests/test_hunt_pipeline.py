@@ -314,6 +314,13 @@ def test_keyless_degraded_run_produces_useful_report(
         vuln_vault_dir: Path, tmp_path: Path) -> None:
     """No keys: static + template invariants + machine verification still
     run, the report says loudly what was skipped and why."""
+    from web3guard.invariants.fuzz import discover_forge
+    if discover_forge() is None:
+        pytest.fail(
+            "This test requires Foundry (forge) for the invariant stage. "
+            "Install it: curl -L https://foundry.paradigm.xyz | bash, "
+            "or set WEB3GUARD_FORGE_BIN. CI installs it in the Test job."
+        )
     out = tmp_path / "reports"
     result = run_hunt(
         str(vuln_vault_dir), _keyless_config(), workdir=tmp_path,
