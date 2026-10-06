@@ -189,7 +189,12 @@ jobs:
 
   live-exploit-e2e:
     name: Live exploit E2E (real model)
-    if: github.event_name == 'workflow_dispatch' && inputs.run_live_e2e
+    # Fix-campaign #9: the real-model path must be exercised regularly, not
+    # only on opt-in manual dispatch. Runs on the weekly schedule as a
+    # non-blocking informational job (continue-on-error), and blocking on
+    # explicit manual dispatch (the operator asked for it).
+    if: (github.event_name == 'workflow_dispatch' && inputs.run_live_e2e) || github.event_name == 'schedule'
+    continue-on-error: ${{ github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
