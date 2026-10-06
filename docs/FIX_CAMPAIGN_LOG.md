@@ -157,3 +157,58 @@ Status: DONE
 - Landed in this campaign: #1, #2, #3, #7, #8, #9, #10 (7 fixes)
 - Already implemented before campaign (verified, tests pass): #4, #5, #6
 - Infeasible/none: zero — all 10 resolved.
+
+---
+
+## Fix #11 — dependency-aware harness generation (2026-10-06, post-campaign)
+
+**Problem (from RESCAN_V36_REPORT.md §6):** the ghost+attacker fuzz harness
+copied only the single target `.sol` file into the Forge project, so every
+real-world contract importing OpenZeppelin or sibling files failed to
+compile. The dynamic attack capability was holstered on real targets.
+
+**What was built** (commit `a8d3eff`):
+- New `web3guard/invariants/deps.py`:
+  - comment-aware Solidity import parsing (all 4 import forms)
+  - `remappings.txt` parsing incl. Foundry context prefixes
+    (`lib/chainlink-ace/:@openzeppelin/...=...`); `foundry.toml`
+    `[remappings]` parsing (best-effort)
+  - project-root discovery (walk up for remappings.txt/foundry.toml)
+  - offline resolution order: relative → remapping (longest-prefix,
+    context-aware) → node_modules/ → lib/ heuristic; nothing fetched
+    from the network, ever
+  - BFS transitive import closure with cycle protection
+  - placement rule: relative imports anchor to the *importer's*
+    in-harness path (so remapped files' internal relative imports stay
+    consistent); remapped imports go to `lib/__web3guard_dep{N}__/`
+    with generated `remappings.txt` lines
+  - unresolvable imports → explicit warning naming the import (never
+    a silently broken harness)
+- Hook in `run_fuzz_campaign` (`web3guard/invariants/fuzz.py`): bundles
+  the closure when `contract_path` is a real `.sol` file; isolated
+  fixtures (empty/missing `contract_path`) return unchanged.
+- 10 regression tests in `tests/test_harness_deps.py`, incl. a real
+  `forge build` of a bundled fixture project.
+
+**Validation on real bounty contracts** (`bounty_hunts/ripio/forge_proj`,
+a real Foundry project with on-disk OZ libs):
+- `src/BridgeDeposit.sol` (5 OZ imports): 14 dep files bundled,
+  `forge build` OK, attack-harness campaign EXECUTES
+  (AttackHandler + DonationAttacker actions ran, suite passed).
+- `src/LimitedMinter.sol` (3 OZ imports): 10 dep files bundled,
+  builds, campaign executes.
+- Previously both failed to compile ("file not found" on every import).
+
+**Tests:** 10/10 new tests pass; `tests/test_invariants.py` 25 passed,
+1 pre-existing env failure (sandbox forge path, fails on pristine tree
+too); `tests/test_simulator_attack.py` all pass. ruff + mypy clean.
+
+**Known adjacent gaps (out of scope for #11):**
+- The harness renderer assumes a zero-arg constructor
+  (`new Contract()`); real contracts with constructor args need the
+  deploy line patched (did so in test scaffolding only).
+- Targets whose dependency libs are absent from disk (e.g.
+  enzyme-onyx `lib/` submodules not cloned) correctly degrade to
+  explicit per-import warnings.
+- The `nobody`-sandbox solc-download failure in this root container is
+  environmental (unchanged); validation ran forge directly.
