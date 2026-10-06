@@ -442,6 +442,40 @@ See [SECURITY.md](SECURITY.md). The short version:
 
 ## Changelog
 
+### v3.6.0 — machine-verified confirmation gate, SmartBugs taxonomy scoping, multi-seed fuzzing
+
+- **Confirmation gate**: findings earn CONFIRMED EXPLOIT only from
+  reproducible machine evidence — source grounding (now with recursive
+  basename search), impact markers, replay, negative control, and
+  TOCTOU protection. No phantom confirmations.
+- **SmartBugs benchmark scoping**: new `bench --exclude-categories`
+  flag; the SmartBugs CI gate excludes code-hygiene SWC classes the
+  corpus never labels (precision 0.38 → 1.00 on the vulnerability
+  taxonomy; detectors remain active in real scans).
+- **Multi-seed fuzzing**: `invariants.seed_count` runs N deterministically
+  derived seeds per campaign and aggregates findings (deduplicated by
+  fingerprint, `seeds_found` provenance) — fixes single-seed dilution on
+  very large contracts.
+- **Ghost + attack harness unified**: ghost-state (temporal) campaigns now
+  deploy the Phase-1 attacker contracts inside ghost mode; multi-contract
+  files target only the deploy contract; `address payable` preserved.
+- **CI toolchain contract**: the Test job installs Foundry so the
+  hunt-pipeline invariant tests run as designed.
+
+### v3.5.0 — red-team layer, durable storage, adaptive planning
+
+- **AI red-team layer** (`web3guard/ai/redteam.py`): attacker-framed
+  hypothesis generation with per-provider model routing and failover.
+- **Durable storage**: findings, costs, LLM cache, and run state persist
+  in local SQLite (optional remote replication).
+- **Adaptive planning**: incremental target graph, cost budgets, and
+  strategy feedback across campaigns.
+- **Attack simulator**: ETH value flow, generated attacker contracts
+  (reentrancy, approval-draining, donation), multi-step heists, adaptive
+  strategies — the machine actually attacks.
+- **History engine**: OPEN → BAND-AID → FIXED → REGRESSED tracking with
+  rename-resistant matching and a re-dive queue.
+
 ### Unreleased
 
 - **New static category `uncontrolled-payout`** (SWC-105 family,
