@@ -69,4 +69,91 @@ Status: ALREADY DONE (prior commit 4a911c7)
   tests. No code change needed; recorded in campaign commit.
 
 ## Fix #5 — Multi-contract ghost harness
-Status: IN PROGRESS
+Status: ALREADY DONE (prior commit 34a5dfe)
+- Commit 34a5dfe "fix(ghost): per-contract targeting + INCONCLUSIVE on
+  compile failure" already addressed this: only the deploy-target
+  contract's own functions are wrapped; auxiliary contracts compile as
+  dependencies; render failures are explicit INCONCLUSIVE, never silent.
+- Verified: 3 multi-contract targeting tests pass; in current branch.
+
+## Fix #6 — address payable rendering
+Status: ALREADY DONE (prior commit f9d7f84)
+- Commit f9d7f84 "fix(ghost): preserve payable in address payable
+  parameters" already fixed this. 4 payable-related tests pass.
+
+## Fix #7 — Seed dilution
+Status: DONE (commit 8ae5f7d)
+- Implemented seeded multi-run exploration: FuzzBounds.seed_count
+  (default 1, config invariants.seed_count); derive_seeds() uses prime
+  stride 7919 for deterministic, well-spread seeds; run_fuzz_campaign()
+  loops over seeds and aggregates findings deduplicated by fingerprint
+  (metadata.seeds_found tracks provenance); CampaignResult.seeds_run.
+- Resource-exhausted/skipped seed aborts the rest (same wall).
+- Tests: 2 new (derivation determinism, config parsing); 71 invariant
+  tests pass, 3 pre-existing e2e failures (sandbox forge, unrelated).
+  ruff + mypy clean.
+
+## Fix #8 — Version/release hygiene
+Status: DONE (commit 5798da0)
+- Bumped __version__, pyproject.toml, and provider User-Agent from 3.4.0
+  to 3.6.0 (the feature set the code actually ships: v3.5 red-team/
+  storage/planning/attack-simulator/history + v3.6 confirmation gate).
+- Added missing v3.5.0 and v3.6.0 README changelog entries.
+- Version tests pass.
+
+## Fix #9 — Real-model E2E
+Status: DONE (commit 0579cca)
+- live-exploit-e2e job now runs on the weekly schedule (Sunday 06:00 UTC)
+  as a non-blocking informational job (continue-on-error on schedule;
+  still blocking on explicit manual dispatch).
+- Uses existing provider secrets; no keys committed. Test file collects.
+
+## Fix #10 — Real scan targets
+Status: DONE (commit 3cf52a7)
+- The scheduled scan defaulted to a no-op. Added DEFAULT_TARGETS in the
+  workflow: bench/smartbugs/samples (deliberately vulnerable) and
+  test_contracts/clean (should stay silent). Repo variable or manual
+  input still overrides.
+- Verified: scan runs on local paths; 0 findings on clean fixtures.
+
+---
+
+## Final verification (all 10 fixes)
+Status: DONE
+
+### Full test suite
+- **906 passed**, 4 failed, 16 skipped (85s)
+- The 4 failures are pre-existing environmental issues, verified via
+  `git stash` on the pristine tree:
+  - test_keyless_degraded_run_produces_useful_report: needs working forge
+    in the sandbox; this container runs as root so the privilege drop to
+    `nobody` cannot traverse the filesystem. CI (non-root + Fix #2's
+    Foundry install) will run it.
+  - test_e2e_vulnerable_vault_violation_is_caught: same sandbox forge issue
+  - test_e2e_vyper_buggy_vault_violation_is_caught: needs vyper toolchain
+  - test_e2e_cairo_buggy_vault_violation_is_caught: needs scarb toolchain
+
+### Lint & types
+- ruff: All checks passed (web3guard/ + tests/)
+- mypy: Success, no issues in 127 source files
+
+### SmartBugs external benchmark
+- precision **1.000** (was 0.380), recall **1.000**, F1 1.000
+- tp=62, fp=0 (was 101), fn=0
+- Both CI gates PASS (precision>=0.98, recall>=0.80, fp<=2)
+
+### Commits on fix-campaign-external-validation (local only, NEVER pushed)
+- 38d3998 fix(smartbugs): scope SmartBugs bench to vulnerability taxonomy
+- 541d374 fix(ci): install Foundry in Test job; explicit forge precondition
+- e775d9d fix(confirm): recursive basename search in evidence grounder
+- a59309e docs(campaign): record Fix #4 already implemented (4a911c7)
+- 8ae5f7d fix(fuzz): multi-seed campaign exploration
+- 5798da0 chore(version): synchronize to 3.6.0
+- 0579cca fix(ci): run live-model exploit E2E on weekly schedule
+- 3cf52a7 fix(ci): default scheduled scan targets to repo's own contracts
+- (+ this log)
+
+### Fixes landed vs already-done
+- Landed in this campaign: #1, #2, #3, #7, #8, #9, #10 (7 fixes)
+- Already implemented before campaign (verified, tests pass): #4, #5, #6
+- Infeasible/none: zero — all 10 resolved.
