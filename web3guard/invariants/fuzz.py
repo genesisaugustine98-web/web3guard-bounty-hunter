@@ -29,6 +29,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from web3guard.invariants.deps import bundle_dependencies
 from web3guard.invariants.harness import write_project
 from web3guard.invariants.models import CampaignResult, FuzzBounds, Invariant
 from web3guard.scanner import Finding
@@ -64,6 +65,7 @@ def derive_seeds(base_seed: int, count: int) -> list[int]:
     """
     count = max(1, int(count))
     return [int(base_seed) + i * _SEED_STRIDE for i in range(count)]
+
 
 # ---------------------------------------------------------------------------
 # forge output parsing
@@ -187,8 +189,7 @@ def classify_process_kill(
         haystack = f"{stderr or ''}\n{stdout or ''}".lower()
         if any(marker in haystack for marker in _OOM_MARKERS):
             detail = (
-                "process output reports memory exhaustion "
-                f"(exit code {rc}) — likely OOM-killed"
+                f"process output reports memory exhaustion (exit code {rc}) — likely OOM-killed"
             )
     return detail
 
@@ -325,9 +326,7 @@ def _extract_passthrough_names(test_source: str) -> set[str]:
     return set(_PASSTHROUGH_RE.findall(test_source or ""))
 
 
-def _annotate_step_sender(
-    step: str, pool: list[str], passthroughs: set[str]
-) -> str:
+def _annotate_step_sender(step: str, pool: list[str], passthroughs: set[str]) -> str:
     """Append the resolved on-chain sender to a PoC step, when knowable.
 
     A passthrough step like ``calldata=mint(address,uint256,uint256)
@@ -357,9 +356,7 @@ def _annotate_step_sender(
     return f"{step} [target saw sender {resolved}]"
 
 
-def _recover_truncated_sequences(
-    output: str, wanted: set[str]
-) -> dict[str, list[str]]:
+def _recover_truncated_sequences(output: str, wanted: set[str]) -> dict[str, list[str]]:
     """Recover call sequences whose ``[FAIL]`` header was truncated away.
 
     When the sandbox truncates campaign output mid-table, the ``[FAIL:
@@ -496,8 +493,7 @@ def parse_forge_output(
             campaign.compile_ok = True
             campaign.clean = True
             LOGGER.info(
-                "forge exited 0 for %s; suite line truncated away, "
-                "marking clean",
+                "forge exited 0 for %s; suite line truncated away, marking clean",
                 target_label or contract_name,
             )
         else:
@@ -795,7 +791,18 @@ def run_fuzz_campaign(
     aggregates findings across all seeds, deduplicated by fingerprint.
     Each seed run is reproducible; the finding metadata records which
     seeds produced it (``seeds_found``).
+
+    Fix #11 (dependency-aware harness): before writing, the target's
+    transitive import closure (OpenZeppelin, sibling files, ...) is
+    bundled into the project so real-world contracts compile. Isolated
+    fixtures (no contract_path) are untouched.
     """
+    files = bundle_dependencies(
+        files,
+        contract_path,
+        notes,
+        target_harness_path=f"src/{contract_name}.sol",
+    )
     write_project(project_dir, files)
     _prepare_project_dir(project_dir)
 
@@ -823,10 +830,17 @@ def run_fuzz_campaign(
     campaigns: list[CampaignResult] = []
     for seed in seeds:
         campaign, findings = _run_one_seed_campaign(
-            project_dir, files, invariants, bounds, config,
-            forge=forge, seed=seed,
-            contract_path=contract_path, contract_name=contract_name,
-            target_label=target_label, notes=notes,
+            project_dir,
+            files,
+            invariants,
+            bounds,
+            config,
+            forge=forge,
+            seed=seed,
+            contract_path=contract_path,
+            contract_name=contract_name,
+            target_label=target_label,
+            notes=notes,
         )
         campaigns.append(campaign)
         # Aggregate: dedupe by fingerprint, track which seeds found it.
@@ -835,8 +849,7 @@ def run_fuzz_campaign(
             meta = f.metadata if isinstance(f.metadata, dict) else {}
             if fp in seen_fps:
                 for prev in all_findings:
-                    pfp = (prev.fingerprint
-                           or f"{prev.category}:{prev.function}:{prev.file}")
+                    pfp = prev.fingerprint or f"{prev.category}:{prev.function}:{prev.file}"
                     if pfp == fp:
                         pm = prev.metadata if isinstance(prev.metadata, dict) else {}
                         sf = pm.get("seeds_found", [])
@@ -863,7 +876,9 @@ def run_fuzz_campaign(
     if len(campaigns) > 1:
         LOGGER.info(
             "multi-seed campaign for %s: %d seeds, %d unique finding(s)",
-            target_label or contract_name, len(campaigns), len(all_findings),
+            target_label or contract_name,
+            len(campaigns),
+            len(all_findings),
         )
     return combined, all_findings
 
@@ -912,9 +927,7 @@ def _run_one_seed_campaign(
     # policy (resource limits, env filtering, privilege drop) is
     # unchanged. The JSON failure events are the primary signal and
     # survive any truncation; this keeps their call sequences readable.
-    campaign_policy = SandboxPolicy(
-        max_revert_reason_bytes=_CAMPAIGN_OUTPUT_CAP_BYTES
-    )
+    campaign_policy = SandboxPolicy(max_revert_reason_bytes=_CAMPAIGN_OUTPUT_CAP_BYTES)
     try:
         rc, stdout, stderr = run_sandboxed(
             cmd,
