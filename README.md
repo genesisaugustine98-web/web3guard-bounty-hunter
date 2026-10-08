@@ -82,6 +82,10 @@ No API keys required — the static engine, fuzzer, and verifier run fully offli
 - `bench/` — SmartBugs corpus + in-repo fixtures
 - `docs/` — architecture notes, campaign logs, demo script
 
+## Built by
+
+**Genesis Koodanga Augustine** — designed, built, and hardened in Zing, Nigeria.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
